@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "objects": {
+    "TalkHistory": {
+      "type": "TemplateMatch",
+      "template": "talk_history.png",
+      "threshold": 0.75,
+      "reference": {
+        "size": [
+          3040,
+          1904
+        ],
+        "bbox": "rect(375, 72, 55, 47)"
+      },
+      "search": {
+        "expandPercent": [0, 0.02, 0.12, 0.02]
+      }
+    },
+    "ChatIcon": {
+      "type": "TemplateMatch",
+      "template": "chat_icon.png",
+      "reference": {
+        "size": [
+          3040,
+          1904
+        ],
+        "bbox": "rect(1930, 1342, 52, 30)"
+      },
+      "search": {
+        "box": "rect(1787, 126, 1098, 1470)",
+        "expandPercent": [0.10, 0, 0, 0]
+      }
+    }
+  }
+}

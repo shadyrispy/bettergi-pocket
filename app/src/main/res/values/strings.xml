@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">更好的原神</string>
+    <string name="accessibility_service_label">🎮 更好的原神</string>
+    <string name="accessibility_service_description">用于自动对话模拟点击，并判断原神是否在前台。开启后才会向游戏画面注入点击。清理后台后若显示服务异常，请关闭后再重新打开本服务。</string>
+</resources>

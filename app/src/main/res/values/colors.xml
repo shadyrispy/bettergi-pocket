@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <color name="overlay_cream">#F4E6C8</color>
+    <color name="overlay_gold">#C9A36A</color>
+    <color name="overlay_panel">#F21C1612</color>
+    <color name="overlay_panel_stroke">#66C9A36A</color>
+    <color name="overlay_text">#FFF7F0E4</color>
+    <color name="overlay_text_muted">#B3F7F0E4</color>
+    <color name="overlay_row">#26FFFFFF</color>
+    <color name="overlay_row_divider">#1AFFFFFF</color>
+    <color name="overlay_status_on">#FF5CBA6A</color>
+    <color name="overlay_status_off">#FFB8A48A</color>
+    <color name="overlay_status_warn">#FFE8A45A</color>
+    <color name="overlay_log_green">#FF7CFF9A</color>
+    <color name="overlay_bilibili">#FFFB7299</color>
+</resources>
