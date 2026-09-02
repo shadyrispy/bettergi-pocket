@@ -40,6 +40,7 @@ class ScreenCaptureController(
     private var hasCachedFrame = false
     private var cachedWidth = 0
     private var cachedHeight = 0
+    private var cachedTimestampNs = 0L
     private var lastFrameElapsedMs = 0L
     private var lastRecoverElapsedMs = 0L
     private var displayCreatedElapsedMs = 0L
@@ -122,12 +123,14 @@ class ScreenCaptureController(
                 MatOps.copyRgbaImage(image, packed)
                 cachedWidth = width
                 cachedHeight = height
+                cachedTimestampNs = image.timestamp
                 hasCachedFrame = true
                 lastFrameElapsedMs = SystemClock.elapsedRealtime()
                 return CapturedBgrFrame(
                     width = width,
                     height = height,
                     bgr = MatOps.rgbaToBgr(width, height, packed),
+                    timestampNs = image.timestamp,
                 )
             } finally {
                 image.close()
@@ -143,6 +146,7 @@ class ScreenCaptureController(
             width = cachedWidth,
             height = cachedHeight,
             bgr = MatOps.rgbaToBgr(cachedWidth, cachedHeight, rgbaScratch),
+            timestampNs = cachedTimestampNs,
         )
     }
 
@@ -272,6 +276,7 @@ class ScreenCaptureController(
         hasCachedFrame = false
         cachedWidth = 0
         cachedHeight = 0
+        cachedTimestampNs = 0L
         lastFrameElapsedMs = 0L
         lastRecoverElapsedMs = 0L
         displayCreatedElapsedMs = 0L

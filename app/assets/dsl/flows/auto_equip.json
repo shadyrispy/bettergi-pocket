@@ -1,0 +1,46 @@
+{
+  "flow": "auto_equip",
+  "version": "1.0.0",
+  "profile": "android_3200x1440",
+  "description": "流程五：角色自动配装。遍历=click-to-snap 零滑动；面板=manage profile（与背包面板不同构）",
+  "vars": { "plan": "list<{char, slot, target:GoodArtifact}>" },
+  "steps": [
+    { "do": "enterScreen", "target": "artifact_manage",
+      "chain": ["game_home→character(2925,36)", "圣遗物菜单→tihuan(2700,1291)"],
+      "anchor": { "kind": "template", "ref": "5 部位 tab ✅零偏移" },
+      "preReset": { "chain": ["sortBtn(828,1320)", "重置[311,1310]", "确认[766,1309]"],
+        "note": "D7 定稿：复位=enterScreen 到达前参数（方案 B）" } },
+    { "do": "foreach", "over": "$plan", "as": "task",
+      "steps": [
+        { "do": "enterScreen", "target": "char_interface.artifactTab",
+          "chain": ["rosterFind(task.char)（田→弹窗遍历，复用 character_scan）", "圣遗物菜单(453,452)", "tihuan(2700,1291)"] },
+        { "do": "setFilter", "entry": "PILL",
+          "chain": ["pill 直达：整条[171,1280,758,1360]或非开关区[325,1281,757,1359]"],
+          "stateGuard": "三态模板判态：①整条直达 / ②③开关[183,1281,318,1359]仅切态",
+          "selectByOcr": { "grid": "set_filter_popup", "dict": "mappings.artifactSets", "match": "exact" } },
+        { "do": "pagedGrid", "grid": "select_3col", "mode": "snap",
+          "visit": [
+            { "do": "click", "fast": { "at": "$cell.center" }, "snap": "peek 点击触发上弹(对齐 y≈917)" },
+            { "do": "parsePanel", "panel": "artifact_manage",
+              "fields": ["name", "slot", "mainName", "mainValue", "level", "subStats", "setName"],
+              "note": "管理面板 set_name 可读可采集（区别于背包面板的遮挡不可读）；动态Y=598+56×nSubs（5★恒4词条→固定y822，4★初始2最高3→y710/y766）；异常时兜底由 name 反推",
+              "icons": { "lockChip": "红掩码>150px=已锁", "starChip": "金掩码≥100px=已收藏（灰星基线0-7px）", "starBand": "y425-510逐格→星数", "evidence": "verify/_icon_scan_5723_5724_5725.json" },
+              "dict": { "setName": "mappings.artifactSets" } },
+            { "do": "stopWhen", "expr": "panelMatch(target, tol=0.1)",
+              "matchOrder": "level→main→sub1-4→set_name" }
+          ],
+          "end": "peek 消失指纹 + 补点遮挡槽" },
+        { "do": "dualStateButton", "ref": "$screens.artifact_manage.leftBtn",
+          "states": { "替换": "click→dialog(equipConfirm)", "卸下": "click→preReset 网格复位" },
+          "note": "卸下无确认弹窗；卸下后网格不回第一行→复位链" },
+        { "do": "dialog", "ref": "$dialogs.equipConfirm",
+          "onShow": "click confirm(1915,1082)",
+          "trigger": "仅跨角色替换" },
+        { "do": "dualStateButton", "ref": "$screens.artifact_manage.rightBtn", "readonly": true,
+          "states": { "强化": "未满级", "重塑": "+20" } }
+      ] },
+    { "do": "exit", "via": "return[2913,41]", "per": "char" }
+  ],
+  "resultStates": 8,
+  "pending": ["set_filter swipe settle 真机"]
+}

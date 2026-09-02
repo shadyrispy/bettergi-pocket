@@ -56,6 +56,7 @@ dependencies {
     implementation(libs.androidx.constraintlayout)
     implementation(libs.opencv)
     implementation(libs.mlkit.text.recognition.chinese)
+    implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
     val desktopOpenCv = file("libs/opencv-4.9.0-0.jar")
     if (desktopOpenCv.exists()) {

@@ -3,7 +3,7 @@ package com.bettergi.pocket.trigger
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
-import com.bettergi.pocket.capture.ScreenCaptureController
+import com.bettergi.pocket.capture.FrameSource
 import com.bettergi.pocket.input.ActionEmitter
 import com.bettergi.pocket.input.AutomationAction
 import com.bettergi.pocket.input.AutomationController
@@ -12,7 +12,7 @@ import com.bettergi.pocket.settings.TriggerSettingsRepository
 
 class TriggerEngine(
     private val settingsRepository: TriggerSettingsRepository,
-    private val captureController: ScreenCaptureController,
+    private val frameSource: FrameSource,
     private val features: List<TriggerFeature>,
     private val actionController: AutomationController,
 ) {
@@ -48,7 +48,7 @@ class TriggerEngine(
                 return
             }
 
-            if (!captureController.isRunning()) {
+            if (!frameSource.isRunning()) {
                 handler.postDelayed(this, WAIT_CAPTURE_MS)
                 return
             }
@@ -57,7 +57,7 @@ class TriggerEngine(
             val needFrame = enabled.any { it.needsFrame(settings) }
 
             if (enabled.isEmpty()) {
-                captureController.discardLatestImages()
+                frameSource.discardLatestImages()
                 handler.postDelayed(this, TICK_INTERVAL_MS)
                 return
             }
@@ -65,14 +65,14 @@ class TriggerEngine(
             try {
                 val emitter = BufferedActionEmitter()
                 if (needFrame) {
-                    val captured = captureController.acquireLatestBgr()
+                    val captured = frameSource.acquireLatestBgr()
                     if (captured != null) {
                         CaptureContent.fromBgr(captured.bgr, captured.width, captured.height).use { content ->
                             val tick = FeatureTick(captured.width, captured.height, content)
                             enabled.forEach { it.onTick(tick, settings, emitter) }
                         }
                     } else {
-                        val size = captureController.capturedSize()
+                        val size = frameSource.capturedSize()
                         if (size != null) {
                             val tick = FeatureTick(size.first, size.second, content = null)
                             enabled.filterNot { it.needsFrame(settings) }
@@ -80,8 +80,8 @@ class TriggerEngine(
                         }
                     }
                 } else {
-                    captureController.discardLatestImages()
-                    val size = captureController.capturedSize()
+                    frameSource.discardLatestImages()
+                    val size = frameSource.capturedSize()
                     if (size != null) {
                         val tick = FeatureTick(size.first, size.second, content = null)
                         enabled.forEach { it.onTick(tick, settings, emitter) }

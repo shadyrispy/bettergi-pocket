@@ -27,6 +27,7 @@ import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.PathInterpolator
+import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.ScrollView
@@ -101,6 +102,8 @@ class OverlayWindowController(
     private var switchQuickSkip: SwitchCompat? = null
     private var switchAutoPick: SwitchCompat? = null
     private var switchAutoLaunch: SwitchCompat? = null
+    private var switchScan: SwitchCompat? = null
+    private var scanProgress: TextView? = null
     private var launchHint: TextView? = null
     private var launchSubtitle: TextView? = null
     private var logToggleButton: ImageButton? = null
@@ -149,6 +152,7 @@ class OverlayWindowController(
             switchQuickSkip?.isChecked = settings.quickSkipDialogueEnabled
             switchAutoPick?.isChecked = settings.autoPickEnabled
             switchAutoLaunch?.isChecked = settings.autoLaunchGenshinEnabled
+            switchScan?.isChecked = settings.scanEnabled
             applyFeatureEnabled(settings)
             refreshLaunchHint()
             refreshStatus()
@@ -171,6 +175,7 @@ class OverlayWindowController(
         val quickSkipSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_quick_skip)
         val autoPickSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_auto_pick)
         val autoLaunchSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_auto_launch)
+        val scanSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_scan)
         val logToggle = root.findViewById<ImageButton>(R.id.overlay_log_toggle)
 
         bubbleView = bubble
@@ -189,6 +194,8 @@ class OverlayWindowController(
         switchQuickSkip = quickSkipSwitch
         switchAutoPick = autoPickSwitch
         switchAutoLaunch = autoLaunchSwitch
+        switchScan = scanSwitch
+        scanProgress = root.findViewById(R.id.overlay_scan_progress)
         launchHint = root.findViewById(R.id.overlay_auto_launch_hint)
         launchSubtitle = root.findViewById(R.id.overlay_launch_subtitle)
         logToggleButton = logToggle
@@ -205,6 +212,28 @@ class OverlayWindowController(
         autoSkipChevron = root.findViewById(R.id.overlay_auto_skip_chevron)
         launchExtras = root.findViewById(R.id.overlay_launch_extras)
         launchChevron = root.findViewById(R.id.overlay_launch_chevron)
+
+        // 滑动测试参数区（内嵌面板，执行时缩球防遮挡）
+        swipeExtras = root.findViewById(R.id.overlay_swipe_extras)
+        swipeStartYEdit = root.findViewById<EditText>(R.id.overlay_swipe_start_y).apply {
+            setText(swipePrefs.getInt(KEY_SWIPE_START_Y, 1150).toString())
+            // 聚焦时临时可聚焦弹键盘；失焦恢复不抢游戏焦点
+            setOnFocusChangeListener { _, has -> setPanelFocusable(has) }
+        }
+        swipeDistEdit = root.findViewById<EditText>(R.id.overlay_swipe_dist).apply {
+            setText(swipePrefs.getInt(KEY_SWIPE_DIST, 876).toString())
+            setOnFocusChangeListener { _, has -> setPanelFocusable(has) }
+        }
+        root.findViewById<View>(R.id.overlay_swipe_start).setOnClickListener { startSwipeTest() }
+        root.findViewById<View>(R.id.overlay_swipe_probe).setOnClickListener {
+            // 桥模式：主进程发 METHOD_PROBE，:a11y 进程内构建并挂载视图
+            val shown = InputAccessibilityService.toggleProbe(context)
+            Toast.makeText(
+                context,
+                if (shown) "探针已挂——原神上方可见即 P2 假设成立" else "探针已卸",
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
 
         val layoutParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -244,6 +273,7 @@ class OverlayWindowController(
             button.setOnClickListener { openBilibiliSpace() }
         }
         root.findViewById<View>(R.id.overlay_exit).setOnClickListener { exitAssistant() }
+        root.findViewById<View>(R.id.overlay_row_swipe_test).setOnClickListener { bindSwipeTestToggle() }
 
         enabledSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (updatingUi) return@setOnCheckedChangeListener
@@ -270,6 +300,17 @@ class OverlayWindowController(
         autoLaunchSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (updatingUi) return@setOnCheckedChangeListener
             settingsRepository.setAutoLaunchGenshinEnabled(isChecked)
+        }
+        scanSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (updatingUi) return@setOnCheckedChangeListener
+            settingsRepository.setScanEnabled(isChecked)
+            if (isChecked) {
+                InputAccessibilityService.ensureEnabled(themedContext, "请开启无障碍权限，才能模拟扫描点击")
+                if (!settingsRepository.get().screenShareEnabled) {
+                    // 扫描硬前提：投影（P0 设计，API 29+ 门控由入口保证）
+                    settingsRepository.setScreenShareEnabled(true)
+                }
+            }
         }
         rootView = root
         params = layoutParams
@@ -311,6 +352,62 @@ class OverlayWindowController(
     fun restoreClickPassthrough() {
         applyTouchPassthrough(params, rootView, passthrough = false)
         applyTouchPassthrough(logHandleParams, logHandleView, passthrough = false)
+    }
+
+    /** 扫描进度副文本（主线程调用；P1-c 悬浮窗入口）。 */
+    fun updateScanProgress(text: String) {
+        scanProgress?.text = text
+    }
+
+    // ---- 滑动测试（真机调翻页参数）：面板内嵌参数区，执行时缩球防遮挡 ----
+
+    private var swipeExtras: View? = null
+    private var swipeStartYEdit: EditText? = null
+    private var swipeDistEdit: EditText? = null
+    private val swipePrefs by lazy {
+        context.getSharedPreferences("swipe_test", Context.MODE_PRIVATE)
+    }
+
+    private fun setPanelFocusable(focusable: Boolean) {
+        val lp = params ?: return
+        val root = rootView ?: return
+        val has = lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE != 0
+        if (focusable == !has) return // 状态已是目标态
+        lp.flags = if (focusable) {
+            lp.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+        } else {
+            lp.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        }
+        windowManager.updateViewLayout(root, lp)
+    }
+
+    private fun bindSwipeTestToggle() {
+        val extras = swipeExtras ?: return
+        val show = extras.visibility != View.VISIBLE
+        extras.visibility = if (show) View.VISIBLE else View.GONE
+        if (!show) setPanelFocusable(false)
+    }
+
+    /** 读参数 → 缩球（无遮挡）→ 执行一次翻页滑动 → Toast 结果。 */
+    private fun startSwipeTest() {
+        val startY = swipeStartYEdit?.text?.toString()?.toIntOrNull()
+        val dist = swipeDistEdit?.text?.toString()?.toIntOrNull()
+        if (startY == null || dist == null || dist <= 0) {
+            Toast.makeText(context, "参数无效：起点Y/距离须为正数", Toast.LENGTH_SHORT).show()
+            return
+        }
+        swipePrefs.edit()
+            .putInt(KEY_SWIPE_START_Y, startY)
+            .putInt(KEY_SWIPE_DIST, dist)
+            .apply()
+        setPanelFocusable(false)
+        setExpanded(false) // 缩球：执行时无遮挡
+        val ok = InputAccessibilityService.swipe(1614, startY, 1614, startY - dist)
+        Toast.makeText(
+            context,
+            if (ok) "滑动已执行：(${"1614"},$startY)→(1614,${startY - dist})" else "滑动失败：无障碍未连接",
+            Toast.LENGTH_SHORT,
+        ).show()
     }
 
     private fun applyTouchPassthrough(
@@ -1107,6 +1204,8 @@ class OverlayWindowController(
         private const val KEY_LOG_VISIBLE = "log_visible"
         private const val KEY_AUTO_SKIP_EXPANDED = "auto_skip_expanded"
         private const val KEY_LAUNCH_EXPANDED = "launch_expanded"
+        private const val KEY_SWIPE_START_Y = "swipe_start_y"
+        private const val KEY_SWIPE_DIST = "swipe_dist"
         private const val LOG_WIDTH_DP = 260
         private const val LOG_DEFAULT_HEIGHT_DP = 148
         private const val IDLE_ALPHA = 0.62f

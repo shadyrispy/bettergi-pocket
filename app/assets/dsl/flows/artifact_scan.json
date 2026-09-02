@@ -1,0 +1,35 @@
+{
+  "flow": "artifact_scan",
+  "version": "1.0.0",
+  "profile": "android_3200x1440",
+  "description": "流程二：圣遗物背包全量扫描 → GoodArtifact",
+  "vars": { "total": "int", "results": "list<GoodArtifact>" },
+  "steps": [
+    { "do": "enterScreen", "target": "artifact_backpack",
+      "chain": ["game_home→bagpack(2786,36)", "artifact_tab(213,359,287,472)"],
+      "anchor": { "kind": "ocr", "rect": "$screens.artifact_backpack.count", "expect": "圣遗物 \\d+/\\d+" } },
+    { "do": "dualStateButton", "ref": "$screens.artifact_backpack.fiveStarToggle",
+      "ensure": "off", "judge": "bgColor(底色判态)", "note": "五星筛选关闭态保持" },
+    { "do": "readCount", "rect": "$screens.artifact_backpack.count", "as": "total", "onZero": "reopenAndRetry" },
+    { "do": "pagedGrid", "grid": "artifact_backpack",
+      "visit": [
+        { "do": "vote", "zone": "artifact.card.lockBadge", "passes": 3, "as": "gridLocked" },
+        { "do": "click", "fast": { "at": "$cell.center" },
+          "fallback": [ { "kind": "ocrAnchor", "region": "$panel.artifact_backpack.name" } ] },
+        { "do": "vote", "zone": "artifact.panel.zhusheng", "as": "crafted", "apply": "yShift+63" },
+        { "do": "vote", "zone": "artifact.rarity", "as": "rarity" },
+        { "do": "vote", "zone": "artifact.panel.lock", "as": "locked" },
+        { "do": "vote", "zone": "artifact.panel.astral", "as": "favorited" },
+        { "do": "parsePanel", "panel": "artifact_backpack",
+          "fields": ["name", "slot", "mainName", "mainValue", "level", "subStats(动态行数)"],
+          "derive": { "setName": "由 name 反推（背包面板 set_name 被遮挡 OCR 不可读，用户定稿 2026-09-01）", "dict": "tools/artifactSetPieces.json pieceToSet（276 件/56 套）" },
+          "raritySubRule": "5★恒4词条 / 4★初始2最高3(行数>3=解析异常) / 3★2★止扫不解析（用户定稿 2026-09-02）",
+          "dict": { "subStats": "rollTable" } },
+        { "do": "emit", "as": "GoodArtifact" },
+        { "do": "stopWhen", "expr": "rarity < 4 && level == 0", "action": "Stop", "scope": "cell",
+          "note": "3★/2★=扫描停止标识（用户定稿 2026-09-02）——低稀有度且未强化 → 本页后停（PC 异常策略）" }
+      ] }
+  ],
+  "endConditions": ["stopWhen 触发", "pagedGrid 遍历完 + total 核对"],
+  "pending": ["swipe settle 真机"]
+}

@@ -1,0 +1,1186 @@
+{
+ "_meta": {
+  "source": "wiki.biligame.com/ys MediaWiki API（{{圣遗物套装}} 模板 生之花/死之羽/时之沙/空之杯/理之冠 字段），按 tools/mappings.json artifactSets 56 套对齐（zh 套装名 join）",
+  "date": "2026-09-02",
+  "counts": {
+   "sets": 56,
+   "pieces": 276
+  },
+  "purpose": "圣遗物背包面板 set_name 被遮挡 OCR 不可读（用户定稿 2026-09-01）：set_name 由单件名 name 经 pieceToSet 反推；slots 顺带校验 slot_type",
+  "notes": [
+   "冰之川与雪之砂系已移除 beta 套装（不可获得）：wiki 仅存空之杯=北风之盏，其余单件名无来源；扫描不会遇到，不影响反推",
+   "单件名全局唯一性已校验（无重复）；275+1 件，55 套×5 + 1"
+  ]
+ },
+ "pieceToSet": {
+  "风花的箴铭": "风起之日",
+  "晨光的明誓": "风起之日",
+  "春律的片刻": "风起之日",
+  "未言的宴话": "风起之日",
+  "哀慕的恋歌": "风起之日",
+  "磐陀裂生之花": "悠古的磐岩",
+  "嵯峨群峰之翼": "悠古的磐岩",
+  "星罗圭璧之晷": "悠古的磐岩",
+  "巉岩琢塑之樽": "悠古的磐岩",
+  "不动玄石之相": "悠古的磐岩",
+  "献与月的华梦": "晨星与月的晓歌",
+  "献与月的离光": "晨星与月的晓歌",
+  "献与月的终时": "晨星与月的晓歌",
+  "献与月的酹祭": "晨星与月的晓歌",
+  "献与月的银冕": "晨星与月的晓歌",
+  "战狂的蔷薇": "战狂",
+  "战狂的翎羽": "战狂",
+  "战狂的时计": "战狂",
+  "战狂的骨杯": "战狂",
+  "战狂的鬼面": "战狂",
+  "历经风雪的思念": "冰风迷途的勇士",
+  "摧冰而行的执望": "冰风迷途的勇士",
+  "冰雪故园的终期": "冰风迷途的勇士",
+  "遍结寒霜的傲骨": "冰风迷途的勇士",
+  "破冰踏雪的回音": "冰风迷途的勇士",
+  "染血的铁之心": "染血的骑士道",
+  "染血的黑之羽": "染血的骑士道",
+  "骑士染血之时": "染血的骑士道",
+  "染血骑士之杯": "染血的骑士道",
+  "染血的铁假面": "染血的骑士道",
+  "勇士的勋章": "勇士之心",
+  "勇士的期许": "勇士之心",
+  "勇士的坚毅": "勇士之心",
+  "勇士的壮行": "勇士之心",
+  "勇士的冠冕": "勇士之心",
+  "天授之馨": "天之美赐",
+  "天授之殁": "天之美赐",
+  "天授之令": "天之美赐",
+  "天授之禄": "天之美赐",
+  "天授之冕": "天之美赐",
+  "魔女的炎之花": "炽烈的炎之魔女",
+  "魔女常燃之羽": "炽烈的炎之魔女",
+  "魔女破灭之时": "炽烈的炎之魔女",
+  "魔女的心之火": "炽烈的炎之魔女",
+  "焦灼的魔女帽": "炽烈的炎之魔女",
+  "迷宫的游人": "深林的记忆",
+  "翠蔓的智者": "深林的记忆",
+  "贤智的定期": "深林的记忆",
+  "迷误者之灯": "深林的记忆",
+  "月桂的宝冠": "深林的记忆",
+  "守护之花": "守护之心",
+  "守护徽印": "守护之心",
+  "守护座钟": "守护之心",
+  "守护之皿": "守护之心",
+  "守护束带": "守护之心",
+  "众王之都的开端": "沙上楼阁史话",
+  "黄金邦国的结末": "沙上楼阁史话",
+  "失落迷途的机芯": "沙上楼阁史话",
+  "迷醉长梦的守护": "沙上楼阁史话",
+  "流沙贵嗣的遗宝": "沙上楼阁史话",
+  "止于荣礼的缎彩": "影中沉凝的幻灭",
+  "止于妙想成型的锋毫": "影中沉凝的幻灭",
+  "止于宏伟梦醒的时刻": "影中沉凝的幻灭",
+  "止于祝庆的喝礼": "影中沉凝的幻灭",
+  "止于阔步跌坠的灵摆": "影中沉凝的幻灭",
+  "魂香之花": "来歆余响",
+  "垂玉之叶": "来歆余响",
+  "祝祀之凭": "来歆余响",
+  "涌泉之盏": "来歆余响",
+  "浮溯之珏": "来歆余响",
+  "明威之镡": "绝缘之旗印",
+  "切落之羽": "绝缘之旗印",
+  "雷云之笼": "绝缘之旗印",
+  "绯花之壶": "绝缘之旗印",
+  "华饰之兜": "绝缘之旗印",
+  "深廊的回奏之歌": "深廊终曲",
+  "深廊的漫远之约": "深廊终曲",
+  "深廊的湮落之刻": "深廊终曲",
+  "深廊的饫赐之宴": "深廊终曲",
+  "深廊的遂失之冕": "深廊终曲",
+  "月女的华彩": "乐园遗落之花",
+  "谢落的筵席": "乐园遗落之花",
+  "凝结的时刻": "乐园遗落之花",
+  "守秘的魔瓶": "乐园遗落之花",
+  "紫晶的花冠": "乐园遗落之花",
+  "谐律交响的前奏": "谐律异想断章",
+  "古海玄幽的夜想": "谐律异想断章",
+  "命途轮转的谐谑": "谐律异想断章",
+  "灵露倾洒的狂诗": "谐律异想断章",
+  "异想零落的圆舞": "谐律异想断章",
+  "赌徒的胸花": "赌徒",
+  "赌徒的羽饰": "赌徒",
+  "赌徒的怀表": "赌徒",
+  "赌徒的骰蛊": "赌徒",
+  "赌徒的耳环": "赌徒",
+  "梦中的铁花": "饰金之梦",
+  "裁断的翎羽": "饰金之梦",
+  "沉金的岁月": "饰金之梦",
+  "如蜜的终宴": "饰金之梦",
+  "沙王的投影": "饰金之梦",
+  "角斗士的留恋": "角斗士的终幕礼",
+  "角斗士的归宿": "角斗士的终幕礼",
+  "角斗士的希冀": "角斗士的终幕礼",
+  "角斗士的酣醉": "角斗士的终幕礼",
+  "角斗士的凯旋": "角斗士的终幕礼",
+  "黄金乐曲的变奏": "黄金剧团",
+  "黄金飞鸟的落羽": "黄金剧团",
+  "黄金时代的先声": "黄金剧团",
+  "黄金之夜的喧嚣": "黄金剧团",
+  "黄金剧团的奖赏": "黄金剧团",
+  "饰金胸花": "沉沦之心",
+  "追忆之风": "沉沦之心",
+  "坚铜罗盘": "沉沦之心",
+  "沉波之盏": "沉沦之心",
+  "酒渍船帽": "沉沦之心",
+  "熔铸者的揣度": "炉火融炼之心",
+  "熔铸者的观测": "炉火融炼之心",
+  "熔铸者的计算": "炉火融炼之心",
+  "熔铸者的雅量": "炉火融炼之心",
+  "熔铸者的继志": "炉火融炼之心",
+  "荣花之期": "华馆梦醒形骸记",
+  "华馆之羽": "华馆梦醒形骸记",
+  "众生之谣": "华馆梦醒形骸记",
+  "梦醒之瓢": "华馆梦醒形骸记",
+  "形骸之笠": "华馆梦醒形骸记",
+  "教官的胸花": "教官",
+  "教官的羽饰": "教官",
+  "教官的怀表": "教官",
+  "教官的茶杯": "教官",
+  "教官的帽子": "教官",
+  "渡火者的决绝": "渡过烈火的贤人",
+  "渡火者的解脱": "渡过烈火的贤人",
+  "渡火者的煎熬": "渡过烈火的贤人",
+  "渡火者的醒悟": "渡过烈火的贤人",
+  "渡火者的智慧": "渡过烈火的贤人",
+  "执灯人的誓词": "长夜之誓",
+  "夜鸣莺的尾羽": "长夜之誓",
+  "不死者的哀铃": "长夜之誓",
+  "未吹响的号角": "长夜之誓",
+  "被浸染的缨盔": "长夜之誓",
+  "远方的少女之心": "被怜爱的少女",
+  "少女飘摇的思念": "被怜爱的少女",
+  "少女苦短的良辰": "被怜爱的少女",
+  "少女片刻的闲暇": "被怜爱的少女",
+  "少女易逝的芳颜": "被怜爱的少女",
+  "猎人的胸花": "逐影猎人",
+  "杰作的序曲": "逐影猎人",
+  "裁判的时刻": "逐影猎人",
+  "遗忘的容器": "逐影猎人",
+  "老兵的容颜": "逐影猎人",
+  "武人的红花": "武人",
+  "武人的羽饰": "武人",
+  "武人的水漏": "武人",
+  "武人的酒杯": "武人",
+  "武人的头巾": "武人",
+  "渴真之花": "穹境示现之夜",
+  "深罪之羽": "穹境示现之夜",
+  "谕告之钟": "穹境示现之夜",
+  "满溢之壶": "穹境示现之夜",
+  "永劫之冕": "穹境示现之夜",
+  "无私的妆饰花": "回声之林夜话",
+  "诚恳的蘸水笔": "回声之林夜话",
+  "忠实的砂时计": "回声之林夜话",
+  "慷慨的墨水瓶": "回声之林夜话",
+  "慈爱的淑女帽": "回声之林夜话",
+  "宗室之花": "昔日宗室之仪",
+  "宗室之翎": "昔日宗室之仪",
+  "宗室时计": "昔日宗室之仪",
+  "宗室银瓮": "昔日宗室之仪",
+  "宗室面具": "昔日宗室之仪",
+  "旅途中的鲜花": "水仙之梦",
+  "坏巫师的羽杖": "水仙之梦",
+  "水仙的时时刻刻": "水仙之梦",
+  "勇者们的茶会": "水仙之梦",
+  "恶龙的单片镜": "水仙之梦",
+  "异种的期许": "黑曜秘典",
+  "灵髓的根脉": "黑曜秘典",
+  "夜域的迷思": "黑曜秘典",
+  "纷争的前宴": "黑曜秘典",
+  "诸圣的礼冠": "黑曜秘典",
+  "海染之花": "海染砗磲",
+  "渊宫之羽": "海染砗磲",
+  "离别之贝": "海染砗磲",
+  "真珠之笼": "海染砗磲",
+  "海祇之冠": "海染砗磲",
+  "无垢之花": "苍白之火",
+  "贤医之羽": "苍白之火",
+  "停摆之刻": "苍白之火",
+  "超越之盏": "苍白之火",
+  "嗤笑之面": "苍白之火",
+  "故人之心": "行者之心",
+  "归乡之羽": "行者之心",
+  "逐光之石": "行者之心",
+  "异国之盏": "行者之心",
+  "感别之冠": "行者之心",
+  "夏祭之花": "逆飞的流星",
+  "夏祭终末": "逆飞的流星",
+  "夏祭之刻": "逆飞的流星",
+  "夏祭水玉": "逆飞的流星",
+  "夏祭之面": "逆飞的流星",
+  "感谢你的奉献": "血红之证",
+  "铭记你的功勋": "血红之证",
+  "授予你的年华": "血红之证",
+  "饮尽你的血泪": "血红之证",
+  "缅怀你的信仰": "血红之证",
+  "学士的书签": "学士",
+  "学士的羽笔": "学士",
+  "学士的时钟": "学士",
+  "学士的墨杯": "学士",
+  "学士的镜片": "学士",
+  "驯兽师的护符": "烬城勇者绘卷",
+  "巡山客的信标": "烬城勇者绘卷",
+  "秘术家的金盘": "烬城勇者绘卷",
+  "游学者的爪杯": "烬城勇者绘卷",
+  "魔战士的羽面": "烬城勇者绘卷",
+  "羁缠之花": "追忆之注连",
+  "思忆之矢": "追忆之注连",
+  "朝露之时": "追忆之注连",
+  "祈望之心": "追忆之注连",
+  "无常之面": "追忆之注连",
+  "流离者的晶泪": "纺月的夜歌",
+  "受福者的白羽": "纺月的夜歌",
+  "祭霜者的迷狂": "纺月的夜歌",
+  "至纯者的欢荣": "纺月的夜歌",
+  "司信者的圣冕": "纺月的夜歌",
+  "昔时遗落之誓": "昔时之歌",
+  "昔时浮想之思": "昔时之歌",
+  "昔时回映之音": "昔时之歌",
+  "昔时应许之梦": "昔时之歌",
+  "昔时传奏之诗": "昔时之歌",
+  "勋绩之花": "千岩牢固",
+  "昭武翎羽": "千岩牢固",
+  "金铜时晷": "千岩牢固",
+  "盟誓金爵": "千岩牢固",
+  "将帅兜鍪": "千岩牢固",
+  "流放者之花": "流放者",
+  "流放者之羽": "流放者",
+  "流放者怀表": "流放者",
+  "流放者之杯": "流放者",
+  "流放者头冠": "流放者",
+  "雷鸟的怜悯": "如雷的盛怒",
+  "雷灾的孑遗": "如雷的盛怒",
+  "雷霆的时计": "如雷的盛怒",
+  "降雷的凶兆": "如雷的盛怒",
+  "唤雷的头冠": "如雷的盛怒",
+  "平雷之心": "平息鸣雷的尊者",
+  "平雷之羽": "平息鸣雷的尊者",
+  "平雷之刻": "平息鸣雷的尊者",
+  "平雷之器": "平息鸣雷的尊者",
+  "平雷之冠": "平息鸣雷的尊者",
+  "暗结的明花": "未竟的遐思",
+  "褪光的翠尾": "未竟的遐思",
+  "举业的识刻": "未竟的遐思",
+  "筹谋的共樽": "未竟的遐思",
+  "失冕的宝冠": "未竟的遐思",
+  "生灵之华": "辰砂往生录",
+  "潜光片羽": "辰砂往生录",
+  "阳辔之遗": "辰砂往生录",
+  "结契之刻": "辰砂往生录",
+  "虺雷之姿": "辰砂往生录",
+  "野花记忆的绿野": "翠绿之影",
+  "猎人青翠的箭羽": "翠绿之影",
+  "翠绿猎人的笃定": "翠绿之影",
+  "翠绿猎人的容器": "翠绿之影",
+  "翠绿的猎人之冠": "翠绿之影",
+  "灵光源起之蕊": "花海甘露之光",
+  "琦色灵彩之羽": "花海甘露之光",
+  "久远花落之时": "花海甘露之光",
+  "无边酣乐之筵": "花海甘露之光",
+  "灵光明烁之心": "花海甘露之光",
+  "乐团的晨光": "流浪大地的乐团",
+  "琴师的箭羽": "流浪大地的乐团",
+  "终幕的时计": "流浪大地的乐团",
+  "吟游者之壶": "流浪大地的乐团",
+  "指挥的礼帽": "流浪大地的乐团",
+  "北风之盏": "冰之川与雪之砂"
+ },
+ "pieceToSetId": {
+  "风花的箴铭": "ADayCarvedFromRisingWinds",
+  "晨光的明誓": "ADayCarvedFromRisingWinds",
+  "春律的片刻": "ADayCarvedFromRisingWinds",
+  "未言的宴话": "ADayCarvedFromRisingWinds",
+  "哀慕的恋歌": "ADayCarvedFromRisingWinds",
+  "磐陀裂生之花": "ArchaicPetra",
+  "嵯峨群峰之翼": "ArchaicPetra",
+  "星罗圭璧之晷": "ArchaicPetra",
+  "巉岩琢塑之樽": "ArchaicPetra",
+  "不动玄石之相": "ArchaicPetra",
+  "献与月的华梦": "AubadeOfMorningstarAndMoon",
+  "献与月的离光": "AubadeOfMorningstarAndMoon",
+  "献与月的终时": "AubadeOfMorningstarAndMoon",
+  "献与月的酹祭": "AubadeOfMorningstarAndMoon",
+  "献与月的银冕": "AubadeOfMorningstarAndMoon",
+  "战狂的蔷薇": "Berserker",
+  "战狂的翎羽": "Berserker",
+  "战狂的时计": "Berserker",
+  "战狂的骨杯": "Berserker",
+  "战狂的鬼面": "Berserker",
+  "历经风雪的思念": "BlizzardStrayer",
+  "摧冰而行的执望": "BlizzardStrayer",
+  "冰雪故园的终期": "BlizzardStrayer",
+  "遍结寒霜的傲骨": "BlizzardStrayer",
+  "破冰踏雪的回音": "BlizzardStrayer",
+  "染血的铁之心": "BloodstainedChivalry",
+  "染血的黑之羽": "BloodstainedChivalry",
+  "骑士染血之时": "BloodstainedChivalry",
+  "染血骑士之杯": "BloodstainedChivalry",
+  "染血的铁假面": "BloodstainedChivalry",
+  "勇士的勋章": "BraveHeart",
+  "勇士的期许": "BraveHeart",
+  "勇士的坚毅": "BraveHeart",
+  "勇士的壮行": "BraveHeart",
+  "勇士的冠冕": "BraveHeart",
+  "天授之馨": "CelestialGift",
+  "天授之殁": "CelestialGift",
+  "天授之令": "CelestialGift",
+  "天授之禄": "CelestialGift",
+  "天授之冕": "CelestialGift",
+  "魔女的炎之花": "CrimsonWitchOfFlames",
+  "魔女常燃之羽": "CrimsonWitchOfFlames",
+  "魔女破灭之时": "CrimsonWitchOfFlames",
+  "魔女的心之火": "CrimsonWitchOfFlames",
+  "焦灼的魔女帽": "CrimsonWitchOfFlames",
+  "迷宫的游人": "DeepwoodMemories",
+  "翠蔓的智者": "DeepwoodMemories",
+  "贤智的定期": "DeepwoodMemories",
+  "迷误者之灯": "DeepwoodMemories",
+  "月桂的宝冠": "DeepwoodMemories",
+  "守护之花": "DefendersWill",
+  "守护徽印": "DefendersWill",
+  "守护座钟": "DefendersWill",
+  "守护之皿": "DefendersWill",
+  "守护束带": "DefendersWill",
+  "众王之都的开端": "DesertPavilionChronicle",
+  "黄金邦国的结末": "DesertPavilionChronicle",
+  "失落迷途的机芯": "DesertPavilionChronicle",
+  "迷醉长梦的守护": "DesertPavilionChronicle",
+  "流沙贵嗣的遗宝": "DesertPavilionChronicle",
+  "止于荣礼的缎彩": "DisenchantmentInDeepShadow",
+  "止于妙想成型的锋毫": "DisenchantmentInDeepShadow",
+  "止于宏伟梦醒的时刻": "DisenchantmentInDeepShadow",
+  "止于祝庆的喝礼": "DisenchantmentInDeepShadow",
+  "止于阔步跌坠的灵摆": "DisenchantmentInDeepShadow",
+  "魂香之花": "EchoesOfAnOffering",
+  "垂玉之叶": "EchoesOfAnOffering",
+  "祝祀之凭": "EchoesOfAnOffering",
+  "涌泉之盏": "EchoesOfAnOffering",
+  "浮溯之珏": "EchoesOfAnOffering",
+  "明威之镡": "EmblemOfSeveredFate",
+  "切落之羽": "EmblemOfSeveredFate",
+  "雷云之笼": "EmblemOfSeveredFate",
+  "绯花之壶": "EmblemOfSeveredFate",
+  "华饰之兜": "EmblemOfSeveredFate",
+  "深廊的回奏之歌": "FinaleOfTheDeepGalleries",
+  "深廊的漫远之约": "FinaleOfTheDeepGalleries",
+  "深廊的湮落之刻": "FinaleOfTheDeepGalleries",
+  "深廊的饫赐之宴": "FinaleOfTheDeepGalleries",
+  "深廊的遂失之冕": "FinaleOfTheDeepGalleries",
+  "月女的华彩": "FlowerOfParadiseLost",
+  "谢落的筵席": "FlowerOfParadiseLost",
+  "凝结的时刻": "FlowerOfParadiseLost",
+  "守秘的魔瓶": "FlowerOfParadiseLost",
+  "紫晶的花冠": "FlowerOfParadiseLost",
+  "谐律交响的前奏": "FragmentOfHarmonicWhimsy",
+  "古海玄幽的夜想": "FragmentOfHarmonicWhimsy",
+  "命途轮转的谐谑": "FragmentOfHarmonicWhimsy",
+  "灵露倾洒的狂诗": "FragmentOfHarmonicWhimsy",
+  "异想零落的圆舞": "FragmentOfHarmonicWhimsy",
+  "赌徒的胸花": "Gambler",
+  "赌徒的羽饰": "Gambler",
+  "赌徒的怀表": "Gambler",
+  "赌徒的骰蛊": "Gambler",
+  "赌徒的耳环": "Gambler",
+  "梦中的铁花": "GildedDreams",
+  "裁断的翎羽": "GildedDreams",
+  "沉金的岁月": "GildedDreams",
+  "如蜜的终宴": "GildedDreams",
+  "沙王的投影": "GildedDreams",
+  "角斗士的留恋": "GladiatorsFinale",
+  "角斗士的归宿": "GladiatorsFinale",
+  "角斗士的希冀": "GladiatorsFinale",
+  "角斗士的酣醉": "GladiatorsFinale",
+  "角斗士的凯旋": "GladiatorsFinale",
+  "黄金乐曲的变奏": "GoldenTroupe",
+  "黄金飞鸟的落羽": "GoldenTroupe",
+  "黄金时代的先声": "GoldenTroupe",
+  "黄金之夜的喧嚣": "GoldenTroupe",
+  "黄金剧团的奖赏": "GoldenTroupe",
+  "饰金胸花": "HeartOfDepth",
+  "追忆之风": "HeartOfDepth",
+  "坚铜罗盘": "HeartOfDepth",
+  "沉波之盏": "HeartOfDepth",
+  "酒渍船帽": "HeartOfDepth",
+  "熔铸者的揣度": "HeartOfTheFurnace",
+  "熔铸者的观测": "HeartOfTheFurnace",
+  "熔铸者的计算": "HeartOfTheFurnace",
+  "熔铸者的雅量": "HeartOfTheFurnace",
+  "熔铸者的继志": "HeartOfTheFurnace",
+  "荣花之期": "HuskOfOpulentDreams",
+  "华馆之羽": "HuskOfOpulentDreams",
+  "众生之谣": "HuskOfOpulentDreams",
+  "梦醒之瓢": "HuskOfOpulentDreams",
+  "形骸之笠": "HuskOfOpulentDreams",
+  "教官的胸花": "Instructor",
+  "教官的羽饰": "Instructor",
+  "教官的怀表": "Instructor",
+  "教官的茶杯": "Instructor",
+  "教官的帽子": "Instructor",
+  "渡火者的决绝": "Lavawalker",
+  "渡火者的解脱": "Lavawalker",
+  "渡火者的煎熬": "Lavawalker",
+  "渡火者的醒悟": "Lavawalker",
+  "渡火者的智慧": "Lavawalker",
+  "执灯人的誓词": "LongNightsOath",
+  "夜鸣莺的尾羽": "LongNightsOath",
+  "不死者的哀铃": "LongNightsOath",
+  "未吹响的号角": "LongNightsOath",
+  "被浸染的缨盔": "LongNightsOath",
+  "远方的少女之心": "MaidenBeloved",
+  "少女飘摇的思念": "MaidenBeloved",
+  "少女苦短的良辰": "MaidenBeloved",
+  "少女片刻的闲暇": "MaidenBeloved",
+  "少女易逝的芳颜": "MaidenBeloved",
+  "猎人的胸花": "MarechausseeHunter",
+  "杰作的序曲": "MarechausseeHunter",
+  "裁判的时刻": "MarechausseeHunter",
+  "遗忘的容器": "MarechausseeHunter",
+  "老兵的容颜": "MarechausseeHunter",
+  "武人的红花": "MartialArtist",
+  "武人的羽饰": "MartialArtist",
+  "武人的水漏": "MartialArtist",
+  "武人的酒杯": "MartialArtist",
+  "武人的头巾": "MartialArtist",
+  "渴真之花": "NightOfTheSkysUnveiling",
+  "深罪之羽": "NightOfTheSkysUnveiling",
+  "谕告之钟": "NightOfTheSkysUnveiling",
+  "满溢之壶": "NightOfTheSkysUnveiling",
+  "永劫之冕": "NightOfTheSkysUnveiling",
+  "无私的妆饰花": "NighttimeWhispersInTheEchoingWoods",
+  "诚恳的蘸水笔": "NighttimeWhispersInTheEchoingWoods",
+  "忠实的砂时计": "NighttimeWhispersInTheEchoingWoods",
+  "慷慨的墨水瓶": "NighttimeWhispersInTheEchoingWoods",
+  "慈爱的淑女帽": "NighttimeWhispersInTheEchoingWoods",
+  "宗室之花": "NoblesseOblige",
+  "宗室之翎": "NoblesseOblige",
+  "宗室时计": "NoblesseOblige",
+  "宗室银瓮": "NoblesseOblige",
+  "宗室面具": "NoblesseOblige",
+  "旅途中的鲜花": "NymphsDream",
+  "坏巫师的羽杖": "NymphsDream",
+  "水仙的时时刻刻": "NymphsDream",
+  "勇者们的茶会": "NymphsDream",
+  "恶龙的单片镜": "NymphsDream",
+  "异种的期许": "ObsidianCodex",
+  "灵髓的根脉": "ObsidianCodex",
+  "夜域的迷思": "ObsidianCodex",
+  "纷争的前宴": "ObsidianCodex",
+  "诸圣的礼冠": "ObsidianCodex",
+  "海染之花": "OceanHuedClam",
+  "渊宫之羽": "OceanHuedClam",
+  "离别之贝": "OceanHuedClam",
+  "真珠之笼": "OceanHuedClam",
+  "海祇之冠": "OceanHuedClam",
+  "无垢之花": "PaleFlame",
+  "贤医之羽": "PaleFlame",
+  "停摆之刻": "PaleFlame",
+  "超越之盏": "PaleFlame",
+  "嗤笑之面": "PaleFlame",
+  "故人之心": "ResolutionOfSojourner",
+  "归乡之羽": "ResolutionOfSojourner",
+  "逐光之石": "ResolutionOfSojourner",
+  "异国之盏": "ResolutionOfSojourner",
+  "感别之冠": "ResolutionOfSojourner",
+  "夏祭之花": "RetracingBolide",
+  "夏祭终末": "RetracingBolide",
+  "夏祭之刻": "RetracingBolide",
+  "夏祭水玉": "RetracingBolide",
+  "夏祭之面": "RetracingBolide",
+  "感谢你的奉献": "ScarletProof",
+  "铭记你的功勋": "ScarletProof",
+  "授予你的年华": "ScarletProof",
+  "饮尽你的血泪": "ScarletProof",
+  "缅怀你的信仰": "ScarletProof",
+  "学士的书签": "Scholar",
+  "学士的羽笔": "Scholar",
+  "学士的时钟": "Scholar",
+  "学士的墨杯": "Scholar",
+  "学士的镜片": "Scholar",
+  "驯兽师的护符": "ScrollOfTheHeroOfCinderCity",
+  "巡山客的信标": "ScrollOfTheHeroOfCinderCity",
+  "秘术家的金盘": "ScrollOfTheHeroOfCinderCity",
+  "游学者的爪杯": "ScrollOfTheHeroOfCinderCity",
+  "魔战士的羽面": "ScrollOfTheHeroOfCinderCity",
+  "羁缠之花": "ShimenawasReminiscence",
+  "思忆之矢": "ShimenawasReminiscence",
+  "朝露之时": "ShimenawasReminiscence",
+  "祈望之心": "ShimenawasReminiscence",
+  "无常之面": "ShimenawasReminiscence",
+  "流离者的晶泪": "SilkenMoonsSerenade",
+  "受福者的白羽": "SilkenMoonsSerenade",
+  "祭霜者的迷狂": "SilkenMoonsSerenade",
+  "至纯者的欢荣": "SilkenMoonsSerenade",
+  "司信者的圣冕": "SilkenMoonsSerenade",
+  "昔时遗落之誓": "SongOfDaysPast",
+  "昔时浮想之思": "SongOfDaysPast",
+  "昔时回映之音": "SongOfDaysPast",
+  "昔时应许之梦": "SongOfDaysPast",
+  "昔时传奏之诗": "SongOfDaysPast",
+  "勋绩之花": "TenacityOfTheMillelith",
+  "昭武翎羽": "TenacityOfTheMillelith",
+  "金铜时晷": "TenacityOfTheMillelith",
+  "盟誓金爵": "TenacityOfTheMillelith",
+  "将帅兜鍪": "TenacityOfTheMillelith",
+  "流放者之花": "TheExile",
+  "流放者之羽": "TheExile",
+  "流放者怀表": "TheExile",
+  "流放者之杯": "TheExile",
+  "流放者头冠": "TheExile",
+  "雷鸟的怜悯": "ThunderingFury",
+  "雷灾的孑遗": "ThunderingFury",
+  "雷霆的时计": "ThunderingFury",
+  "降雷的凶兆": "ThunderingFury",
+  "唤雷的头冠": "ThunderingFury",
+  "平雷之心": "Thundersoother",
+  "平雷之羽": "Thundersoother",
+  "平雷之刻": "Thundersoother",
+  "平雷之器": "Thundersoother",
+  "平雷之冠": "Thundersoother",
+  "暗结的明花": "UnfinishedReverie",
+  "褪光的翠尾": "UnfinishedReverie",
+  "举业的识刻": "UnfinishedReverie",
+  "筹谋的共樽": "UnfinishedReverie",
+  "失冕的宝冠": "UnfinishedReverie",
+  "生灵之华": "VermillionHereafter",
+  "潜光片羽": "VermillionHereafter",
+  "阳辔之遗": "VermillionHereafter",
+  "结契之刻": "VermillionHereafter",
+  "虺雷之姿": "VermillionHereafter",
+  "野花记忆的绿野": "ViridescentVenerer",
+  "猎人青翠的箭羽": "ViridescentVenerer",
+  "翠绿猎人的笃定": "ViridescentVenerer",
+  "翠绿猎人的容器": "ViridescentVenerer",
+  "翠绿的猎人之冠": "ViridescentVenerer",
+  "灵光源起之蕊": "VourukashasGlow",
+  "琦色灵彩之羽": "VourukashasGlow",
+  "久远花落之时": "VourukashasGlow",
+  "无边酣乐之筵": "VourukashasGlow",
+  "灵光明烁之心": "VourukashasGlow",
+  "乐团的晨光": "WanderersTroupe",
+  "琴师的箭羽": "WanderersTroupe",
+  "终幕的时计": "WanderersTroupe",
+  "吟游者之壶": "WanderersTroupe",
+  "指挥的礼帽": "WanderersTroupe",
+  "北风之盏": "GlacierAndSnowfield"
+ },
+ "sets": {
+  "风起之日": {
+   "id": "ADayCarvedFromRisingWinds",
+   "rarity": 5,
+   "slots": {
+    "flower": "风花的箴铭",
+    "plume": "晨光的明誓",
+    "sands": "春律的片刻",
+    "goblet": "未言的宴话",
+    "circlet": "哀慕的恋歌"
+   }
+  },
+  "悠古的磐岩": {
+   "id": "ArchaicPetra",
+   "rarity": 5,
+   "slots": {
+    "flower": "磐陀裂生之花",
+    "plume": "嵯峨群峰之翼",
+    "sands": "星罗圭璧之晷",
+    "goblet": "巉岩琢塑之樽",
+    "circlet": "不动玄石之相"
+   }
+  },
+  "晨星与月的晓歌": {
+   "id": "AubadeOfMorningstarAndMoon",
+   "rarity": 5,
+   "slots": {
+    "flower": "献与月的华梦",
+    "plume": "献与月的离光",
+    "sands": "献与月的终时",
+    "goblet": "献与月的酹祭",
+    "circlet": "献与月的银冕"
+   }
+  },
+  "战狂": {
+   "id": "Berserker",
+   "rarity": 4,
+   "slots": {
+    "flower": "战狂的蔷薇",
+    "plume": "战狂的翎羽",
+    "sands": "战狂的时计",
+    "goblet": "战狂的骨杯",
+    "circlet": "战狂的鬼面"
+   }
+  },
+  "冰风迷途的勇士": {
+   "id": "BlizzardStrayer",
+   "rarity": 5,
+   "slots": {
+    "flower": "历经风雪的思念",
+    "plume": "摧冰而行的执望",
+    "sands": "冰雪故园的终期",
+    "goblet": "遍结寒霜的傲骨",
+    "circlet": "破冰踏雪的回音"
+   }
+  },
+  "染血的骑士道": {
+   "id": "BloodstainedChivalry",
+   "rarity": 5,
+   "slots": {
+    "flower": "染血的铁之心",
+    "plume": "染血的黑之羽",
+    "sands": "骑士染血之时",
+    "goblet": "染血骑士之杯",
+    "circlet": "染血的铁假面"
+   }
+  },
+  "勇士之心": {
+   "id": "BraveHeart",
+   "rarity": 4,
+   "slots": {
+    "flower": "勇士的勋章",
+    "plume": "勇士的期许",
+    "sands": "勇士的坚毅",
+    "goblet": "勇士的壮行",
+    "circlet": "勇士的冠冕"
+   }
+  },
+  "天之美赐": {
+   "id": "CelestialGift",
+   "rarity": 5,
+   "slots": {
+    "flower": "天授之馨",
+    "plume": "天授之殁",
+    "sands": "天授之令",
+    "goblet": "天授之禄",
+    "circlet": "天授之冕"
+   }
+  },
+  "炽烈的炎之魔女": {
+   "id": "CrimsonWitchOfFlames",
+   "rarity": 5,
+   "slots": {
+    "flower": "魔女的炎之花",
+    "plume": "魔女常燃之羽",
+    "sands": "魔女破灭之时",
+    "goblet": "魔女的心之火",
+    "circlet": "焦灼的魔女帽"
+   }
+  },
+  "深林的记忆": {
+   "id": "DeepwoodMemories",
+   "rarity": 5,
+   "slots": {
+    "flower": "迷宫的游人",
+    "plume": "翠蔓的智者",
+    "sands": "贤智的定期",
+    "goblet": "迷误者之灯",
+    "circlet": "月桂的宝冠"
+   }
+  },
+  "守护之心": {
+   "id": "DefendersWill",
+   "rarity": 4,
+   "slots": {
+    "flower": "守护之花",
+    "plume": "守护徽印",
+    "sands": "守护座钟",
+    "goblet": "守护之皿",
+    "circlet": "守护束带"
+   }
+  },
+  "沙上楼阁史话": {
+   "id": "DesertPavilionChronicle",
+   "rarity": 5,
+   "slots": {
+    "flower": "众王之都的开端",
+    "plume": "黄金邦国的结末",
+    "sands": "失落迷途的机芯",
+    "goblet": "迷醉长梦的守护",
+    "circlet": "流沙贵嗣的遗宝"
+   }
+  },
+  "影中沉凝的幻灭": {
+   "id": "DisenchantmentInDeepShadow",
+   "rarity": 5,
+   "slots": {
+    "flower": "止于荣礼的缎彩",
+    "plume": "止于妙想成型的锋毫",
+    "sands": "止于宏伟梦醒的时刻",
+    "goblet": "止于祝庆的喝礼",
+    "circlet": "止于阔步跌坠的灵摆"
+   }
+  },
+  "来歆余响": {
+   "id": "EchoesOfAnOffering",
+   "rarity": 5,
+   "slots": {
+    "flower": "魂香之花",
+    "plume": "垂玉之叶",
+    "sands": "祝祀之凭",
+    "goblet": "涌泉之盏",
+    "circlet": "浮溯之珏"
+   }
+  },
+  "绝缘之旗印": {
+   "id": "EmblemOfSeveredFate",
+   "rarity": 5,
+   "slots": {
+    "flower": "明威之镡",
+    "plume": "切落之羽",
+    "sands": "雷云之笼",
+    "goblet": "绯花之壶",
+    "circlet": "华饰之兜"
+   }
+  },
+  "深廊终曲": {
+   "id": "FinaleOfTheDeepGalleries",
+   "rarity": 5,
+   "slots": {
+    "flower": "深廊的回奏之歌",
+    "plume": "深廊的漫远之约",
+    "sands": "深廊的湮落之刻",
+    "goblet": "深廊的饫赐之宴",
+    "circlet": "深廊的遂失之冕"
+   }
+  },
+  "乐园遗落之花": {
+   "id": "FlowerOfParadiseLost",
+   "rarity": 5,
+   "slots": {
+    "flower": "月女的华彩",
+    "plume": "谢落的筵席",
+    "sands": "凝结的时刻",
+    "goblet": "守秘的魔瓶",
+    "circlet": "紫晶的花冠"
+   }
+  },
+  "谐律异想断章": {
+   "id": "FragmentOfHarmonicWhimsy",
+   "rarity": 5,
+   "slots": {
+    "flower": "谐律交响的前奏",
+    "plume": "古海玄幽的夜想",
+    "sands": "命途轮转的谐谑",
+    "goblet": "灵露倾洒的狂诗",
+    "circlet": "异想零落的圆舞"
+   }
+  },
+  "赌徒": {
+   "id": "Gambler",
+   "rarity": 4,
+   "slots": {
+    "flower": "赌徒的胸花",
+    "plume": "赌徒的羽饰",
+    "sands": "赌徒的怀表",
+    "goblet": "赌徒的骰蛊",
+    "circlet": "赌徒的耳环"
+   }
+  },
+  "饰金之梦": {
+   "id": "GildedDreams",
+   "rarity": 5,
+   "slots": {
+    "flower": "梦中的铁花",
+    "plume": "裁断的翎羽",
+    "sands": "沉金的岁月",
+    "goblet": "如蜜的终宴",
+    "circlet": "沙王的投影"
+   }
+  },
+  "角斗士的终幕礼": {
+   "id": "GladiatorsFinale",
+   "rarity": 5,
+   "slots": {
+    "flower": "角斗士的留恋",
+    "plume": "角斗士的归宿",
+    "sands": "角斗士的希冀",
+    "goblet": "角斗士的酣醉",
+    "circlet": "角斗士的凯旋"
+   }
+  },
+  "黄金剧团": {
+   "id": "GoldenTroupe",
+   "rarity": 5,
+   "slots": {
+    "flower": "黄金乐曲的变奏",
+    "plume": "黄金飞鸟的落羽",
+    "sands": "黄金时代的先声",
+    "goblet": "黄金之夜的喧嚣",
+    "circlet": "黄金剧团的奖赏"
+   }
+  },
+  "沉沦之心": {
+   "id": "HeartOfDepth",
+   "rarity": 5,
+   "slots": {
+    "flower": "饰金胸花",
+    "plume": "追忆之风",
+    "sands": "坚铜罗盘",
+    "goblet": "沉波之盏",
+    "circlet": "酒渍船帽"
+   }
+  },
+  "炉火融炼之心": {
+   "id": "HeartOfTheFurnace",
+   "rarity": 5,
+   "slots": {
+    "flower": "熔铸者的揣度",
+    "plume": "熔铸者的观测",
+    "sands": "熔铸者的计算",
+    "goblet": "熔铸者的雅量",
+    "circlet": "熔铸者的继志"
+   }
+  },
+  "华馆梦醒形骸记": {
+   "id": "HuskOfOpulentDreams",
+   "rarity": 5,
+   "slots": {
+    "flower": "荣花之期",
+    "plume": "华馆之羽",
+    "sands": "众生之谣",
+    "goblet": "梦醒之瓢",
+    "circlet": "形骸之笠"
+   }
+  },
+  "教官": {
+   "id": "Instructor",
+   "rarity": 4,
+   "slots": {
+    "flower": "教官的胸花",
+    "plume": "教官的羽饰",
+    "sands": "教官的怀表",
+    "goblet": "教官的茶杯",
+    "circlet": "教官的帽子"
+   }
+  },
+  "渡过烈火的贤人": {
+   "id": "Lavawalker",
+   "rarity": 5,
+   "slots": {
+    "flower": "渡火者的决绝",
+    "plume": "渡火者的解脱",
+    "sands": "渡火者的煎熬",
+    "goblet": "渡火者的醒悟",
+    "circlet": "渡火者的智慧"
+   }
+  },
+  "长夜之誓": {
+   "id": "LongNightsOath",
+   "rarity": 5,
+   "slots": {
+    "flower": "执灯人的誓词",
+    "plume": "夜鸣莺的尾羽",
+    "sands": "不死者的哀铃",
+    "goblet": "未吹响的号角",
+    "circlet": "被浸染的缨盔"
+   }
+  },
+  "被怜爱的少女": {
+   "id": "MaidenBeloved",
+   "rarity": 5,
+   "slots": {
+    "flower": "远方的少女之心",
+    "plume": "少女飘摇的思念",
+    "sands": "少女苦短的良辰",
+    "goblet": "少女片刻的闲暇",
+    "circlet": "少女易逝的芳颜"
+   }
+  },
+  "逐影猎人": {
+   "id": "MarechausseeHunter",
+   "rarity": 5,
+   "slots": {
+    "flower": "猎人的胸花",
+    "plume": "杰作的序曲",
+    "sands": "裁判的时刻",
+    "goblet": "遗忘的容器",
+    "circlet": "老兵的容颜"
+   }
+  },
+  "武人": {
+   "id": "MartialArtist",
+   "rarity": 4,
+   "slots": {
+    "flower": "武人的红花",
+    "plume": "武人的羽饰",
+    "sands": "武人的水漏",
+    "goblet": "武人的酒杯",
+    "circlet": "武人的头巾"
+   }
+  },
+  "穹境示现之夜": {
+   "id": "NightOfTheSkysUnveiling",
+   "rarity": 5,
+   "slots": {
+    "flower": "渴真之花",
+    "plume": "深罪之羽",
+    "sands": "谕告之钟",
+    "goblet": "满溢之壶",
+    "circlet": "永劫之冕"
+   }
+  },
+  "回声之林夜话": {
+   "id": "NighttimeWhispersInTheEchoingWoods",
+   "rarity": 5,
+   "slots": {
+    "flower": "无私的妆饰花",
+    "plume": "诚恳的蘸水笔",
+    "sands": "忠实的砂时计",
+    "goblet": "慷慨的墨水瓶",
+    "circlet": "慈爱的淑女帽"
+   }
+  },
+  "昔日宗室之仪": {
+   "id": "NoblesseOblige",
+   "rarity": 5,
+   "slots": {
+    "flower": "宗室之花",
+    "plume": "宗室之翎",
+    "sands": "宗室时计",
+    "goblet": "宗室银瓮",
+    "circlet": "宗室面具"
+   }
+  },
+  "水仙之梦": {
+   "id": "NymphsDream",
+   "rarity": 5,
+   "slots": {
+    "flower": "旅途中的鲜花",
+    "plume": "坏巫师的羽杖",
+    "sands": "水仙的时时刻刻",
+    "goblet": "勇者们的茶会",
+    "circlet": "恶龙的单片镜"
+   }
+  },
+  "黑曜秘典": {
+   "id": "ObsidianCodex",
+   "rarity": 5,
+   "slots": {
+    "flower": "异种的期许",
+    "plume": "灵髓的根脉",
+    "sands": "夜域的迷思",
+    "goblet": "纷争的前宴",
+    "circlet": "诸圣的礼冠"
+   }
+  },
+  "海染砗磲": {
+   "id": "OceanHuedClam",
+   "rarity": 5,
+   "slots": {
+    "flower": "海染之花",
+    "plume": "渊宫之羽",
+    "sands": "离别之贝",
+    "goblet": "真珠之笼",
+    "circlet": "海祇之冠"
+   }
+  },
+  "苍白之火": {
+   "id": "PaleFlame",
+   "rarity": 5,
+   "slots": {
+    "flower": "无垢之花",
+    "plume": "贤医之羽",
+    "sands": "停摆之刻",
+    "goblet": "超越之盏",
+    "circlet": "嗤笑之面"
+   }
+  },
+  "行者之心": {
+   "id": "ResolutionOfSojourner",
+   "rarity": 4,
+   "slots": {
+    "flower": "故人之心",
+    "plume": "归乡之羽",
+    "sands": "逐光之石",
+    "goblet": "异国之盏",
+    "circlet": "感别之冠"
+   }
+  },
+  "逆飞的流星": {
+   "id": "RetracingBolide",
+   "rarity": 5,
+   "slots": {
+    "flower": "夏祭之花",
+    "plume": "夏祭终末",
+    "sands": "夏祭之刻",
+    "goblet": "夏祭水玉",
+    "circlet": "夏祭之面"
+   }
+  },
+  "血红之证": {
+   "id": "ScarletProof",
+   "rarity": 5,
+   "slots": {
+    "flower": "感谢你的奉献",
+    "plume": "铭记你的功勋",
+    "sands": "授予你的年华",
+    "goblet": "饮尽你的血泪",
+    "circlet": "缅怀你的信仰"
+   }
+  },
+  "学士": {
+   "id": "Scholar",
+   "rarity": 4,
+   "slots": {
+    "flower": "学士的书签",
+    "plume": "学士的羽笔",
+    "sands": "学士的时钟",
+    "goblet": "学士的墨杯",
+    "circlet": "学士的镜片"
+   }
+  },
+  "烬城勇者绘卷": {
+   "id": "ScrollOfTheHeroOfCinderCity",
+   "rarity": 5,
+   "slots": {
+    "flower": "驯兽师的护符",
+    "plume": "巡山客的信标",
+    "sands": "秘术家的金盘",
+    "goblet": "游学者的爪杯",
+    "circlet": "魔战士的羽面"
+   }
+  },
+  "追忆之注连": {
+   "id": "ShimenawasReminiscence",
+   "rarity": 5,
+   "slots": {
+    "flower": "羁缠之花",
+    "plume": "思忆之矢",
+    "sands": "朝露之时",
+    "goblet": "祈望之心",
+    "circlet": "无常之面"
+   }
+  },
+  "纺月的夜歌": {
+   "id": "SilkenMoonsSerenade",
+   "rarity": 5,
+   "slots": {
+    "flower": "流离者的晶泪",
+    "plume": "受福者的白羽",
+    "sands": "祭霜者的迷狂",
+    "goblet": "至纯者的欢荣",
+    "circlet": "司信者的圣冕"
+   }
+  },
+  "昔时之歌": {
+   "id": "SongOfDaysPast",
+   "rarity": 5,
+   "slots": {
+    "flower": "昔时遗落之誓",
+    "plume": "昔时浮想之思",
+    "sands": "昔时回映之音",
+    "goblet": "昔时应许之梦",
+    "circlet": "昔时传奏之诗"
+   }
+  },
+  "千岩牢固": {
+   "id": "TenacityOfTheMillelith",
+   "rarity": 5,
+   "slots": {
+    "flower": "勋绩之花",
+    "plume": "昭武翎羽",
+    "sands": "金铜时晷",
+    "goblet": "盟誓金爵",
+    "circlet": "将帅兜鍪"
+   }
+  },
+  "流放者": {
+   "id": "TheExile",
+   "rarity": 4,
+   "slots": {
+    "flower": "流放者之花",
+    "plume": "流放者之羽",
+    "sands": "流放者怀表",
+    "goblet": "流放者之杯",
+    "circlet": "流放者头冠"
+   }
+  },
+  "如雷的盛怒": {
+   "id": "ThunderingFury",
+   "rarity": 5,
+   "slots": {
+    "flower": "雷鸟的怜悯",
+    "plume": "雷灾的孑遗",
+    "sands": "雷霆的时计",
+    "goblet": "降雷的凶兆",
+    "circlet": "唤雷的头冠"
+   }
+  },
+  "平息鸣雷的尊者": {
+   "id": "Thundersoother",
+   "rarity": 5,
+   "slots": {
+    "flower": "平雷之心",
+    "plume": "平雷之羽",
+    "sands": "平雷之刻",
+    "goblet": "平雷之器",
+    "circlet": "平雷之冠"
+   }
+  },
+  "未竟的遐思": {
+   "id": "UnfinishedReverie",
+   "rarity": 5,
+   "slots": {
+    "flower": "暗结的明花",
+    "plume": "褪光的翠尾",
+    "sands": "举业的识刻",
+    "goblet": "筹谋的共樽",
+    "circlet": "失冕的宝冠"
+   }
+  },
+  "辰砂往生录": {
+   "id": "VermillionHereafter",
+   "rarity": 5,
+   "slots": {
+    "flower": "生灵之华",
+    "plume": "潜光片羽",
+    "sands": "阳辔之遗",
+    "goblet": "结契之刻",
+    "circlet": "虺雷之姿"
+   }
+  },
+  "翠绿之影": {
+   "id": "ViridescentVenerer",
+   "rarity": 5,
+   "slots": {
+    "flower": "野花记忆的绿野",
+    "plume": "猎人青翠的箭羽",
+    "sands": "翠绿猎人的笃定",
+    "goblet": "翠绿猎人的容器",
+    "circlet": "翠绿的猎人之冠"
+   }
+  },
+  "花海甘露之光": {
+   "id": "VourukashasGlow",
+   "rarity": 5,
+   "slots": {
+    "flower": "灵光源起之蕊",
+    "plume": "琦色灵彩之羽",
+    "sands": "久远花落之时",
+    "goblet": "无边酣乐之筵",
+    "circlet": "灵光明烁之心"
+   }
+  },
+  "流浪大地的乐团": {
+   "id": "WanderersTroupe",
+   "rarity": 5,
+   "slots": {
+    "flower": "乐团的晨光",
+    "plume": "琴师的箭羽",
+    "sands": "终幕的时计",
+    "goblet": "吟游者之壶",
+    "circlet": "指挥的礼帽"
+   }
+  },
+  "冰之川与雪之砂": {
+   "id": "GlacierAndSnowfield",
+   "rarity": 5,
+   "removed": true,
+   "slots": {
+    "goblet": "北风之盏"
+   }
+  }
+ }
+}

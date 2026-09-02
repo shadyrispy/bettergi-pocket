@@ -1,0 +1,33 @@
+{
+  "flow": "character_scan",
+  "version": "1.0.0",
+  "profile": "android_3200x1440",
+  "description": "流程三：角色两阶段扫描（快扫 + 可疑重扫）。Android 已免除逐项天赋/命座点击（概览页判据直读）",
+  "vars": { "roster": "list", "suspects": "list" },
+  "steps": [
+    { "do": "enterScreen", "target": "char_interface",
+      "chain": ["game_home→character(2925,36)"],
+      "anchor": { "kind": "ocr", "rect": "$panels.char_profile.name", "retries": 3 } },
+    { "do": "enterScreen", "target": "char_popup",
+      "chain": ["tian(209,1281,287,1359)"],
+      "anchor": { "kind": "template", "ref": "charselect 网格外框" } },
+    { "do": "pagedGrid", "grid": "char_popup", "loopVar": "char",
+      "visit": [
+        { "do": "click", "fast": { "at": "$cell.center" },
+          "fallback": [ { "kind": "ocrAnchor", "region": "$panels.char_profile.popupName" } ] },
+        { "do": "parsePanel", "panel": "char_profile", "fields": ["name", "level", "header", "favor"],
+          "dict": { "name": "mappings.characters", "fuzzy": 1 },
+          "note": "弹窗态角色名 ROI 与详情页一致（±2px 实测）" },
+        { "do": "navigate", "leftMenu": ["命之座", "天赋"],
+          "read": [
+            { "page": "char_constellation", "fields": ["6节点 locked 态（白锁判据）"] },
+            { "page": "char_talent", "fields": ["3 战斗 Lv + 被动/未锁态（灰锁判据）"] }
+          ] },
+        { "do": "emit", "as": "GoodCharacter",
+          "suspectIf": "level in [91..94,96..99,2..9] || (level>=40 && talents==1)" },
+        { "do": "stopWhen", "expr": "name == roster[0]", "action": "Stop", "note": "首名重现=遍历完" }
+      ] }
+  ],
+  "endConditions": ["首名重现", "pagedGrid 遍历完"],
+  "pending": ["弹窗滑动 841px settle 真机"]
+}

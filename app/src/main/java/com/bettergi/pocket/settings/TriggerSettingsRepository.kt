@@ -45,6 +45,10 @@ class TriggerSettingsRepository(context: Context) {
         update { it.copy(autoLaunchGenshinEnabled = enabled) }
     }
 
+    fun setScanEnabled(enabled: Boolean) {
+        update { it.copy(scanEnabled = enabled) }
+    }
+
     private fun update(transform: (TriggerSettings) -> TriggerSettings) {
         val newValue: TriggerSettings
         synchronized(lock) {
@@ -59,6 +63,7 @@ class TriggerSettingsRepository(context: Context) {
                 .putBoolean(KEY_AUTO_SKIP, updated.autoSkipEnabled)
                 .putBoolean(KEY_QUICK_SKIP, updated.quickSkipDialogueEnabled)
                 .putBoolean(KEY_AUTO_LAUNCH_GENSHIN, updated.autoLaunchGenshinEnabled)
+                .putBoolean(KEY_SCAN, updated.scanEnabled)
                 .apply()
         }
         listeners.forEach { listener ->
@@ -72,6 +77,7 @@ class TriggerSettingsRepository(context: Context) {
         autoSkipEnabled = prefs.getBoolean(KEY_AUTO_SKIP, false),
         quickSkipDialogueEnabled = prefs.getBoolean(KEY_QUICK_SKIP, true),
         autoLaunchGenshinEnabled = prefs.getBoolean(KEY_AUTO_LAUNCH_GENSHIN, false),
+        scanEnabled = prefs.getBoolean(KEY_SCAN, false),
     )
 
     private companion object {
@@ -81,5 +87,6 @@ class TriggerSettingsRepository(context: Context) {
         const val KEY_AUTO_SKIP = "autoSkipEnabled"
         const val KEY_QUICK_SKIP = "quickSkipDialogueEnabled"
         const val KEY_AUTO_LAUNCH_GENSHIN = "autoLaunchGenshinEnabled"
+        const val KEY_SCAN = "scanEnabled"
     }
 }

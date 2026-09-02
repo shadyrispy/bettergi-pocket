@@ -361,6 +361,180 @@
         </LinearLayout>
 
         <LinearLayout
+            android:id="@+id/overlay_row_scan"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:background="@drawable/bg_overlay_row"
+            android:gravity="center_vertical"
+            android:minHeight="40dp"
+            android:orientation="horizontal"
+            android:paddingStart="10dp"
+            android:paddingTop="4dp"
+            android:paddingEnd="4dp"
+            android:paddingBottom="4dp">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="自动扫描"
+                    android:textColor="@color/overlay_text"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:id="@+id/overlay_scan_progress"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="1dp"
+                    android:text="在圣遗物背包界面开启"
+                    android:textColor="@color/overlay_text_muted"
+                    android:textSize="10sp" />
+            </LinearLayout>
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/overlay_switch_scan"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:showText="false"
+                app:thumbTint="@color/overlay_switch_thumb"
+                app:thumbTintMode="src_in"
+                app:trackTint="@color/overlay_switch_track"
+                app:trackTintMode="src_in" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/overlay_row_swipe_test"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:background="@drawable/bg_overlay_row"
+            android:gravity="center_vertical"
+            android:minHeight="40dp"
+            android:orientation="horizontal"
+            android:paddingStart="10dp"
+            android:paddingTop="4dp"
+            android:paddingEnd="4dp"
+            android:paddingBottom="4dp">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="滑动测试"
+                    android:textColor="@color/overlay_text"
+                    android:textSize="13sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="1dp"
+                    android:text="调翻页滑动参数（真机工具）"
+                    android:textColor="@color/overlay_text_muted"
+                    android:textSize="10sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/overlay_swipe_extras"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginStart="10dp"
+                android:layout_marginEnd="10dp"
+                android:background="@color/overlay_row_divider" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="10dp"
+                android:paddingTop="4dp"
+                android:paddingEnd="10dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="起点Y"
+                    android:textColor="@color/overlay_text"
+                    android:textSize="12sp" />
+
+                <EditText
+                    android:id="@+id/overlay_swipe_start_y"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:inputType="number"
+                    android:textColor="@color/overlay_text"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:text="距离"
+                    android:textColor="@color/overlay_text"
+                    android:textSize="12sp" />
+
+                <EditText
+                    android:id="@+id/overlay_swipe_dist"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:inputType="number"
+                    android:textColor="@color/overlay_text"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/overlay_swipe_start"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_marginTop="4dp"
+                android:layout_marginEnd="10dp"
+                android:layout_marginBottom="4dp"
+                android:background="@drawable/bg_overlay_launch"
+                android:gravity="center"
+                android:minHeight="32dp"
+                android:text="开始测试（缩球执行）"
+                android:textColor="@color/overlay_gold"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/overlay_swipe_probe"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_marginEnd="10dp"
+                android:layout_marginBottom="4dp"
+                android:background="@drawable/bg_overlay_row"
+                android:gravity="center"
+                android:minHeight="28dp"
+                android:text="A11y Overlay 探针（挂/卸）"
+                android:textColor="@color/overlay_text_muted"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <LinearLayout
             android:id="@+id/overlay_group_launch"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
