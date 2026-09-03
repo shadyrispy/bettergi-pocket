@@ -2,7 +2,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
@@ -42,6 +41,7 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:excludeFromRecents="true"
             android:theme="@style/Theme.BetterGIPocket.Transparent">
             <intent-filter>
@@ -62,7 +62,7 @@
 
         <activity
             android:name=".capture.CapturePermissionActivity"
-            android:exported="false"
+            android:exported="true"
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:taskAffinity=""
@@ -103,6 +103,18 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <receiver
+            android:name=".debug.DebugControlReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.bettergi.pocket.debug.SET_SCREEN_SHARE" />
+                <action android:name="com.bettergi.pocket.debug.SET_SCAN" />
+                <action android:name="com.bettergi.pocket.debug.SET_PROBE" />
+                <action android:name="com.bettergi.pocket.debug.SWIPE_TEST" />
+                <action android:name="com.bettergi.pocket.debug.SCAN_FLOW" />
+                <action android:name="com.bettergi.pocket.debug.STATUS" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

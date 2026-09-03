@@ -49,6 +49,14 @@ class TriggerSettingsRepository(context: Context) {
         update { it.copy(scanEnabled = enabled) }
     }
 
+    fun setScanFlow(flow: String) {
+        update { it.copy(scanFlow = flow) }
+    }
+
+    fun setScanMaxPages(pages: Int) {
+        update { it.copy(scanMaxPages = pages) }
+    }
+
     private fun update(transform: (TriggerSettings) -> TriggerSettings) {
         val newValue: TriggerSettings
         synchronized(lock) {
@@ -64,6 +72,8 @@ class TriggerSettingsRepository(context: Context) {
                 .putBoolean(KEY_QUICK_SKIP, updated.quickSkipDialogueEnabled)
                 .putBoolean(KEY_AUTO_LAUNCH_GENSHIN, updated.autoLaunchGenshinEnabled)
                 .putBoolean(KEY_SCAN, updated.scanEnabled)
+                .putString(KEY_SCAN_FLOW, updated.scanFlow)
+                .putInt(KEY_SCAN_MAX_PAGES, updated.scanMaxPages)
                 .apply()
         }
         listeners.forEach { listener ->
@@ -78,6 +88,8 @@ class TriggerSettingsRepository(context: Context) {
         quickSkipDialogueEnabled = prefs.getBoolean(KEY_QUICK_SKIP, true),
         autoLaunchGenshinEnabled = prefs.getBoolean(KEY_AUTO_LAUNCH_GENSHIN, false),
         scanEnabled = prefs.getBoolean(KEY_SCAN, false),
+        scanFlow = prefs.getString(KEY_SCAN_FLOW, "artifact_scan") ?: "artifact_scan",
+        scanMaxPages = prefs.getInt(KEY_SCAN_MAX_PAGES, 0),
     )
 
     private companion object {
@@ -88,5 +100,7 @@ class TriggerSettingsRepository(context: Context) {
         const val KEY_QUICK_SKIP = "quickSkipDialogueEnabled"
         const val KEY_AUTO_LAUNCH_GENSHIN = "autoLaunchGenshinEnabled"
         const val KEY_SCAN = "scanEnabled"
+        const val KEY_SCAN_FLOW = "scanFlow"
+        const val KEY_SCAN_MAX_PAGES = "scanMaxPages"
     }
 }

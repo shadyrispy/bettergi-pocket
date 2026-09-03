@@ -28,6 +28,9 @@ class DslAssetsIntegrityTest {
         "profiles.json",
         "flows/artifact_scan.json",
         "tools/artifactSetPieces.json",
+        // fix45 教训：mappings.json 曾被拷到 app/assets/（非标准目录，不进 APK）
+        // → 真机上 CharacterDictionary/WeaponDictionary 全部 unavailable。清单钉死防再犯。
+        "tools/mappings.json",
     )
 
     @Test

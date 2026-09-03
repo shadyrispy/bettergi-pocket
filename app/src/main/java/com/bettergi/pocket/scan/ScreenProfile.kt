@@ -1,5 +1,6 @@
 package com.bettergi.pocket.scan
 
+import android.util.Log
 import org.json.JSONObject
 
 /**
@@ -10,19 +11,46 @@ import org.json.JSONObject
  */
 class ScreenProfile(
     json: JSONObject,
-    @Volatile private var frameWidth: Int = BASE_WIDTH,
-    @Volatile private var frameHeight: Int = BASE_HEIGHT,
+    @Volatile private var frameWidth: Int = 3200,
+    @Volatile private var frameHeight: Int = 1440,
 ) {
     private val root = json
 
+    /** 该 profile 的基准尺寸（文件可带 "base":{"w":..,"h":..}；缺省 3200x1440）。 */
+    private val baseWidth: Int
+    private val baseHeight: Int
+
+    init {
+        val base = json.optJSONObject("base")
+        baseWidth = base?.optInt("w", 3200) ?: 3200
+        baseHeight = base?.optInt("h", 1440) ?: 1440
+    }
+
     companion object {
-        const val BASE_WIDTH = 3200
-        const val BASE_HEIGHT = 1440
+        /** 宽高比失真告警阈值（2%——16:9 vs 20:9 是 25%，远超阈值）。 */
+        const val ASPECT_DISTORTION_WARN = 0.02
+        const val TAG = "BetterGI.Profile"
 
         /** 从 assets/dsl/profiles.json 构建。 */
         fun load(assets: android.content.res.AssetManager): ScreenProfile {
             val text = assets.open("dsl/profiles.json").bufferedReader().use { it.readText() }
             return ScreenProfile(JSONObject(text))
+        }
+
+        /**
+         * 按帧尺寸选 profile：优先 dsl/profiles_<w>x<h>.json（分辨率专属标定），
+         * 无则回退基准 profiles.json（aspectDistortion 警告交由 calibrate）。
+         */
+        fun loadFor(assets: android.content.res.AssetManager, frameWidth: Int, frameHeight: Int): ScreenProfile {
+            val specific = "dsl/profiles_${frameWidth}x${frameHeight}.json"
+            return try {
+                val text = assets.open(specific).bufferedReader().use { it.readText() }
+                Log.i(TAG, "using resolution-specific profile: $specific")
+                ScreenProfile(JSONObject(text), frameWidth, frameHeight)
+            } catch (e: java.io.FileNotFoundException) {
+                Log.i(TAG, "no specific profile for ${frameWidth}x${frameHeight}, falling back to baseline")
+                load(assets)
+            }
         }
     }
 
@@ -31,10 +59,30 @@ class ScreenProfile(
         require(frameWidth > 0 && frameHeight > 0) { "bad frame size ${frameWidth}x$frameHeight" }
         this.frameWidth = frameWidth
         this.frameHeight = frameHeight
+        val distortion = aspectDistortion
+        if (distortion > ASPECT_DISTORTION_WARN) {
+            Log.w(
+                TAG,
+                "non-uniform scaling: frame ${frameWidth}x$frameHeight vs baseline " +
+                    "${baseWidth}x${baseHeight} (sx=%.3f sy=%.3f distortion=%.0f%%) — " +
+                    "UI layout aspect differs, coordinates may be misaligned".format(scaleX, scaleY, distortion * 100),
+            )
+        }
     }
 
-    val scaleX: Double get() = frameWidth.toDouble() / BASE_WIDTH
-    val scaleY: Double get() = frameHeight.toDouble() / BASE_HEIGHT
+    val scaleX: Double get() = frameWidth.toDouble() / baseWidth
+    val scaleY: Double get() = frameHeight.toDouble() / baseHeight
+
+    /**
+     * 宽高比失真度 = |sx - sy| / min(sx, sy)。
+     * 0 = 等比（UI 布局一致，坐标可靠）；>0.02 表示设备宽高比与基准 3200x1440 (20:9) 不同
+     * （如 1920x1080 = 16:9 → sx≠sy，游戏 UI 横向分布不同，纯缩放坐标不可靠）。
+     */
+    val aspectDistortion: Double
+        get() {
+            val mn = minOf(scaleX, scaleY)
+            return if (mn <= 0.0) 0.0 else kotlin.math.abs(scaleX - scaleY) / mn
+        }
 
     /**
      * 基准 [x0,y0,x1,y1] → 帧坐标 rect。

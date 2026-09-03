@@ -11,19 +11,24 @@ import org.opencv.core.Mat
  */
 object VoteJudges {
 
-    /** RGB 通道谓词（采样像素 RGB 全部命中闭区间才算匹配）。 */
+    /** RGB 通道谓词（采样像素 RGB 全部命中闭区间才算匹配；可选跨通道约束 r-b>delta）。 */
     data class RgbPredicate(
         val rMin: Int, val rMax: Int,
         val gMin: Int, val gMax: Int,
         val bMin: Int, val bMax: Int,
+        val requireRB: Int = 0,  // 0=无跨通道约束；>0=R-B > requireRB
     ) {
         fun matches(r: Int, g: Int, b: Int): Boolean =
-            r in rMin..rMax && g in gMin..gMax && b in bMin..bMax
+            r in rMin..rMax && g in gMin..gMax && b in bMin..bMax &&
+                (requireRB == 0 || r - b > requireRB)
     }
 
     // ---- 色域常量（profiles.json zones judge 逐字固化）----
-    /** 金掩码（星/锁/收藏共用）：R>170, G 120-220, B<150 */
+    /** 金掩码（圣遗物星/锁/收藏共用）：R>170, G 120-220, B<150 */
     val GOLD = RgbPredicate(171, 255, 120, 220, 0, 149)
+
+    /** 武器金条（weapon.card.starStrip 略宽域，R>170 G 130-255 B<110 R-B>70） */
+    val GOLD_STRIP = RgbPredicate(171, 255, 130, 255, 0, 109, requireRB = 70)
 
     /** 粉色锁徽（artifact.card.lockBadge）：R>200, G 120-215, B 110-215, R-B>30 */
     val PINK_LOCK = RgbPredicate(201, 255, 120, 215, 110, 215)
@@ -72,6 +77,33 @@ object VoteJudges {
     fun cardLockBadge(frame: Mat, profile: ScreenProfile, gridKey: String, col: Int, row: Int): Result {
         val rel = intArrayOf(8, 6, 48, 46) // profiles zones artifact.card.lockBadge.rel
         val rect = profile.cardRelRect(gridKey, rel, col, row)
+        val count = countMatches(frame, rect, PINK_LOCK)
+        return Result(count > Thresholds.CARD_LOCK_PINK, count)
+    }
+
+    /**
+     * 武器金条 vote：zone rel 读自 profiles（[30,170,170,212]），金条命中数 → 星级 = round(count/555)。
+     * counts 1/3/5★ 样本 ~561/1600/2700 像素（profiles.sample.samples 字段，未在代码内固化）。
+     */
+    fun weaponStarStrip(frame: Mat, profile: ScreenProfile, gridKey: String, col: Int, row: Int): Result {
+        val rel = intArrayOf(30, 170, 170, 212)
+        val rect = profile.cardRelRect(gridKey, rel, col, row)
+        val count = countMatches(frame, rect, GOLD_STRIP)
+        val stars = Math.round(count / 555.0f).coerceIn(0, 5).toInt()
+        return Result(stars > 0, stars)
+    }
+
+    /**
+     * 网格卡内锁徽 vote（参数化 zoneKey：artifact.card.lockBadge / weapon.card.lockBadge）——从 profile zone 读 rel。
+     */
+    fun cardLockBadgeByZone(frame: Mat, profile: ScreenProfile, gridKey: String, zoneKey: String, col: Int, row: Int): Result {
+        val zone = profile.zone(zoneKey) ?: return Result(false, 0)
+        val rel = zone.getJSONArray("rel")
+        val rect = profile.cardRelRect(
+            gridKey,
+            intArrayOf(rel.getInt(0), rel.getInt(1), rel.getInt(2), rel.getInt(3)),
+            col, row,
+        )
         val count = countMatches(frame, rect, PINK_LOCK)
         return Result(count > Thresholds.CARD_LOCK_PINK, count)
     }

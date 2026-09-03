@@ -113,6 +113,8 @@ class ScanEngineDryRunTest {
         }
 
         val actions = object : ScanEngine.ActionGateway {
+            override fun back(): Boolean = true
+
             override fun click(x: Int, y: Int, durationMs: Long): Boolean {
                 clicks += x to y
                 return true
@@ -193,8 +195,28 @@ class ScanEngineDryRunTest {
         // dedupe=false：dry-run 的 21 格 mock OCR 文本相同（人工场景），全量入库便于断言；
         // 真机每件内容不同，生产默认 true。
         // clock 注入真实时间：JVM 单测 SystemClock 被 returnDefaultValues 恒 0，会让 settle 轮询死循环
+        val weaponDict = try {
+            WeaponDictionary(JSONObject(File(assetsDir(), "tools/mappings.json").readText()))
+        } catch (_: Exception) {
+            null
+        }
+        val charDict = try {
+            CharacterDictionary(JSONObject(File(assetsDir(), "tools/mappings.json").readText()))
+        } catch (_: Exception) {
+            null
+        }
+        // 命名参数：weaponDictionary 位于 setDictionary 之后——位置参数易错位
         val engine = ScanEngine(
-            flow, profile, h.frameSource, h.actions, h.ocr, dict, h.listener, dedupe,
+            flowJson = flow,
+            profile = profile,
+            frameSource = h.frameSource,
+            actions = h.actions,
+            ocr = h.ocr,
+            setDictionary = dict,
+            weaponDictionary = weaponDict,
+            characterDictionary = charDict,
+            listener = h.listener,
+            dedupe = dedupe,
             clock = { System.nanoTime() / 1_000_000 },
         )
         runBlocking { engine.run() }

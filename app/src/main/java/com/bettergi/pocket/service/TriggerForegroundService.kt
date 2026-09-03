@@ -62,7 +62,7 @@ class TriggerForegroundService : Service() {
         // 自动扫描：投影就绪即开跑；关闭即停（P1-c 悬浮窗入口）
         if (settings.scanEnabled && settings.screenShareEnabled && captureController.isRunning()) {
             if (!scriptRunner.isRunning()) {
-                scriptRunner.startArtifactScan()
+                scriptRunner.startScan(settings.scanFlow, maxPagesOrDefault(settings.scanMaxPages))
             }
         } else if (!settings.scanEnabled && scriptRunner.isRunning()) {
             scriptRunner.stop()
@@ -94,6 +94,7 @@ class TriggerForegroundService : Service() {
                 }
                 startService(stop)
             },
+            onShareGoodRequested = { shareGood() },
         )
         genshinLaunchMonitor = GenshinLaunchMonitor(
             settingsRepository = settingsRepository,
@@ -155,11 +156,13 @@ class TriggerForegroundService : Service() {
                 if (resultData != null) {
                     startInForeground(sharing = true)
                     captureController.start(resultCode, resultData)
+                    Log.i(TAG, "capture started; running=${captureController.isRunning()}")
                     engine.start()
                     InputAccessibilityService.ensureEnabled(applicationContext)
                     // 投影刚就绪：若扫描开关已开，直接启动（悬浮窗先开扫描再授权的场景）
                     if (settingsRepository.get().scanEnabled) {
-                        scriptRunner.startArtifactScan()
+                        val s = settingsRepository.get()
+                        scriptRunner.startScan(s.scanFlow, maxPagesOrDefault(s.scanMaxPages))
                     }
                 } else {
                     settingsRepository.setScreenShareEnabled(false)
@@ -175,6 +178,48 @@ class TriggerForegroundService : Service() {
             }
             ACTION_SCAN_STOP -> {
                 settingsRepository.setScanEnabled(false)
+            }
+            ACTION_DEBUG_SET_SCREEN_SHARE -> {
+                // adb 调试入口：必须用本服务的 repo 实例（否则 settingsListener 不触发）
+                settingsRepository.setScreenShareEnabled(
+                    intent.getBooleanExtra(EXTRA_ENABLED, false),
+                )
+            }
+            ACTION_DEBUG_SET_SCAN -> {
+                settingsRepository.setScanEnabled(intent.getBooleanExtra(EXTRA_ENABLED, false))
+            }
+            ACTION_DEBUG_STATUS -> {
+                val s = settingsRepository.get()
+                Log.i(
+                    TAG,
+                    "status screenShare=${s.screenShareEnabled} scan=${s.scanEnabled} " +
+                        "autoSkip=${s.autoSkipEnabled} autoPick=${s.autoPickEnabled} " +
+                        "captureRunning=${captureController.isRunning()}",
+                )
+            }
+            ACTION_DEBUG_SET_PROBE -> {
+                // 切换 :a11y Overlay 探针（桥模式：服务侧 toggle 调用即 :a11y 进程内执行）
+                InputAccessibilityService.toggleProbe(this)
+            }
+            ACTION_DEBUG_SWIPE_TEST -> {
+                val startY = intent.getIntExtra(EXTRA_START_Y, 1150)
+                val dist = intent.getIntExtra(EXTRA_DIST, 876)
+                val fromX = 1614
+                val toY = startY - dist
+                // 派发滑动到主线程（InputAccessibilityService.swipe 通过桥即可：主进程调起即用 :a11y 实例）
+                mainHandler.post {
+                    val ok = InputAccessibilityService.swipe(fromX, startY, fromX, toY, durationMs = 400, segments = 3)
+                    Log.i(TAG, "debug swipe ($fromX,$startY)->($fromX,$toY) dist=$dist ok=$ok")
+                }
+            }
+            ACTION_DEBUG_SCAN_FLOW -> {
+                val flow = intent.getStringExtra(EXTRA_FLOW) ?: "artifact_scan"
+                val maxPages = intent.getIntExtra(EXTRA_MAX_PAGES, Int.MAX_VALUE)
+                if (captureController.isRunning()) {
+                    scriptRunner.startScan(flow, maxPages)
+                } else {
+                    Log.w(TAG, "scan flow request ignored: projection not running")
+                }
             }
         }
         return START_STICKY
@@ -201,7 +246,8 @@ class TriggerForegroundService : Service() {
                 overlayController.updateScanProgress(text)
                 // :a11y 探针挂载时同步进度（跨进程状态桥，P2 机制验证）
                 InputAccessibilityService.pushScanProgress(text)
-                updateForegroundNotification(text, goodFile = vars["file"] as? String)
+                updateForegroundNotification(text)
+                (vars["file"] as? String)?.let { lastGoodFile = it }
                 Log.i("BetterGI.Scan", "progress[$stage]: $vars")
             }
         }
@@ -219,8 +265,32 @@ class TriggerForegroundService : Service() {
         }
     }
 
-    /** 更新前台服务通知内容（同 ID notify，保留 foreground 语义；通知进度 = P2 零授权通道）。 */
-    private fun updateForegroundNotification(progressText: String, goodFile: String? = null) {
+    /** 最近一次 GOOD 导出文件名（悬浮窗「分享 GOOD」用）。 */
+    @Volatile
+    private var lastGoodFile: String? = null
+
+    /**
+     * 悬浮窗「分享 GOOD」：拉 app 前台（MainActivity 中转）再起系统分享 chooser——
+     * service 后台直接 startActivity(chooser) 依赖 SAW 豁免，Android 14+ ROM 不可靠。
+     */
+    private fun shareGood() {
+        val file = lastGoodFile
+        if (file == null) {
+            Toast.makeText(this, "还没有 GOOD 导出，先完成一次扫描", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val intent = Intent(this, MainActivity::class.java)
+            .addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            )
+            .putExtra(MainActivity.EXTRA_AUTO_SHARE, file)
+        startActivity(intent)
+    }
+
+    /** 更新前台服务通知内容（同 ID notify，保留 foreground 语义）。 */
+    private fun updateForegroundNotification(progressText: String) {
         try {
             val manager = getSystemService(NotificationManager::class.java)
             manager.notify(
@@ -228,8 +298,6 @@ class TriggerForegroundService : Service() {
                 buildNotification(
                     sharing = captureController.isRunning(),
                     progressText = progressText,
-                    scanEnabled = settingsRepository.get().scanEnabled,
-                    goodFile = goodFile,
                 ),
             )
         } catch (e: Exception) {
@@ -258,12 +326,30 @@ class TriggerForegroundService : Service() {
         }
     }
 
+    /** 0 = 不限（悬浮窗约定）→ ScanEngine Int.MAX_VALUE。 */
+    private fun maxPagesOrDefault(raw: Int): Int = if (raw <= 0) Int.MAX_VALUE else raw
+
     private fun requestCapturePermission() {
         if (requestingCapturePermission) return
         requestingCapturePermission = true
-        val intent = Intent(this, CapturePermissionActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        startActivity(intent)
+        try {
+            // 悬浮窗点击是用户交互 + SAW 豁免（与原版同款语义）：直接启动授权 activity
+            val intent = Intent(this, CapturePermissionActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(intent)
+        } catch (e: Exception) {
+            // 兜底：部分 ROM 收紧 SAW 后台启动 → 拉 app 前台，MainActivity 前台内再发起（无通知依赖）
+            requestingCapturePermission = false
+            Log.w(TAG, "direct capture launch failed, bringing app to front", e)
+            val intent = Intent(this, MainActivity::class.java)
+                .addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP,
+                )
+                .putExtra(MainActivity.EXTRA_AUTO_REQUEST_CAPTURE, true)
+            startActivity(intent)
+        }
     }
 
     private fun startInForeground(sharing: Boolean) {
@@ -285,8 +371,6 @@ class TriggerForegroundService : Service() {
     private fun buildNotification(
         sharing: Boolean,
         progressText: String? = null,
-        scanEnabled: Boolean = false,
-        goodFile: String? = null,
     ): Notification {
         val openIntent = Intent(this, MainActivity::class.java)
         val pendingIntent = PendingIntent.getActivity(
@@ -297,50 +381,19 @@ class TriggerForegroundService : Service() {
         )
         val text = progressText
             ?: if (sharing) "正在共享屏幕" else "点悬浮球可开启共享屏幕"
-        val scanAction = Notification.Action.Builder(
-            android.graphics.drawable.Icon.createWithResource(this, android.R.drawable.ic_media_play),
-            if (scanEnabled) "■ 停止扫描" else "▶ 开始扫描",
-            PendingIntent.getService(
-                this,
-                1,
-                Intent(this, TriggerForegroundService::class.java).apply {
-                    action = if (scanEnabled) ACTION_SCAN_STOP else ACTION_SCAN_START
-                },
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            ),
-        ).build()
         val builder = if (Build.VERSION.SDK_INT >= 26) {
             Notification.Builder(this, NOTIFICATION_CHANNEL_ID)
         } else {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
+        // 仅 FGS 常驻通知：开始/停止扫描与分享 GOOD 全部走悬浮窗面板（零通知依赖，fix53）
         builder
             .setContentTitle("更好的原神")
             .setContentText(text)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setContentIntent(pendingIntent)
-            .addAction(scanAction)
             .setOngoing(true)
-        goodFile?.let { name ->
-            val file = java.io.File(filesDir, name)
-            if (file.exists()) {
-                val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.files", file)
-                val share = Intent(Intent.ACTION_SEND).apply {
-                    type = "application/json"
-                    putExtra(Intent.EXTRA_STREAM, uri)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                val shareIntent = Intent.createChooser(share, "分享 GOOD 导出")
-                builder.addAction(
-                    Notification.Action.Builder(
-                        android.graphics.drawable.Icon.createWithResource(this, android.R.drawable.ic_menu_share),
-                        "分享 GOOD",
-                        PendingIntent.getActivity(this, 2, shareIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE),
-                    ).build(),
-                )
-            }
-        }
         return builder.build()
     }
 
@@ -358,13 +411,25 @@ class TriggerForegroundService : Service() {
     }
 
     companion object {
+        const val TAG = "BetterGI.Service"
         const val ACTION_START = "com.bettergi.pocket.action.START"
         const val ACTION_STOP = "com.bettergi.pocket.action.STOP"
         const val ACTION_CAPTURE_RESULT = "com.bettergi.pocket.action.CAPTURE_RESULT"
         const val ACTION_CAPTURE_DENIED = "com.bettergi.pocket.action.CAPTURE_DENIED"
         const val ACTION_SCAN_START = "com.bettergi.pocket.action.SCAN_START"
         const val ACTION_SCAN_STOP = "com.bettergi.pocket.action.SCAN_STOP"
+        const val ACTION_DEBUG_SET_SCREEN_SHARE = "com.bettergi.pocket.action.DEBUG_SET_SCREEN_SHARE"
+        const val ACTION_DEBUG_SET_SCAN = "com.bettergi.pocket.action.DEBUG_SET_SCAN"
+        const val ACTION_DEBUG_STATUS = "com.bettergi.pocket.action.DEBUG_STATUS"
+        const val ACTION_DEBUG_SET_PROBE = "com.bettergi.pocket.action.DEBUG_SET_PROBE"
+        const val ACTION_DEBUG_SWIPE_TEST = "com.bettergi.pocket.action.DEBUG_SWIPE_TEST"
+        const val ACTION_DEBUG_SCAN_FLOW = "com.bettergi.pocket.action.DEBUG_SCAN_FLOW"
 
+        const val EXTRA_ENABLED = "enabled"
+        const val EXTRA_START_Y = "startY"
+        const val EXTRA_DIST = "dist"
+        const val EXTRA_FLOW = "flow"
+        const val EXTRA_MAX_PAGES = "maxPages"
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
 

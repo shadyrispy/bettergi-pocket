@@ -69,6 +69,12 @@ class ScriptRunner(
             return onActionDispatched(result != null && result.first)
         }
 
+        override fun back(): Boolean {
+            // 系统返回键清弹窗：无 overlay 交互（返回键目标由系统路由），直接桥调
+            val result = dispatchOnMain { InputAccessibilityService.back() to false }
+            return onActionDispatched(result != null && result.first)
+        }
+
         private fun onActionDispatched(ok: Boolean): Boolean {
             if (ok) frameSource.markActionAt(SystemClock.elapsedRealtime())
             return ok
@@ -102,8 +108,11 @@ class ScriptRunner(
         }
     }
 
-    /** 启动圣遗物扫描流程（flow 名 P1 固定 artifact_scan）。 */
-    fun startArtifactScan() {
+    /**
+     * 启动扫描流程。flowName 决定 assets/dsl/flows/<flowName>.json（"artifact_scan" | "weapon_scan"）。
+     * 词典按 flow 实际用到时懒加载（artifact→ArtifactSetDictionary；weapon→WeaponDictionary）。
+     */
+    fun startScan(flowName: String = "artifact_scan", maxPages: Int = Int.MAX_VALUE) {
         if (running) {
             Log.w(TAG, "scan already running")
             return
@@ -118,18 +127,29 @@ class ScriptRunner(
             listener.onFinished("no_frame_size")
             return
         }
+        val validFlows = setOf("artifact_scan", "weapon_scan")
+        val flowFile = "dsl/flows/$flowName.json"
+        if (flowName !in validFlows) {
+            Log.w(TAG, "unknown flow $flowName; default to artifact_scan")
+            startScan("artifact_scan"); return
+        }
         currentJob = scope.launch {
             try {
-                val profile = ScreenProfile.load(appContext.assets)
+                val profile = ScreenProfile.loadFor(appContext.assets, size.first, size.second)
                 profile.calibrate(size.first, size.second)
                 val flow = JSONObject(
-                    appContext.assets.open("dsl/flows/artifact_scan.json").bufferedReader().use { it.readText() },
+                    appContext.assets.open(flowFile).bufferedReader().use { it.readText() },
                 )
-                val setDictionary = try {
-                    ArtifactSetDictionary.load(appContext.assets)
+                val setDictionary = if (flowName == "artifact_scan") {
+                    try { ArtifactSetDictionary.load(appContext.assets) } catch (e: Exception) { Log.w(TAG, "set dict unavailable", e); null }
+                } else null
+                val weaponDictionary = if (flowName == "weapon_scan") {
+                    try { WeaponDictionary.load(appContext.assets) } catch (e: Exception) { Log.w(TAG, "weapon dict unavailable", e); null }
+                } else null
+                val characterDictionary = try {
+                    CharacterDictionary.load(appContext.assets)
                 } catch (e: Exception) {
-                    Log.w(TAG, "artifactSetPieces dictionary unavailable, setKey will be empty", e)
-                    null
+                    Log.w(TAG, "characters dict unavailable", e); null
                 }
                 val engine = ScanEngine(
                     flowJson = flow,
@@ -138,12 +158,16 @@ class ScriptRunner(
                     actions = actions,
                     ocr = MlKitOcrGateway(),
                     setDictionary = setDictionary,
+                    weaponDictionary = weaponDictionary,
+                    characterDictionary = characterDictionary,
                     listener = listener,
+                    maxPages = maxPages,
                 )
                 engine.run()
-                if (engine.results.isNotEmpty()) {
-                    val file = GoodExporter.export(appContext, engine.results)
-                    listener.onProgress("exported", mapOf("file" to file, "count" to engine.results.size))
+                val total = engine.results.size + engine.resultsWeapons.size
+                if (total > 0) {
+                    val file = GoodExporter.export(appContext, engine.results, engine.resultsWeapons)
+                    listener.onProgress("exported", mapOf("file" to file, "count" to engine.results.size, "weapons" to engine.resultsWeapons.size))
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "scan failed", e)
@@ -151,6 +175,9 @@ class ScriptRunner(
             }
         }
     }
+
+    /** 兼容旧调用：artifact_scan 流程。 */
+    fun startArtifactScan() = startScan("artifact_scan")
 
     fun stop() {
         currentJob?.cancel()

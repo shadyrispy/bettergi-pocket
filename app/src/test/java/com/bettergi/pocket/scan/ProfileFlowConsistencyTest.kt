@@ -174,14 +174,14 @@ class ProfileFlowConsistencyTest {
         val p = profile()
         val yShift = Math.round(63.0 * p.scaleY).toInt()
         // level 是单 rect；subStats 是嵌套数组，逐行取
-        assertTrue(p.rect("panels.artifact_backpack.level").bottom + yShift <= ScreenProfile.BASE_HEIGHT)
+        assertTrue(p.rect("panels.artifact_backpack.level").bottom + yShift <= 1440)
         val subStats = p.rawObject("panels.artifact_backpack")!!.getJSONArray("subStats")
         for (i in 0 until subStats.length()) {
             val r = subStats.getJSONArray(i)
-            assertTrue(r.getInt(3) + 63 <= ScreenProfile.BASE_HEIGHT)
+            assertTrue(r.getInt(3) + 63 <= 1440)
         }
         val band = p.rawObject("panels.artifact_backpack")!!.optJSONObject("starBand")!!
         val y1 = band.getJSONArray("y").getInt(1)
-        assertTrue(y1 + 63 <= ScreenProfile.BASE_HEIGHT)
+        assertTrue(y1 + 63 <= 1440)
     }
 }

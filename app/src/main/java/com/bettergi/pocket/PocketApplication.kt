@@ -15,6 +15,7 @@ class PocketApplication : Application() {
         super.onCreate()
         InputAccessibilityService.attach(this)
         if (currentProcessName() != packageName) return
+        AppForeground.install(this)
         if (!OpenCvRuntime.ensureLoaded()) {
             Log.e(TAG, "OpenCV initialization failed")
         }

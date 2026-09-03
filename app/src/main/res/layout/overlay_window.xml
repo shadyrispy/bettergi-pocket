@@ -374,9 +374,17 @@
             android:paddingEnd="4dp"
             android:paddingBottom="4dp">
 
+            <ImageView
+                android:id="@+id/overlay_scan_chevron"
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:importantForAccessibility="no"
+                android:src="@drawable/ic_overlay_chevron" />
+
             <LinearLayout
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
                 android:layout_weight="1"
                 android:orientation="vertical">
 
@@ -406,6 +414,113 @@
                 app:thumbTintMode="src_in"
                 app:trackTint="@color/overlay_switch_track"
                 app:trackTintMode="src_in" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/overlay_scan_extras"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <View
+                android:layout_width="match_parent"
+                android:layout_height="1dp"
+                android:layout_marginStart="10dp"
+                android:layout_marginEnd="10dp"
+                android:background="@color/overlay_row_divider" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="10dp"
+                android:paddingTop="4dp"
+                android:paddingEnd="10dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="流程"
+                    android:textColor="@color/overlay_text"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/overlay_scan_flow"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/bg_overlay_row"
+                    android:gravity="center"
+                    android:minHeight="28dp"
+                    android:text="圣遗物"
+                    android:textColor="@color/overlay_gold"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:text="页数"
+                    android:textColor="@color/overlay_text"
+                    android:textSize="12sp" />
+
+                <EditText
+                    android:id="@+id/overlay_scan_max_pages"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:hint="0=不限"
+                    android:inputType="number"
+                    android:textColor="@color/overlay_text"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/overlay_scan_start"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_marginTop="4dp"
+                android:layout_marginEnd="10dp"
+                android:layout_marginBottom="2dp"
+                android:background="@drawable/bg_overlay_launch"
+                android:gravity="center"
+                android:minHeight="32dp"
+                android:text="▶ 开始扫描"
+                android:textColor="@color/overlay_gold"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/overlay_scan_stop"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_marginEnd="10dp"
+                android:layout_marginBottom="2dp"
+                android:background="@drawable/bg_overlay_row"
+                android:gravity="center"
+                android:minHeight="28dp"
+                android:text="■ 停止扫描"
+                android:textColor="@color/overlay_text"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/overlay_scan_share"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_marginEnd="10dp"
+                android:layout_marginBottom="4dp"
+                android:background="@drawable/bg_overlay_row"
+                android:gravity="center"
+                android:minHeight="28dp"
+                android:text="分享 GOOD"
+                android:textColor="@color/overlay_text_muted"
+                android:textSize="11sp" />
         </LinearLayout>
 
         <LinearLayout

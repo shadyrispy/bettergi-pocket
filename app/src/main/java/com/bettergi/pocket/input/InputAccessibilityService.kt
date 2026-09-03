@@ -74,6 +74,7 @@ class InputAccessibilityService : AccessibilityService() {
         private const val METHOD_SWIPE = "swipe"
         private const val METHOD_SCAN_PROGRESS = "scan_progress"
         private const val METHOD_PROBE = "probe"
+        private const val METHOD_BACK = "back"
         private const val KEY_TEXT = "text"
         private const val KEY_CONNECTED = "connected"
         private const val KEY_LAST_PACKAGE = "last_package"
@@ -222,6 +223,18 @@ class InputAccessibilityService : AccessibilityService() {
         }
 
         /**
+         * 系统返回键（GLOBAL_ACTION_BACK）——扫描前清游戏每日弹窗（签到/物品过期等）。
+         * 游戏内返回键只关界面不退游戏，安全。
+         */
+        fun back(): Boolean {
+            if (instance != null) return backLocal()
+            return remoteCall(METHOD_BACK, null)?.getBoolean(KEY_OK, false) == true
+        }
+
+        private fun backLocal(): Boolean =
+            instance?.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK) == true
+
+        /**
          * 滑动。[segments] = 1 单段惯性放行；3 = 三段消惯性（对齐 scanner-app 已验证实现）：
          * **逐段 dispatchGesture + callback 链**——continueStroke 的设计语义是分段派发，
          * 三段塞同一 GestureDescription 一次 dispatch 会导致后续段不执行（真机"滑动不准"根因）。
@@ -251,6 +264,9 @@ class InputAccessibilityService : AccessibilityService() {
 
         fun handleBridgeCall(method: String, extras: Bundle?): Bundle {
             return when (method) {
+                METHOD_BACK -> Bundle().apply {
+                    putBoolean(KEY_OK, backLocal())
+                }
                 METHOD_STATUS -> Bundle().apply {
                     putBoolean(KEY_CONNECTED, instance != null)
                     putString(KEY_LAST_PACKAGE, lastAppPackage)

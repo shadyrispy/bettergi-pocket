@@ -57,6 +57,7 @@ class OverlayWindowController(
     private val settingsRepository: TriggerSettingsRepository,
     private val genshinLauncher: GenshinLauncher = GenshinLauncher(context),
     private val onExit: () -> Unit = {},
+    private val onShareGoodRequested: () -> Unit = {},
 ) : AutoSkipEvents {
     private val themedContext = ContextThemeWrapper(context, R.style.Theme_BetterGIPocket)
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -114,6 +115,11 @@ class OverlayWindowController(
     private var autoSkipExtras: View? = null
     private var autoSkipChevron: ImageView? = null
     private var autoSkipMenuExpanded = false
+    private var scanExtras: View? = null
+    private var scanChevron: ImageView? = null
+    private var scanFlowChip: TextView? = null
+    private var scanMaxPagesEdit: EditText? = null
+    private var scanMenuExpanded = false
     private var launchExtras: View? = null
     private var launchChevron: ImageView? = null
     private var launchMenuExpanded = false
@@ -235,6 +241,38 @@ class OverlayWindowController(
             ).show()
         }
 
+        // 扫描控制区（fix53：开始/停止/flow/maxPages/分享 GOOD 全部走悬浮窗，零通知依赖）
+        scanExtras = root.findViewById(R.id.overlay_scan_extras)
+        scanChevron = root.findViewById(R.id.overlay_scan_chevron)
+        scanFlowChip = root.findViewById<TextView>(R.id.overlay_scan_flow).also { chip ->
+            chip.setOnClickListener {
+                val next = if (settingsRepository.get().scanFlow == "artifact_scan") "weapon_scan" else "artifact_scan"
+                settingsRepository.setScanFlow(next)
+                chip.text = if (next == "artifact_scan") "圣遗物" else "武器"
+            }
+        }
+        scanMaxPagesEdit = root.findViewById<EditText>(R.id.overlay_scan_max_pages).apply {
+            val saved = settingsRepository.get().scanMaxPages
+            setText(if (saved <= 0) "" else saved.toString())
+            setOnFocusChangeListener { _, has -> setPanelFocusable(has) }
+            setOnEditorActionListener { _, _, _ ->
+                persistMaxPages()
+                setPanelFocusable(false)
+                true
+            }
+        }
+        root.findViewById<View>(R.id.overlay_scan_start).setOnClickListener {
+            settingsRepository.setScanEnabled(true)
+            InputAccessibilityService.ensureEnabled(themedContext, "请开启无障碍权限，才能模拟扫描点击")
+            if (!settingsRepository.get().screenShareEnabled) {
+                settingsRepository.setScreenShareEnabled(true)
+            }
+        }
+        root.findViewById<View>(R.id.overlay_scan_stop).setOnClickListener {
+            settingsRepository.setScanEnabled(false)
+        }
+        root.findViewById<View>(R.id.overlay_scan_share).setOnClickListener { onShareGoodRequested() }
+
         val layoutParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -274,6 +312,10 @@ class OverlayWindowController(
         }
         root.findViewById<View>(R.id.overlay_exit).setOnClickListener { exitAssistant() }
         root.findViewById<View>(R.id.overlay_row_swipe_test).setOnClickListener { bindSwipeTestToggle() }
+        root.findViewById<View>(R.id.overlay_row_scan).also { row ->
+            row.setOnClickListener { setScanMenuExpanded(!scanMenuExpanded) }
+            // 双击语义冲突防护：chevron 与开关并排，点击行体展开；开关自身事件不冒泡
+        }
 
         enabledSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (updatingUi) return@setOnCheckedChangeListener
@@ -318,6 +360,8 @@ class OverlayWindowController(
         setLogWindowVisible(prefs.getBoolean(KEY_LOG_VISIBLE, false), persist = false)
         setAutoSkipMenuExpanded(prefs.getBoolean(KEY_AUTO_SKIP_EXPANDED, false), persist = false)
         setLaunchMenuExpanded(prefs.getBoolean(KEY_LAUNCH_EXPANDED, false), persist = false)
+        setScanMenuExpanded(prefs.getBoolean(KEY_SCAN_EXPANDED, false), persist = false)
+        scanFlowChip?.text = if (settingsRepository.get().scanFlow == "weapon_scan") "武器" else "圣遗物"
         settingsRepository.addListener(settingsListener)
         startScreenWatch()
         a11yWarningReady = false
@@ -711,6 +755,22 @@ class OverlayWindowController(
         }
         autoSkipExtras?.visibility = if (expanded) View.VISIBLE else View.GONE
         autoSkipChevron?.animate()?.rotation(if (expanded) 90f else 0f)?.setDuration(160)?.start()
+    }
+
+    private fun setScanMenuExpanded(expanded: Boolean, persist: Boolean = true) {
+        scanMenuExpanded = expanded
+        if (persist) {
+            prefs.edit().putBoolean(KEY_SCAN_EXPANDED, expanded).apply()
+        }
+        scanExtras?.visibility = if (expanded) View.VISIBLE else View.GONE
+        scanChevron?.animate()?.rotation(if (expanded) 90f else 0f)?.setDuration(160)?.start()
+    }
+
+    /** maxPages 输入提交：空/0 = 不限（service 侧转 Int.MAX_VALUE）。 */
+    private fun persistMaxPages() {
+        val raw = scanMaxPagesEdit?.text?.toString()?.trim().orEmpty()
+        val pages = raw.toIntOrNull()?.coerceAtLeast(0) ?: 0
+        settingsRepository.setScanMaxPages(pages)
     }
 
     private fun setLaunchMenuExpanded(expanded: Boolean, persist: Boolean = true) {
@@ -1204,6 +1264,7 @@ class OverlayWindowController(
         private const val KEY_LOG_VISIBLE = "log_visible"
         private const val KEY_AUTO_SKIP_EXPANDED = "auto_skip_expanded"
         private const val KEY_LAUNCH_EXPANDED = "launch_expanded"
+        private const val KEY_SCAN_EXPANDED = "scan_expanded"
         private const val KEY_SWIPE_START_Y = "swipe_start_y"
         private const val KEY_SWIPE_DIST = "swipe_dist"
         private const val LOG_WIDTH_DP = 260

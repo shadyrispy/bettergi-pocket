@@ -35,6 +35,15 @@ class ScanVars {
     var rarity: Int = -1
     var locked: Boolean? = null
     var favorited: Boolean? = null
+    /** ocrWithRetry 命中写入（fuzzy 词典匹配 key）。 */
+    var ocrMatch: String? = null
+    /** 详情面板当前件名（点击后检测详情是否切换，防读到上一件被去重）。 */
+    var lastPieceName: String = ""
+    /** vote as=curLock 快照（artifact_lock ifMatch 的 verify toggle 依据）。 */
+    var curLock: Boolean? = null
+    /** foreach：外部注入任务计划（P4 规则层注入；flow 内按 task 使用）。 */
+    var plan: List<JSONObject>? = null
+    var currentTask: JSONObject? = null
     var level: Int = 0
     var stopRequested: Boolean = false
 
@@ -70,8 +79,12 @@ class ScanEngine(
     private val actions: ActionGateway,
     private val ocr: OcrGateway?,
     private val setDictionary: ArtifactSetDictionary?,
+    private val weaponDictionary: WeaponDictionary? = null,
+    private val characterDictionary: CharacterDictionary? = null,
     private val listener: ScanListener,
     private val dedupe: Boolean = true,
+    /** 翻 N 页早停（调试翻页准确性用；默认不限制）。 */
+    private val maxPages: Int = Int.MAX_VALUE,
     /** 单测注入真实时钟用：JVM 里 SystemClock 被 returnDefaultValues 恒返回 0（会挂死轮询）。 */
     private val clock: () -> Long = { SystemClock.elapsedRealtime() },
 ) {
@@ -79,6 +92,7 @@ class ScanEngine(
 
     /** 扫描产物（parsePanel emit 收集，endConditions 后由 ScriptRunner 导出）。 */
     val results = ArrayList<GoodArtifact>()
+    val resultsWeapons = ArrayList<GoodWeapon>()
 
     /**
      * 动作网关：实现侧在 dispatch 受理后调用 frameSource.markActionAt（P0 联动点），
@@ -87,6 +101,8 @@ class ScanEngine(
     interface ActionGateway {
         fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         fun swipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean
+        /** 系统返回键（GLOBAL_ACTION_BACK）——enterScreen 失败重进前清游戏每日弹窗（签到/物品过期）。 */
+        fun back(): Boolean
     }
 
     suspend fun run() {
@@ -110,6 +126,13 @@ class ScanEngine(
             "dualStateButton" -> dualStateButton(step)
             "readCount" -> readCount(step)
             "pagedGrid" -> pagedGrid(step)
+            "dialog" -> dialog(step)
+            "ocrWithRetry" -> ocrWithRetry(step)
+            "navigate" -> navigate(step)
+            "foreach" -> foreach(step)
+            "setFilter" -> setFilter(step)
+            "exit" -> exitStep(step)
+            "verify" -> verify(step)
             "emit" -> listener.onProgress("emit", vars.snapshot())
             else -> Log.w(TAG, "unknown step '${step.getString("do")}', skipped")
         }
@@ -156,15 +179,34 @@ class ScanEngine(
                 frame.release()
             }
             val cleaned = StatParser.clean(text)
-            if (regex.containsMatchIn(cleaned) || fallback.containsMatchIn(cleaned)) {
+            if (regex.containsMatchIn(cleaned)) {
                 Log.i(TAG, "anchor matched (attempt $attempt): '$text'")
                 return
+            }
+            if (fallback.containsMatchIn(cleaned)) {
+                // 数字兜底防跨 tab 误配：prefixStrict=true（如 weapon_scan 声明）时 expect 的中文前缀词
+                // 必须出现在 OCR 文本（武器/圣遗物背包 count 均为 "x/y" 格式）。
+                // 默认 false 宽松：模拟器/低质量 OCR 常丢"圣遗物"前缀小字，严格会拒掉唯一可用路径。
+                val zhWords = Regex("[\\u4e00-\\u9fa5]{2,}").findAll(expect).map { it.value }.toList()
+                val prefixOk = if (anchor.optBoolean("prefixStrict", false)) {
+                    zhWords.isEmpty() || zhWords.any { cleaned.contains(it) }
+                } else {
+                    true
+                }
+                if (prefixOk) {
+                    Log.i(TAG, "anchor matched via fallback (attempt $attempt): '$text'")
+                    return
+                }
+                Log.w(TAG, "fallback digits matched but prefix $zhWords missing: '$text'")
             }
             Log.w(TAG, "anchor attempt $attempt/$ANCHOR_RETRIES mismatch: '$text' vs /$expect/")
             delay(ANCHOR_RETRY_DELAY_MS)
         }
         if (!isRetry) {
-            Log.w(TAG, "anchor failed, reopening screen for one more round")
+            Log.w(TAG, "anchor failed, pressing BACK to clear popups then reopening screen")
+            // 清游戏每日弹窗（签到/物品过期等）——返回键只关界面不退游戏
+            runCatching { actions.back() }
+            delay(1200)
             enterScreen(step, isRetry = true)
             return // 重跑内 assertAnchor 已再验证；仍失败则抛
         }
@@ -273,6 +315,7 @@ class ScanEngine(
         val advance = profile.rawObject("grids.$gridKey")!!.getJSONObject("advance")
         val advFrom = advance.getJSONArray("from")
         val advTo = advance.getJSONArray("to")
+        var pagesAdvanced = 0
 
         while (true) {
             if (vars.stopRequested) break
@@ -306,6 +349,13 @@ class ScanEngine(
             }
             if (before == after) {
                 Log.i(TAG, "pagedGrid reached end (fingerprint unchanged)")
+                break
+            }
+            pagesAdvanced++
+            Log.i(TAG, "pagedGrid advanced to page ${pagesAdvanced + 1} (maxPages=$maxPages)")
+            if (pagesAdvanced >= maxPages) {
+                Log.i(TAG, "pagedGrid early stop: reached maxPages=$maxPages (debug 早停，用于翻页准确性验证)")
+                vars.stopRequested = true
                 break
             }
         }
@@ -347,24 +397,312 @@ class ScanEngine(
         return latest ?: freshFrame(SETTLE_FRAME_TIMEOUT_MS)
     }
 
+    private suspend fun dialog(step: JSONObject) {
+        if (ocr == null) return
+        val ref = step.getString("ref").removePrefix("$")
+        val obj = profile.rawObject(ref) ?: return
+        // 1. 检测弹窗（OCR ref.text 区域有非空文本 → 弹窗存在）
+        val ocrGateway = ocr
+        val textRect = profile.rect("$ref.text")
+        val frame = freshFrame()
+        val shown = try {
+            ocrGateway.readLines(frame, listOf(textRect)).joinToString(" ").isNotBlank()
+        } finally { frame.release() }
+        if (!shown) {
+            Log.d(TAG, "dialog $ref not visible")
+            return
+        }
+        // 2. 弹窗在 → 按 confirmClick 坐标点确认（profiles.dialogs.equipConfirm.confirmClick = [x,y]）
+        obj.optJSONArray("confirmClick")?.let { c ->
+            val pt = profile.scalePoint(c.getInt(0), c.getInt(1))
+            actions.click(pt.x, pt.y)
+            Log.i(TAG, "dialog $ref confirmed at (${pt.x},${pt.y})")
+        }
+    }
+
+    /**
+     * P3 setFilter：entry=BACKPACK/PILL 套装筛选——chain 各项文本含 (x,y) 正则点；selectByOcr 遍历 grid 行 OCR 套装名匹配目标（vars.currentTask.setName）→ 点 checkboxX（BACKPACK 点左列、PILL 两列都查）。
+     * 弹窗结构：profiles.grids.set_filter_popup → rowYTop (8 行) + cols {left, right} {nameBox + checkboxX}。
+     */
+    private suspend fun setFilter(step: JSONObject) {
+        val ocrGateway = ocr
+        val chain = step.getJSONArray("chain")
+        for (i in 0 until chain.length()) {
+            val m = Regex("\\((\\d+),(\\d+)\\)").find(chain.getString(i)) ?: continue
+            val pt = profile.scalePoint(m.groupValues[1].toInt(), m.groupValues[2].toInt())
+            actions.click(pt.x, pt.y)
+            delay(CLICK_SETTLE_MS)
+        }
+        val sel = step.optJSONObject("selectByOcr") ?: return
+        val gridKey = sel.optString("grid", "set_filter_popup")
+        // 词典按 dict 分类型调用（各自 API 不同）
+        val dictKey = sel.optString("dict", "mappings.artifactSets")
+        val dictAvailable = when (dictKey) {
+            "mappings.artifactSets" -> setDictionary != null
+            "mappings.weapons" -> weaponDictionary != null
+            else -> false
+        }
+        if (!dictAvailable) {
+            Log.w(TAG, "setFilter: dictionary '$dictKey' not loaded")
+            return
+        }
+        val lookup: (String) -> String? = { text ->
+            when (dictKey) {
+                "mappings.artifactSets" -> setDictionary?.setKeyByPiece(text)
+                else -> weaponDictionary?.keyByName(text)
+            }
+        }
+        val match = sel.optString("match", "exact")
+        val target = vars.currentTask?.optString("setName")
+            ?: run { Log.w(TAG, "setFilter: vars.currentTask.setName not set (P4 rule injection missing)"); return }
+        val grid = profile.rawObject("grids.$gridKey") ?: return
+        val cols = grid.getJSONObject("cols")
+        val rowYTop = grid.getJSONArray("rowYTop")
+        val leftX = cols.getJSONObject("left").getInt("checkboxX")
+        val rightX = cols.getJSONObject("right").getInt("checkboxX")
+        val leftBox = cols.getJSONObject("left").getJSONArray("nameBox")
+        val rightBox = cols.getJSONObject("right").getJSONArray("nameBox")
+        if (ocrGateway == null) return
+        for (i in 0 until rowYTop.length()) {
+            val y = rowYTop.getInt(i)
+            val leftRect = FrameRect(leftBox.getInt(0), y, leftBox.getInt(2), y + 120)
+            val rightRect = FrameRect(rightBox.getInt(0), y, rightBox.getInt(2), y + 120)
+            val leftFrame = freshFrame()
+            val leftText = try {
+                ocrGateway.readLines(leftFrame, listOf(leftRect)).joinToString(" ")
+            } finally { leftFrame.release() }
+            val cleanedLeft = StatParser.clean(leftText)
+            val leftKey = lookup(cleanedLeft)
+            if (leftKey == target) {
+                val pt = profile.scalePoint(leftX, y)
+                actions.click(pt.x, pt.y)
+                delay(CLICK_SETTLE_MS)
+                Log.i(TAG, "setFilter matched: $target (BACKPACK left)")
+                return
+            }
+            val rightFrame = freshFrame()
+            val rightText = try {
+                ocrGateway.readLines(rightFrame, listOf(rightRect)).joinToString(" ")
+            } finally { rightFrame.release() }
+            val cleanedRight = StatParser.clean(rightText)
+            val rightKey = lookup(cleanedRight)
+            if (rightKey == target) {
+                val pt = profile.scalePoint(rightX, y)
+                actions.click(pt.x, pt.y)
+                delay(CLICK_SETTLE_MS)
+                Log.i(TAG, "setFilter matched: $target (right)")
+                return
+            }
+        }
+        Log.w(TAG, "setFilter: target '$target' not found in grid")
+    }
+
+    /**
+     * P3 foreach：遍历外部注入 plan（vars.plan），每项作为 vars.currentTask（"as" 字段，默认 "task"），执行内部 steps 数组（每步走 executeStep 顶层）。
+     * 供 character_scan 的 "$plan" 遍历（auto_equip 的 "$plan" 同款，setFilter 用 vars.currentTask["setName"] 选套装）。
+     */
+    private suspend fun foreach(step: JSONObject) {
+        val over = step.getString("over").removePrefix("$")
+        val items: List<JSONObject>? = when (over) {
+            "plan" -> vars.plan
+            else -> null
+        }
+        if (items.isNullOrEmpty()) {
+            Log.w(TAG, "foreach: '$over' not available or empty, skipped")
+            return
+        }
+        val asName = step.optString("as", "task")
+        val subSteps = step.getJSONArray("steps")
+        for (item in items) {
+            vars.currentTask = item
+            Log.i(TAG, "foreach iter $asName: ${item.optString("char", item.optString("name", "?"))}")
+            for (i in 0 until subSteps.length()) {
+                executeStep(subSteps.getJSONObject(i))
+                if (vars.stopRequested) return
+            }
+        }
+    }
+
+    /**
+     * P3 navigate：左侧菜单切换（字符/角色界面）——leftMenu 每项名直接是 profiles.char_interface.leftMenu 的 key。
+     * 每项点中心 + settle，顺序执行（如 ["命之座", "天赋"]）。
+     */
+    private suspend fun navigate(step: JSONObject) {
+        val menu = step.getJSONArray("leftMenu")
+        for (i in 0 until menu.length()) {
+            val name = menu.getString(i)
+            val rect = try {
+                profile.rect("char_interface.leftMenu.$name")
+            } catch (e: Exception) {
+                Log.w(TAG, "navigate: menu '$name' missing in profiles.char_interface.leftMenu (${e.message})")
+                continue
+            }
+            actions.click(rect.centerX, rect.centerY)
+            delay(CLICK_SETTLE_MS)
+        }
+    }
+
+    /**
+     * P3 ocrWithRetry：OCR 区域 → 词典模糊匹配 → vars.ocrMatch = key。
+     * 重试 N 次（每次重新取帧），重试间 200ms（动画缓冲）。
+     * fuzzy：允许 0=精确 / 1=首尾子串包含 / 2=更宽松（取前 fuzzy 字头匹配）。
+     */
+    private suspend fun ocrWithRetry(step: JSONObject) {
+        val ocrGateway = ocr ?: return
+        val dict = characterDictionary
+        val rect = profile.rect(step.getString("rect").removePrefix("$"))
+        val fuzzy = step.optInt("fuzzy", 0)
+        val maxRetries = step.optInt("retries", 3)
+        val dictKey = step.optString("dict", "mappings.characters")
+        for (attempt in 1..maxRetries) {
+            val frame = freshFrame()
+            val text = try {
+                ocrGateway.readLines(frame, listOf(rect)).joinToString(" ")
+            } finally { frame.release() }
+            val cleaned = StatParser.clean(text)
+            if (cleaned.isNotEmpty()) {
+                val key = when (dictKey) {
+                    "mappings.characters" -> dict?.keyByName(cleaned, fuzzy)
+                    "mappings.weapons" -> weaponDictionary?.keyByName(cleaned)
+                    "mappings.artifactSets" -> setDictionary?.setKeyByPiece(cleaned)
+                    else -> null
+                }
+                if (key != null) {
+                    vars.ocrMatch = key
+                    Log.i(TAG, "ocrWithRetry matched: $cleaned → $key (attempt $attempt)")
+                    return
+                }
+            }
+            if (attempt < maxRetries) delay(200)
+        }
+        Log.w(TAG, "ocrWithRetry failed after $maxRetries attempts: $rect")
+    }
+
+    /** P3 exit：via 返回按钮（文本 "return[2913,41]"，坐标机读走正则）→ 点击后终止流程。 */
+    private suspend fun exitStep(step: JSONObject) {
+        val via = step.optString("via", "")
+        val m = Regex("\\[(\\d+),(\\d+)\\]").find(via)
+        if (m != null) {
+            val pt = profile.scalePoint(m.groupValues[1].toInt(), m.groupValues[2].toInt())
+            actions.click(pt.x, pt.y)
+            delay(CLICK_SETTLE_MS)
+        }
+        Log.i(TAG, "exit step reached")
+        vars.stopRequested = true // 终止扫描（run() 与 pagedGrid 均检查）
+    }
+
+    /**
+     * P3 verify：zone 状态断言（顶层步骤，不在 visit 内——无 cell 上下文；支持 artifact.panel.* 系列）。
+     * 判定不等于 expect 则 warn（D5 交给外层 fallback/retry 处理，verify 本身不阻断）。
+     */
+    private suspend fun verify(step: JSONObject) {
+        val zone = step.getString("zone")
+        val expectRaw = step.optString("expect", "true")
+        // toggle($curLock)：期望与 vote as=curLock 快照取反（锁定翻转断言）
+        val expect = if (expectRaw.startsWith("toggle(")) {
+            val varName = expectRaw.removePrefix("toggle(").removeSuffix(")").removePrefix("$").trim()
+            when (varName) {
+                "curLock" -> !(vars.curLock ?: false)
+                else -> {
+                    Log.w(TAG, "verify toggle: unknown var '$varName'")
+                    return
+                }
+            }
+        } else expectRaw.toBoolean()
+        val frame = freshFrame()
+        val actual = try {
+            when (zone) {
+                "artifact.panel.astral" -> VoteJudges.panelAstral(frame, profile, 0).matched
+                "artifact.panel.lock" -> VoteJudges.panelLock(frame, profile, 0).matched
+                else -> {
+                    Log.w(TAG, "verify: zone '$zone' not supported in top-level context")
+                    return
+                }
+            }
+        } finally { frame.release() }
+        if (actual != expect) {
+            Log.w(TAG, "verify FAILED: zone=$zone expect=$expect actual=$actual")
+        }
+    }
+
     private suspend fun runVisit(visit: JSONArray, gridKey: String, col: Int, row: Int, index: Int) {
         for (i in 0 until visit.length()) {
-            val step = visit.getJSONObject(i)
-            when (step.getString("do")) {
+            executeVisitStep(visit.getJSONObject(i), gridKey, col, row, index)
+        }
+    }
+
+    private suspend fun executeVisitStep(step: JSONObject, gridKey: String, col: Int, row: Int, index: Int) {
+        when (step.getString("do")) {
+                "ifMatch" -> {
+                    // 计划匹配闸（artifact_lock）：P4 规则层注入 vars.currentTask；无计划则整段跳过
+                    if (vars.currentTask == null) {
+                        Log.i(TAG, "ifMatch: no plan injected (vars.currentTask null), then skipped")
+                    } else {
+                        val thenSteps = step.getJSONArray("then")
+                        for (i in 0 until thenSteps.length()) {
+                            executeVisitStep(thenSteps.getJSONObject(i), gridKey, col, row, index)
+                            if (vars.stopRequested) break
+                        }
+                    }
+                }
                 "vote" -> vote(step, gridKey, col, row)
                 "click" -> {
-                    // fast.at=$cell.center；fallback ocrAnchor P1-b
+                    // fast.at=$cell.center + 两级（fallback ocrAnchor 验证详情面板）
                     val center = profile.cellCenter(gridKey, index)
                     actions.click(center.x, center.y)
                     delay(CLICK_SETTLE_MS)
+                    val ocrGateway = ocr // 锁定非空，跨 lambda 保持 smart cast
+                    // 详情切换等待：点下一格后详情可能仍显示上一件（模拟器实测 63 格仅 27 件 emit 的主因）。
+                    // OCR 面板件名 == 上次件名 → 重点一次 + 600ms；仅圣遗物背包（weapon 面板 rect 不同）。
+                    if (ocrGateway != null && gridKey == "artifact_backpack") {
+                        val nameRect = runCatching { profile.rect("panels.artifact_backpack.name") }.getOrNull()
+                        if (nameRect != null) {
+                            val pieceNow = runCatching {
+                                val f = freshFrame()
+                                try {
+                                    StatParser.clean(ocrGateway.readLines(f, listOf(nameRect)).joinToString(" "))
+                                } finally { f.release() }
+                            }.getOrDefault("")
+                            if (pieceNow.isNotEmpty() && pieceNow == vars.lastPieceName) {
+                                Log.d(TAG, "detail unchanged ('$pieceNow'), re-click")
+                                actions.click(center.x, center.y)
+                                delay(600)
+                            }
+                            if (pieceNow.isNotEmpty()) vars.lastPieceName = pieceNow
+                        }
+                    }
+                    val fallback = step.optJSONObject("fallback")
+                    if (fallback != null && ocrGateway != null) {
+                        // fallback.kind=ocrAnchor + region="$panels.xxx.name"
+                        // 校验详情面板是否打开（OCR region 有非空文本）
+                        val region = fallback.optString("region", "").removePrefix("$")
+                        if (region.isNotEmpty()) {
+                            val regionRect = try { profile.rect(region) } catch (_: Exception) { null }
+                            if (regionRect != null) {
+                                val ok = runCatching {
+                                    val frame = freshFrame()
+                                    try {
+                                        val text = ocrGateway.readLines(frame, listOf(regionRect)).joinToString(" ")
+                                        StatParser.clean(text).isNotEmpty()
+                                    } finally { frame.release() }
+                                }.getOrDefault(true)
+                                if (!ok) {
+                                    Log.w(TAG, "fallback: panel not detected at $region, retry click")
+                                    actions.click(center.x, center.y)
+                                    delay(CLICK_SETTLE_MS)
+                                }
+                            }
+                        }
+                    }
                 }
                 "parsePanel" -> parsePanel(step)
+                "dialog" -> dialog(step)
+                "verify" -> verify(step)
                 "emit" -> listener.onProgress("emit", vars.snapshot())
                 "stopWhen" -> stopWhen(step)
                 else -> Log.w(TAG, "unknown visit step '${step.optString("do")}', skipped")
             }
         }
-    }
 
     // ---- #4 vote：像素投票判据 ----
     private suspend fun vote(step: JSONObject, gridKey: String? = null, col: Int = 0, row: Int = 0) {
@@ -382,12 +720,21 @@ class ScanEngine(
                 }
                 "artifact.panel.lock" -> {
                     vars.locked = VoteJudges.panelLock(frame, profile, yShift).matched
+                    if (step.optString("as") == "curLock") vars.curLock = vars.locked
                 }
                 "artifact.panel.astral" -> {
                     vars.favorited = VoteJudges.panelAstral(frame, profile, yShift).matched
                 }
                 "artifact.rarity" -> {
                     vars.rarity = VoteJudges.rarityFromBanner(frame, profile)
+                }
+                "weapon.card.starStrip" -> {
+                    val r = VoteJudges.weaponStarStrip(frame, profile, requireNotNull(gridKey), col, row)
+                    vars.rarity = r.count
+                }
+                "weapon.card.lockBadge" -> {
+                    val r = VoteJudges.cardLockBadgeByZone(frame, profile, requireNotNull(gridKey), "weapon.card.lockBadge", col, row)
+                    vars.locked = r.matched
                 }
                 else -> Log.w(TAG, "vote zone '$zoneKey' not implemented, skipped")
             }
@@ -403,16 +750,54 @@ class ScanEngine(
             return
         }
         val panelKey = step.optString("panel", "artifact_backpack")
-        if (panelKey != "artifact_backpack") {
+        if (panelKey != "artifact_backpack" && panelKey != "weapon_backpack") {
             Log.w(TAG, "parsePanel panel '$panelKey' not supported yet, skipped")
             return
         }
         val frame = freshFrame()
         try {
-            parseArtifactPanel(frame, ocr)
+            if (panelKey == "weapon_backpack") {
+                parseWeaponPanel(frame, ocr)
+            } else {
+                parseArtifactPanel(frame, ocr)
+            }
         } finally {
             frame.release()
         }
+    }
+
+    private suspend fun parseWeaponPanel(frame: Mat, ocr: OcrGateway) {
+        val yShift = 0
+        val nameRect = profile.rect("panels.weapon_backpack.name")
+        val pieceName = ocr.readLines(frame, listOf(nameRect)).firstOrNull()?.let { StatParser.clean(it) }
+        // 武器 slot 文本（角色武器类型）无 GOod 映射——读但不导出
+        val mainLabel = ocr.readLines(frame, listOf(profile.rect("panels.weapon_backpack.mainLabel"))).firstOrNull()
+        val mainValueText = ocr.readLines(frame, listOf(profile.rect("panels.weapon_backpack.mainValue"))).firstOrNull()
+        val levelText = ocr.readLines(frame, listOf(profile.rect("panels.weapon_backpack.level"))).firstOrNull()
+        val refineText = ocr.readLines(frame, listOf(profile.rect("panels.weapon_backpack.refine"))).firstOrNull()
+        val key = pieceName?.let { weaponDictionary?.keyByName(it) }
+        if (pieceName != null && key == null) {
+            Log.w(TAG, "weapon name '$pieceName' not found in mappings.weapons")
+        }
+        val level = levelText?.let { StatParser.extractValue(it)?.toInt() } ?: 0
+        val refine = refineText?.let { StatParser.extractValue(it)?.toInt() }
+        val rarity = vars.rarity  // vote zone weapon.card.starStrip 已设
+        if (rarity < 1 || rarity > 5) return
+        if (key == null) return
+        // 去重：key + level + refine 唯一
+        if (dedupe && resultsWeapons.any { it.key == key && it.level == level && it.refine == refine }) {
+            Log.d(TAG, "duplicate weapon skipped: $key L$level R$refine")
+            return
+        }
+        val weapon = GoodWeapon(
+            key = key,
+            level = level,
+            rarity = rarity,
+            refine = refine,
+            lock = vars.locked == true,
+        )
+        resultsWeapons.add(weapon)
+        listener.onProgress("weapon", vars.snapshot() + ("piece" to pieceName) + ("idx" to resultsWeapons.size))
     }
 
     private suspend fun parseArtifactPanel(frame: Mat, ocr: OcrGateway) {
@@ -517,6 +902,12 @@ class ScanEngine(
     // ---- #10 stopWhen：表达式谓词（D3）----
     private fun stopWhen(step: JSONObject) {
         val expr = step.getString("expr")
+        // 哨兵保护：rarity=-1（vote 未判定，如 3★ 蓝卡无金/紫 banner）不得触发止扫表达式
+        // （rarity<4 对 -1 恒真 → 会把"整页未判定"误判为"全部低星"而立即终止）。
+        if (expr.contains("rarity") && vars.rarity < 0) {
+            Log.d(TAG, "stopWhen skipped: rarity not judged yet (-1 sentinel)")
+            return
+        }
         val scope = step.optString("scope", "page")
         if (Expr.eval(expr, vars.exprVars())) {
             // scope=cell（本页后停）：置 flag，页遍历结束后停止；scope=page 立即停
@@ -560,6 +951,7 @@ class ScanEngine(
             "bagpack" to "screens.game_home.anchors.bagpack",
             "character" to "screens.game_home.anchors.character",
             "artifact_tab" to "screens.artifact_backpack.tab",
+            "weapon_tab" to "screens.weapon_backpack.tab",
         )
     }
 }
