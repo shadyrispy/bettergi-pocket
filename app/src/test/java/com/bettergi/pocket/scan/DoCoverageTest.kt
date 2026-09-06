@@ -22,43 +22,70 @@ class DoCoverageTest {
         error("dsl flows dir not found")
     }
 
-    private fun implementedDoes() = setOf(
-        // executeStep 顶层
+    /** 顶层（executeStep）支持集。 */
+    private fun topLevelDoes() = setOf(
         "enterScreen", "dualStateButton", "readCount", "pagedGrid",
         "dialog", "ocrWithRetry", "navigate", "foreach", "setFilter",
         "exit", "verify", "emit",
-        // runVisit visit 内
-        "vote", "click", "parsePanel", "stopWhen", "ifMatch",
     )
 
-    private fun collectDoes(node: Any?, acc: MutableSet<String>) {
+    /** visit 内（executeVisitStep）支持集。 */
+    private fun visitDoes() = setOf(
+        "ifMatch", "vote", "click", "parsePanel", "navigate",
+        "dialog", "verify", "emit", "stopWhen",
+    )
+
+    private fun implementedDoes() = topLevelDoes() + visitDoes()
+
+    /**
+     * 层级感知收集：`pagedGrid.visit` / `ifMatch.then` 下的 do 归 visit 层，
+     * `foreach.steps` 回到顶层，其余归顶层。
+     * ⚠️ 旧版把两集合合并成一个（层级盲区）——navigate 曾只挂顶层分发，
+     * 在 visit 里静默落 unknown-step 而守门仍绿。现按层级分别校验。
+     */
+    private fun collectDoes(node: Any?, inVisit: Boolean, top: MutableSet<String>, visit: MutableSet<String>) {
         when (node) {
             is JSONObject -> {
                 for (key in node.keys()) {
                     val v = node.get(key)
-                    if (key == "do" && v is String) acc.add(v)
-                    collectDoes(v, acc)
+                    if (key == "do" && v is String) {
+                        if (inVisit) visit.add(v) else top.add(v)
+                    }
+                    when (key) {
+                        "visit" -> collectDoes(v, true, top, visit)      // pagedGrid.visit
+                        "then" -> collectDoes(v, inVisit, top, visit)    // ifMatch.then 继承当前层
+                        "steps" -> collectDoes(v, false, top, visit)     // foreach.steps 回顶层
+                        else -> collectDoes(v, inVisit, top, visit)
+                    }
                 }
             }
-            is org.json.JSONArray -> for (i in 0 until node.length()) collectDoes(node.get(i), acc)
+            is org.json.JSONArray -> for (i in 0 until node.length()) {
+                collectDoes(node.get(i), inVisit, top, visit)
+            }
         }
     }
 
     @Test
     fun `all flow do primitives are implemented`() {
-        val implemented = implementedDoes()
         val flows = flowsDir().listFiles { f -> f.extension == "json" } ?: error("no flows")
         assertTrue("no flow files found", flows.isNotEmpty())
-        val missing = mutableMapOf<String, Set<String>>()
+        val missingTop = mutableMapOf<String, Set<String>>()
+        val missingVisit = mutableMapOf<String, Set<String>>()
         for (f in flows) {
-            val acc = mutableSetOf<String>()
-            collectDoes(JSONObject(f.readText()), acc)
-            val unknown = acc - implemented
-            if (unknown.isNotEmpty()) missing[f.name] = unknown
+            val top = mutableSetOf<String>()
+            val visit = mutableSetOf<String>()
+            collectDoes(JSONObject(f.readText()), false, top, visit)
+            (top - topLevelDoes()).takeIf { it.isNotEmpty() }?.let { missingTop[f.name] = it }
+            (visit - visitDoes()).takeIf { it.isNotEmpty() }?.let { missingVisit[f.name] = it }
         }
         assertTrue(
-            "flows reference unimplemented do primitives: $missing (implement them or extend ScanEngine)",
-            missing.isEmpty(),
+            "flows reference unimplemented TOP-LEVEL do primitives: $missingTop (implement them or extend ScanEngine)",
+            missingTop.isEmpty(),
+        )
+        assertTrue(
+            "flows reference unimplemented VISIT-LEVEL do primitives: $missingVisit " +
+                "(visit 层与顶层分发集合不同——曾因层级盲区让 navigate 静默失效)",
+            missingVisit.isEmpty(),
         )
     }
 }

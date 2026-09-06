@@ -22,9 +22,9 @@
         { "do": "vote", "zone": "artifact.panel.astral", "as": "favorited" },
         { "do": "parsePanel", "panel": "artifact_backpack",
           "fields": ["name", "slot", "mainName", "mainValue", "level", "subStats(动态行数)"],
-          "derive": { "setName": "由 name 反推（背包面板 set_name 被遮挡 OCR 不可读，用户定稿 2026-09-01）", "dict": "tools/artifactSetPieces.json pieceToSet（276 件/56 套）" },
+          "derive": { "setName": "由 name 反推（背包面板 set_name 被遮挡 OCR 不可读，用户定稿 2026-09-01）", "dict": "tools/good_names.json artifactPieces（276 件/56 套）" },
           "raritySubRule": "5★恒4词条 / 4★初始2最高3(行数>3=解析异常) / 3★2★止扫不解析（用户定稿 2026-09-02）",
-          "dict": { "subStats": "rollTable" } },
+          "dict": { "name": "mappings.artifactPieces", "subStats": "rollTable" } },
         { "do": "emit", "as": "GoodArtifact" },
         { "do": "stopWhen", "expr": "rarity < 4 && level == 0", "action": "Stop", "scope": "cell",
           "note": "3★/2★=扫描停止标识（用户定稿 2026-09-02）——低稀有度且未强化 → 本页后停（PC 异常策略）" }

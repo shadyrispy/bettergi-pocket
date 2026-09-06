@@ -32,6 +32,8 @@ import com.bettergi.pocket.scan.ScriptRunner
 import com.bettergi.pocket.settings.TriggerSettings
 import com.bettergi.pocket.settings.TriggerSettingsRepository
 import com.bettergi.pocket.trigger.TriggerEngine
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class TriggerForegroundService : Service() {
     private lateinit var settingsRepository: TriggerSettingsRepository
@@ -62,6 +64,7 @@ class TriggerForegroundService : Service() {
         // 自动扫描：投影就绪即开跑；关闭即停（P1-c 悬浮窗入口）
         if (settings.scanEnabled && settings.screenShareEnabled && captureController.isRunning()) {
             if (!scriptRunner.isRunning()) {
+                overlayController.collapse() // 自动化执行前收面板（与滑动测试缩球对称）
                 scriptRunner.startScan(settings.scanFlow, maxPagesOrDefault(settings.scanMaxPages))
             }
         } else if (!settings.scanEnabled && scriptRunner.isRunning()) {
@@ -201,22 +204,58 @@ class TriggerForegroundService : Service() {
                 // 切换 :a11y Overlay 探针（桥模式：服务侧 toggle 调用即 :a11y 进程内执行）
                 InputAccessibilityService.toggleProbe(this)
             }
+            ACTION_DEBUG_SET_VERBOSE -> {
+                // §13：识别日志 D 级开关（逐格/逐次明细，默认关闭以免一页 21 行刷屏）
+                val on = intent.getBooleanExtra(EXTRA_ENABLED, false)
+                com.bettergi.pocket.log.RecognitionLog.verbose = on
+                Log.i(TAG, "recognition log verbose=$on")
+            }
             ACTION_DEBUG_SWIPE_TEST -> {
                 val startY = intent.getIntExtra(EXTRA_START_Y, 1150)
                 val dist = intent.getIntExtra(EXTRA_DIST, 876)
-                val fromX = 1614
-                val toY = startY - dist
-                // 派发滑动到主线程（InputAccessibilityService.swipe 通过桥即可：主进程调起即用 :a11y 实例）
-                mainHandler.post {
-                    val ok = InputAccessibilityService.swipe(fromX, startY, fromX, toY, durationMs = 400, segments = 3)
-                    Log.i(TAG, "debug swipe ($fromX,$startY)->($fromX,$toY) dist=$dist ok=$ok")
+                val measure = intent.getBooleanExtra(EXTRA_MEASURE, false)
+                if (startY != null && dist != 0) {
+                    val fromX = 1614
+                    val toY = startY - dist
+                    // 派发滑动到主线程（InputAccessibilityService.swipe 通过桥即可：主进程调起即用 :a11y 实例）
+                    // dist>0 上滑翻页；dist<0 下滑回顶（网格在顶端钳制，用于逐点标定前复位到首页）
+                    mainHandler.post {
+                        val ok = InputAccessibilityService.swipe(fromX, startY, fromX, toY, durationMs = 400, segments = 3)
+                        Log.i(TAG, "debug swipe ($fromX,$startY)->($fromX,$toY) dist=$dist ok=$ok")
+                        // §12.2 标定：滑动结束 + 动画 settle 后抓帧测上沿相位误差，供距离自适应算法对标真值
+                        if (measure && ok) {
+                            scriptRunner.scope.launch {
+                                delay(700)
+                                val err = scriptRunner.measureTopEdge("artifact_backpack")
+                                Log.i(
+                                    TAG,
+                                    "align[artifact_backpack]: swipeMeasured dist=$dist startY=$startY err=${err ?: "null"}",
+                                )
+                            }
+                        }
+                    }
+                } else if (startY != null && dist == 0 && measure) {
+                    // 仅测量模式（dist=0）：不滑动，直接抓当前帧测上沿误差（逐点标定前取基准）
+                    scriptRunner.scope.launch {
+                        delay(200)
+                        val err = scriptRunner.measureTopEdge("artifact_backpack")
+                        Log.i(TAG, "align[artifact_backpack]: measureOnly err=${err ?: "null"}")
+                    }
+                } else {
+                    Log.w(TAG, "debug swipe: startY invalid or dist=0 without measure")
                 }
             }
             ACTION_DEBUG_SCAN_FLOW -> {
                 val flow = intent.getStringExtra(EXTRA_FLOW) ?: "artifact_scan"
                 val maxPages = intent.getIntExtra(EXTRA_MAX_PAGES, Int.MAX_VALUE)
+                val geoAdvance = intent.getBooleanExtra(EXTRA_GEO_ADVANCE, true)
+                val adaptive = intent.getBooleanExtra(EXTRA_ADAPTIVE_DIST, true)
                 if (captureController.isRunning()) {
-                    scriptRunner.startScan(flow, maxPages)
+                    scriptRunner.startScan(
+                        flow, maxPages,
+                        useGeometryAdvance = geoAdvance,
+                        useAdaptiveDistance = adaptive,
+                    )
                 } else {
                     Log.w(TAG, "scan flow request ignored: projection not running")
                 }
@@ -239,6 +278,8 @@ class TriggerForegroundService : Service() {
             mainHandler.post {
                 val text = when (stage) {
                     "artifact" -> "扫描中：第 ${vars["idx"]} 件 ${vars["piece"] ?: ""}"
+                    "character" -> "扫描中：第 ${vars["idx"]} 位 ${vars["name"] ?: ""}"
+                    "weapon" -> "扫描中：第 ${vars["idx"]} 把 ${vars["piece"] ?: ""}"
                     "exported" -> "完成：${vars["count"]} 件已导出"
                     "total_mismatch" -> "总数不符：读到 ${vars["total"]} 实扫 ${vars["scanned"]}"
                     else -> "扫描中…"
@@ -422,14 +463,20 @@ class TriggerForegroundService : Service() {
         const val ACTION_DEBUG_SET_SCAN = "com.bettergi.pocket.action.DEBUG_SET_SCAN"
         const val ACTION_DEBUG_STATUS = "com.bettergi.pocket.action.DEBUG_STATUS"
         const val ACTION_DEBUG_SET_PROBE = "com.bettergi.pocket.action.DEBUG_SET_PROBE"
+        const val ACTION_DEBUG_SET_VERBOSE = "com.bettergi.pocket.action.DEBUG_SET_VERBOSE"
         const val ACTION_DEBUG_SWIPE_TEST = "com.bettergi.pocket.action.DEBUG_SWIPE_TEST"
         const val ACTION_DEBUG_SCAN_FLOW = "com.bettergi.pocket.action.DEBUG_SCAN_FLOW"
 
         const val EXTRA_ENABLED = "enabled"
         const val EXTRA_START_Y = "startY"
         const val EXTRA_DIST = "dist"
+        const val EXTRA_MEASURE = "measure"
         const val EXTRA_FLOW = "flow"
         const val EXTRA_MAX_PAGES = "maxPages"
+        /** §12.1 A/B：true=几何推导翻页落点，false=profiles 写死坐标。 */
+        const val EXTRA_GEO_ADVANCE = "geoAdvance"
+        /** §12.2 A/B：true=每页按相位误差自适应翻页距离。 */
+        const val EXTRA_ADAPTIVE_DIST = "adaptiveDist"
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
 

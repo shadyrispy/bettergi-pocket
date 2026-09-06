@@ -1,0 +1,13 @@
+<!-- 调试构建专用：TriggerForegroundService 导出给 adb shell（uiautomator/标定 harness 直驱
+     DEBUG_* action）。Android 13 后台广播限制拦 manifest receiver + Bluestacks 焦点抢占
+     使「前台送广播」路线不可行，见 2026-09-05 测试日志。release 构建不受影响。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <service
+            android:name="com.bettergi.pocket.service.TriggerForegroundService"
+            android:exported="true"
+            android:foregroundServiceType="dataSync|mediaProjection"
+            tools:replace="android:exported" />
+    </application>
+</manifest>

@@ -46,6 +46,8 @@ import com.bettergi.pocket.genshin.GenshinLauncher
 import com.bettergi.pocket.genshin.GenshinPackages
 import com.bettergi.pocket.input.AccessibilityServiceHealth
 import com.bettergi.pocket.input.InputAccessibilityService
+import com.bettergi.pocket.input.SwipeMethod
+import com.bettergi.pocket.log.RecognitionLog
 import com.bettergi.pocket.settings.TriggerSettings
 import com.bettergi.pocket.settings.TriggerSettingsRepository
 import java.text.SimpleDateFormat
@@ -88,6 +90,7 @@ class OverlayWindowController(
     private var rootView: View? = null
     private var bubbleView: View? = null
     private var panelView: View? = null
+    private var panelScroll: View? = null
     private var statusDot: View? = null
     private var statusText: TextView? = null
     private var chatBadge: View? = null
@@ -130,7 +133,8 @@ class OverlayWindowController(
     private var logScroll: ScrollView? = null
     private var logHandleParams: WindowManager.LayoutParams? = null
     private var logBodyParams: WindowManager.LayoutParams? = null
-    private val logLines = ArrayDeque<String>(MAX_LOG_LINES)
+    /** §13：全局日志订阅句柄（缓冲已迁至 [RecognitionLog]，本类只负责渲染）。 */
+    private var logListener: ((List<RecognitionLog.Entry>) -> Unit)? = null
     private var logWindowVisible = false
     private var talkingUntilMs: Long = 0L
     private val logTimeFormat = SimpleDateFormat("HH:mm:ss", Locale.CHINA)
@@ -186,6 +190,7 @@ class OverlayWindowController(
 
         bubbleView = bubble
         panelView = panel
+        panelScroll = root.findViewById(R.id.overlay_panel_scroll)
         statusDot = root.findViewById(R.id.overlay_status_dot)
         statusText = root.findViewById<TextView>(R.id.overlay_status_text).also { text ->
             text.setOnClickListener {
@@ -229,6 +234,21 @@ class OverlayWindowController(
         swipeDistEdit = root.findViewById<EditText>(R.id.overlay_swipe_dist).apply {
             setText(swipePrefs.getInt(KEY_SWIPE_DIST, 876).toString())
             setOnFocusChangeListener { _, has -> setPanelFocusable(has) }
+        }
+        // 滑动方式选择：三段式 / 路标链（持久化，下次展开沿用）
+        swipeMethodChipThree = root.findViewById(R.id.overlay_swipe_method_three)
+        swipeMethodChipChain = root.findViewById(R.id.overlay_swipe_method_chain)
+        swipeMethod = parseSwipeMethod(swipePrefs.getString(KEY_SWIPE_METHOD, "waypoint_chain"))
+        refreshSwipeMethodChips()
+        swipeMethodChipThree?.setOnClickListener {
+            swipeMethod = SwipeMethod.THREE_SEGMENT
+            swipePrefs.edit().putString(KEY_SWIPE_METHOD, "three_segment").apply()
+            refreshSwipeMethodChips()
+        }
+        swipeMethodChipChain?.setOnClickListener {
+            swipeMethod = SwipeMethod.WAYPOINT_CHAIN
+            swipePrefs.edit().putString(KEY_SWIPE_METHOD, "waypoint_chain").apply()
+            refreshSwipeMethodChips()
         }
         root.findViewById<View>(R.id.overlay_swipe_start).setOnClickListener { startSwipeTest() }
         root.findViewById<View>(R.id.overlay_swipe_probe).setOnClickListener {
@@ -408,6 +428,9 @@ class OverlayWindowController(
     private var swipeExtras: View? = null
     private var swipeStartYEdit: EditText? = null
     private var swipeDistEdit: EditText? = null
+    private var swipeMethodChipThree: TextView? = null
+    private var swipeMethodChipChain: TextView? = null
+    private var swipeMethod: SwipeMethod = SwipeMethod.WAYPOINT_CHAIN
     private val swipePrefs by lazy {
         context.getSharedPreferences("swipe_test", Context.MODE_PRIVATE)
     }
@@ -443,16 +466,43 @@ class OverlayWindowController(
         swipePrefs.edit()
             .putInt(KEY_SWIPE_START_Y, startY)
             .putInt(KEY_SWIPE_DIST, dist)
+            .putString(KEY_SWIPE_METHOD, if (swipeMethod == SwipeMethod.THREE_SEGMENT) "three_segment" else "waypoint_chain")
             .apply()
         setPanelFocusable(false)
         setExpanded(false) // 缩球：执行时无遮挡
-        val ok = InputAccessibilityService.swipe(1614, startY, 1614, startY - dist)
+        val ok = InputAccessibilityService.swipe(1614, startY, 1614, startY - dist, method = swipeMethod)
+        val methodLabel = if (swipeMethod == SwipeMethod.THREE_SEGMENT) "三段式" else "路标链"
         Toast.makeText(
             context,
-            if (ok) "滑动已执行：(${"1614"},$startY)→(1614,${startY - dist})" else "滑动失败：无障碍未连接",
+            if (ok) "滑动已执行（$methodLabel）(${"1614"},$startY)→(1614,${startY - dist})"
+            else "滑动失败：无障碍未连接",
             Toast.LENGTH_SHORT,
         ).show()
     }
+
+    /** 选中态高亮：选中芯片用金色底 + 金字，未选用行底 + 灰字。 */
+    private fun refreshSwipeMethodChips() {
+        val three = swipeMethodChipThree ?: return
+        val chain = swipeMethodChipChain ?: return
+        val isThree = swipeMethod == SwipeMethod.THREE_SEGMENT
+        three.setBackgroundResource(if (isThree) R.drawable.bg_overlay_launch else R.drawable.bg_overlay_row)
+        chain.setBackgroundResource(if (isThree) R.drawable.bg_overlay_row else R.drawable.bg_overlay_launch)
+        three.setTextColor(
+            ContextCompat.getColor(
+                themedContext,
+                if (isThree) R.color.overlay_gold else R.color.overlay_text_muted,
+            ),
+        )
+        chain.setTextColor(
+            ContextCompat.getColor(
+                themedContext,
+                if (isThree) R.color.overlay_text_muted else R.color.overlay_gold,
+            ),
+        )
+    }
+
+    private fun parseSwipeMethod(value: String?): SwipeMethod =
+        if (value == "three_segment") SwipeMethod.THREE_SEGMENT else SwipeMethod.WAYPOINT_CHAIN
 
     private fun applyTouchPassthrough(
         lp: WindowManager.LayoutParams?,
@@ -593,6 +643,11 @@ class OverlayWindowController(
         }
     }
 
+    /** 扫描等自动化执行前收起面板（与滑动测试缩球对称）：避免面板盖住游戏左侧界面干扰用户观察。 */
+    fun collapse() {
+        setExpanded(false)
+    }
+
     private fun setExpanded(value: Boolean) {
         if (expanded == value || transforming) return
         val bubble = bubbleView ?: return
@@ -612,7 +667,9 @@ class OverlayWindowController(
             panel.scaleX = 0.84f
             panel.scaleY = 0.84f
             panel.visibility = View.VISIBLE
+            panelScroll?.visibility = View.VISIBLE
             root.post {
+                constrainPanelHeight()
                 params?.let { ensurePanelOnScreen(it) }
                 applyPanelPivot(panel)
                 bubble.animate()
@@ -656,6 +713,9 @@ class OverlayWindowController(
                 .setInterpolator(ease)
                 .withEndAction {
                     panel.visibility = View.GONE
+                    // ScrollView 是 panel 的外层容器：不同步 GONE 会保留面板高度，
+                    // 窗口（WRAP_CONTENT）不回缩 → 整条竖列吞触摸（fix54 引入的回归）
+                    panelScroll?.visibility = View.GONE
                     panel.alpha = 1f
                     panel.scaleX = 1f
                     panel.scaleY = 1f
@@ -712,17 +772,96 @@ class OverlayWindowController(
         appendLog("点击对话选项 ($x, $y)")
     }
 
+    /**
+     * §13：写入端改为全局日志汇 [RecognitionLog]。
+     * 旧实现有两大缺陷：①private，扫描/加锁/装备流程无法写入；②`if (!logWindowVisible) return`
+     * 导致**关窗期间日志全丢**。现恒缓冲 + 开窗回放，任何流程皆可写。
+     */
     private fun appendLog(message: String) {
-        mainHandler.post {
-            if (!logWindowVisible || logText == null) return@post
-            val line = "${logTimeFormat.format(Date())} $message"
-            if (logLines.size >= MAX_LOG_LINES) {
-                logLines.removeFirst()
-            }
-            logLines.addLast(line)
-            logText?.text = logLines.joinToString("\n")
-            logScroll?.post { logScroll?.fullScroll(View.FOCUS_DOWN) }
+        RecognitionLog.log(RecognitionLog.Tag.AUTOSKIP, RecognitionLog.Level.I, message)
+    }
+
+    /** §13：订阅全局日志（开窗即回放全部历史）。 */
+    private fun bindRecognitionLog() {
+        logListener?.let { RecognitionLog.removeListener(it) }
+        logListener = RecognitionLog.addListener { entries -> renderLog(entries) }
+        bindLogFilters()
+    }
+
+    /**
+     * §13.5#6：按 Tag/级别着色渲染。W 级一律告警色（跨 Tag 高亮），其余按 Tag 主色。
+     */
+    private fun renderLog(entries: List<RecognitionLog.Entry>) {
+        val tv = logText ?: return
+        if (entries.isEmpty()) {
+            tv.text = "等待识别…"
+            return
         }
+        val spannable = android.text.SpannableStringBuilder()
+        entries.forEachIndexed { i, e ->
+            if (i > 0) spannable.append("\n")
+            val start = spannable.length
+            spannable.append(e.render())
+            spannable.setSpan(
+                android.text.style.ForegroundColorSpan(
+                    ContextCompat.getColor(themedContext, colorFor(e)),
+                ),
+                start,
+                spannable.length,
+                android.text.Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+        }
+        tv.text = spannable
+        logScroll?.post { logScroll?.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    private fun colorFor(e: RecognitionLog.Entry): Int = when (e.level) {
+        RecognitionLog.Level.W -> R.color.overlay_log_warn
+        else -> when (e.tag) {
+            RecognitionLog.Tag.AUTOSKIP -> R.color.overlay_log_autoskip
+            RecognitionLog.Tag.SCAN -> R.color.overlay_log_scan
+            RecognitionLog.Tag.LOCK -> R.color.overlay_log_lock
+            RecognitionLog.Tag.EQUIP -> R.color.overlay_log_equip
+            RecognitionLog.Tag.CHAR -> R.color.overlay_log_char
+        }
+    }
+
+    /** §13.5#6：过滤芯片——点击切换该 Tag 显隐，选中态用对应主色。 */
+    private fun bindLogFilters() {
+        val pairs = listOf(
+            R.id.overlay_log_filter_autoskip to RecognitionLog.Tag.AUTOSKIP,
+            R.id.overlay_log_filter_scan to RecognitionLog.Tag.SCAN,
+            R.id.overlay_log_filter_lock to RecognitionLog.Tag.LOCK,
+            R.id.overlay_log_filter_equip to RecognitionLog.Tag.EQUIP,
+            R.id.overlay_log_filter_char to RecognitionLog.Tag.CHAR,
+        )
+        // 注意：bindRecognitionLog() 早于 logBodyView 赋值，故回退到 logText 的根视图查找
+        val container = logBodyView ?: logText?.rootView ?: return
+        for ((id, tag) in pairs) {
+            val chip = container.findViewById<TextView>(id) ?: continue
+            refreshFilterChip(chip, tag)
+            chip.setOnClickListener {
+                RecognitionLog.setVisible(tag, !RecognitionLog.isVisible(tag))
+                refreshFilterChip(chip, tag)
+            }
+        }
+    }
+
+    private fun refreshFilterChip(chip: TextView, tag: RecognitionLog.Tag) {
+        val on = RecognitionLog.isVisible(tag)
+        chip.setTextColor(
+            ContextCompat.getColor(
+                themedContext,
+                if (on) colorFor(RecognitionLog.Entry("", tag, RecognitionLog.Level.I, ""))
+                else R.color.overlay_text_muted,
+            ),
+        )
+        chip.alpha = if (on) 1f else 0.45f
+    }
+
+    private fun unbindRecognitionLog() {
+        logListener?.let { RecognitionLog.removeListener(it) }
+        logListener = null
     }
 
     private fun setLogWindowVisible(visible: Boolean, persist: Boolean = true) {
@@ -855,6 +994,8 @@ class OverlayWindowController(
         val body = LayoutInflater.from(themedContext).inflate(R.layout.overlay_log_body, null)
         logTitle = handle.findViewById(R.id.overlay_log_title)
         logText = body.findViewById(R.id.overlay_log_text)
+        // §13：开窗即订阅全局日志并回放历史（历史保留在 RecognitionLog，不随关窗清除）
+        bindRecognitionLog()
         logScroll = body.findViewById(R.id.overlay_log_scroll)
 
         val width = dp(LOG_WIDTH_DP)
@@ -912,7 +1053,8 @@ class OverlayWindowController(
         logTitle = null
         logText = null
         logScroll = null
-        logLines.clear()
+        // §13：不再清空历史（旧实现收窗即 clear，关窗期间的识别明细永久丢失）；仅退订渲染
+        unbindRecognitionLog()
     }
 
     private fun overlayParams(
@@ -974,16 +1116,25 @@ class OverlayWindowController(
 
     private fun clampLogWindows() {
         val handleLp = logHandleParams ?: return
+        val bodyLp = logBodyParams ?: return
         val handle = logHandleView ?: return
+        val body = logBodyView ?: return
         val screen = screenSize()
         val width = if (handle.width > 0) handle.width else dp(LOG_WIDTH_DP)
         val handleHeight = if (handle.height > 0) handle.height else dp(28)
-        val bodyHeight = logBodyView?.height?.takeIf { it > 0 } ?: dp(120)
         val minY = statusBarHeight()
+        // body 限高：日志行多时 WRAP_CONTENT 可能超出屏幕（与面板限高同理），由内部 ScrollView 滚动
+        val maxBodyH = (screen.second - minY - navigationBarHeight() - handleHeight - dp(8))
+            .coerceAtLeast(dp(80))
+        val measuredBody = body.height.takeIf { it > 0 } ?: dp(120)
+        if (bodyLp.height != measuredBody.coerceAtMost(maxBodyH)) {
+            bodyLp.height = measuredBody.coerceAtMost(maxBodyH)
+        }
+        val bodyHeight = bodyLp.height
         handleLp.x = handleLp.x.coerceIn(0, (screen.first - width).coerceAtLeast(0))
         handleLp.y = handleLp.y.coerceIn(
             minY,
-            (screen.second - handleHeight - bodyHeight).coerceAtLeast(minY),
+            (screen.second - handleHeight - bodyHeight - navigationBarHeight()).coerceAtLeast(minY),
         )
         updateLogLayouts()
     }
@@ -1140,6 +1291,26 @@ class OverlayWindowController(
         }
     }
 
+    /**
+     * 面板高度上限 = 可视高度（屏幕高 - 状态栏 - 上下留边）。横屏游戏可视高度可能小于面板内容高度，
+     * 不限制会导致面板底部超出屏幕被裁（展开后退出/探针等按钮点不到），内容改由 ScrollView 滚动。
+     */
+    private fun constrainPanelHeight() {
+        val scroll = panelScroll ?: return
+        val screen = screenSize()
+        val maxH = (screen.second - statusBarHeight() - dp(20)).coerceAtLeast(dp(120))
+        scroll.measure(
+            View.MeasureSpec.makeMeasureSpec(screen.first, View.MeasureSpec.AT_MOST),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+        )
+        val contentH = scroll.measuredHeight
+        val lp = scroll.layoutParams
+        if (lp != null && lp.height != contentH.coerceAtMost(maxH)) {
+            lp.height = contentH.coerceAtMost(maxH)
+            scroll.layoutParams = lp
+        }
+    }
+
     private fun ensurePanelOnScreen(lp: WindowManager.LayoutParams) {
         clampToScreen(lp)
     }
@@ -1149,8 +1320,12 @@ class OverlayWindowController(
         val screen = screenSize()
         val width = if (view.width > 0) view.width else dp(48)
         val height = if (view.height > 0) view.height else dp(48)
-        lp.x = lp.x.coerceIn(0, (screen.first - width).coerceAtLeast(0))
-        lp.y = lp.y.coerceIn(0, (screen.second - height).coerceAtLeast(0))
+        // 下/上限去掉状态栏与导航栏区域：窗口带 FLAG_LAYOUT_NO_LIMITS，
+        // 允许绘制到系统栏下方，贴边会被系统栏吞掉触摸（竖屏球无法拖动/点击的根因）
+        val minY = statusBarHeight() + dp(4)
+        val maxY = (screen.second - height - navigationBarHeight() - dp(4)).coerceAtLeast(minY)
+        lp.x = lp.x.coerceIn(dp(4), (screen.first - width - dp(4)).coerceAtLeast(dp(4)))
+        lp.y = lp.y.coerceIn(minY, maxY)
         updateLayout(lp)
     }
 
@@ -1212,6 +1387,7 @@ class OverlayWindowController(
         root.post {
             rememberScreen()
             val lp = params ?: return@post
+            if (expanded) constrainPanelHeight() // 旋转后面板高度上限重算（横竖屏可视高度不同）
             clampToScreen(lp)
             if (!expanded) {
                 snapToEdge(lp, animate = false)
@@ -1243,6 +1419,12 @@ class OverlayWindowController(
         return x to y
     }
 
+    /** 系统导航栏/手势条高度（framework 资源读取，不可用时 0——全屏手势设备无实体导航栏）。 */
+    private fun navigationBarHeight(): Int {
+        val id = context.resources.getIdentifier("navigation_bar_height", "dimen", "android")
+        return if (id > 0) context.resources.getDimensionPixelSize(id) else 0
+    }
+
     private fun statusBarHeight(): Int {
         val id = context.resources.getIdentifier("status_bar_height", "dimen", "android")
         if (id > 0) {
@@ -1267,6 +1449,7 @@ class OverlayWindowController(
         private const val KEY_SCAN_EXPANDED = "scan_expanded"
         private const val KEY_SWIPE_START_Y = "swipe_start_y"
         private const val KEY_SWIPE_DIST = "swipe_dist"
+        private const val KEY_SWIPE_METHOD = "swipe_method"
         private const val LOG_WIDTH_DP = 260
         private const val LOG_DEFAULT_HEIGHT_DP = 148
         private const val IDLE_ALPHA = 0.62f

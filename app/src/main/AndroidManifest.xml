@@ -110,6 +110,7 @@
                 <action android:name="com.bettergi.pocket.debug.SET_SCREEN_SHARE" />
                 <action android:name="com.bettergi.pocket.debug.SET_SCAN" />
                 <action android:name="com.bettergi.pocket.debug.SET_PROBE" />
+                <action android:name="com.bettergi.pocket.debug.SET_VERBOSE" />
                 <action android:name="com.bettergi.pocket.debug.SWIPE_TEST" />
                 <action android:name="com.bettergi.pocket.debug.SCAN_FLOW" />
                 <action android:name="com.bettergi.pocket.debug.STATUS" />

@@ -180,23 +180,38 @@ object VoteJudges {
         }
     }
 
-    /** 网格区指纹（翻页位移校验）：对网格可见区做稀疏采样哈希。 */    fun gridFingerprint(frame: Mat, profile: ScreenProfile, gridKey: String): Long {
-        val grid = profile.rawObject("grids.$gridKey") ?: return 0L
-        val origin = grid.getJSONArray("cardOrigin")
-        val pitch = grid.getJSONArray("pitch")
-        val cols = grid.getInt("cols")
-        val rows = grid.getInt("visibleRows")
-        val size = grid.getJSONArray("cardSize")
-        val x0 = profile.scale(origin.getInt(0), profile.scaleX)
-        val y0 = profile.scale(origin.getInt(1), profile.scaleY)
-        val x1 = profile.scale(
-            origin.getInt(0) + (cols - 1) * pitch.getInt(0) + size.getInt(0),
-            profile.scaleX,
-        )
-        val y1 = profile.scale(
-            origin.getInt(1) + (rows - 1) * pitch.getInt(1) + size.getInt(1),
-            profile.scaleY,
-        )
+    /** 网格区指纹（翻页位移校验）：对网格可见区做稀疏采样哈希。 */
+    fun gridFingerprint(frame: Mat, profile: ScreenProfile, gridKey: String): Long {
+        // 两种几何写法统一（cardOrigin+pitch 与 colX/rowY）——原实现只认前者，
+        // char_popup 取指纹会抛 JSONException。
+        val bounds = profile.gridBounds(gridKey)
+        val x0: Int
+        val y0: Int
+        val x1: Int
+        val y1: Int
+        if (bounds != null) {
+            x0 = bounds.left
+            y0 = bounds.top
+            x1 = bounds.right
+            y1 = bounds.bottom
+        } else {
+            val grid = profile.rawObject("grids.$gridKey") ?: return 0L
+            val origin = grid.getJSONArray("cardOrigin")
+            val pitch = grid.getJSONArray("pitch")
+            val cols = grid.getInt("cols")
+            val rows = grid.getInt("visibleRows")
+            val size = grid.getJSONArray("cardSize")
+            x0 = profile.scale(origin.getInt(0), profile.scaleX)
+            y0 = profile.scale(origin.getInt(1), profile.scaleY)
+            x1 = profile.scale(
+                origin.getInt(0) + (cols - 1) * pitch.getInt(0) + size.getInt(0),
+                profile.scaleX,
+            )
+            y1 = profile.scale(
+                origin.getInt(1) + (rows - 1) * pitch.getInt(1) + size.getInt(1),
+                profile.scaleY,
+            )
+        }
         var hash = 1469598103934665603L
         val stepX = ((x1 - x0) / 24).coerceAtLeast(1)
         val stepY = ((y1 - y0) / 16).coerceAtLeast(1)

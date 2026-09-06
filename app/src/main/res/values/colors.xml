@@ -15,5 +15,12 @@
     <color name="overlay_status_off">#FFB8A48A</color>
     <color name="overlay_status_warn">#FFE8A45A</color>
     <color name="overlay_log_green">#FF7CFF9A</color>
+    <!-- §13.5#6：识别日志按 Tag 着色 + W 级告警色 -->
+    <color name="overlay_log_autoskip">#FF7CFF9A</color>
+    <color name="overlay_log_scan">#FF8FD3FF</color>
+    <color name="overlay_log_lock">#FFC9A36A</color>
+    <color name="overlay_log_equip">#FFC79BFF</color>
+    <color name="overlay_log_char">#FFFFA8C8</color>
+    <color name="overlay_log_warn">#FFFF8A5C</color>
     <color name="overlay_bilibili">#FFFB7299</color>
 </resources>

@@ -24,6 +24,8 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import com.bettergi.pocket.genshin.GenshinPackages
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class InputAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
@@ -85,16 +87,27 @@ class InputAccessibilityService : AccessibilityService() {
         private const val KEY_TO_X = "to_x"
         private const val KEY_TO_Y = "to_y"
         private const val KEY_SEGMENTS = "segments"
+        private const val KEY_METHOD = "method"
         private const val KEY_DURATION = "duration"
         private const val KEY_OK = "ok"
-        // 三段无惯性滑动经验节奏（scanner-app 真机验证值）：快滑 90% → 缓速 10% → 回退 1px
-        private const val SWIPE_FAST_MS = 400L
-        private const val SWIPE_SLOW_MS = 300L
-        private const val SWIPE_BACK_MS = 100L
+        // 三段无惯性滑动（scanner-app 真机验证值）→ §12.2 路标点链改造（2026-09-05）：
+        // 快滑 90% 拆 4 路×80ms → 缓速 10% 拆 3 路×120ms → 回退 1px×100ms（末速≈0），
+        // 事件密度与 uiauto 标定手势一致（行为确定 std≤4px，见 dsl/verify/emulator_validation/ 附2）。
         private const val SWIPE_FAST_RATIO = 0.9f
+        private const val WP_FAST_STEPS = 2
+        private const val WP_FAST_MS = 160L
+        private const val WP_SLOW_STEPS = 2
+        private const val WP_SLOW_MS = 180L
+        private const val WP_BACK_MS = 100L
+
+        /** 三段式滑动（对齐 irminsul/genshin-scanner-app 已验证）：段1 快滑 90%/400ms
+         *  → 段2 缓速 10%/300ms（到终点+1px）→ 段3 回退 1px/100ms（末速≈0 无 fling）。 */
+        private const val THREE_SEG_MAIN_MS = 400L
+        private const val THREE_SEG_CRAWL_MS = 300L
+        private const val THREE_SEG_DWELL_MS = 100L
 
         /** 三段总时长（passthrough 恢复延时等外部引用；唯一事实源防漂移）。 */
-        const val SWIPE_TOTAL_MS = SWIPE_FAST_MS + SWIPE_SLOW_MS + SWIPE_BACK_MS
+        const val SWIPE_TOTAL_MS = WP_FAST_STEPS * WP_FAST_MS + WP_SLOW_STEPS * WP_SLOW_MS + WP_BACK_MS
         private const val BIND_GRACE_MS = 2000L
         private const val BIND_POLL_MS = 250L
 
@@ -248,9 +261,10 @@ class InputAccessibilityService : AccessibilityService() {
             toY: Int,
             durationMs: Long = 400L,
             segments: Int = 3,
+            method: SwipeMethod = SwipeMethod.WAYPOINT_CHAIN,
             onDone: ((Boolean) -> Unit)? = null,
         ): Boolean {
-            if (instance != null) return swipeLocal(fromX, fromY, toX, toY, durationMs, segments, onDone)
+            if (instance != null) return swipeLocal(fromX, fromY, toX, toY, durationMs, segments, method, onDone)
             val extras = Bundle().apply {
                 putInt(KEY_FROM_X, fromX)
                 putInt(KEY_FROM_Y, fromY)
@@ -297,6 +311,7 @@ class InputAccessibilityService : AccessibilityService() {
                             extras?.getInt(KEY_TO_Y) ?: 0,
                             extras?.getLong(KEY_DURATION, 400L) ?: 400L,
                             extras?.getInt(KEY_SEGMENTS, 3) ?: 3,
+                            parseMethod(extras?.getString(KEY_METHOD)),
                             null,
                         ),
                     )
@@ -332,6 +347,7 @@ class InputAccessibilityService : AccessibilityService() {
             toY: Int,
             durationMs: Long,
             segments: Int,
+            method: SwipeMethod,
             onDone: ((Boolean) -> Unit)?,
         ): Boolean {
             val service = instance ?: return false
@@ -347,78 +363,193 @@ class InputAccessibilityService : AccessibilityService() {
                     .build()
                 return service.dispatchGesture(gesture, callback(onDone), null)
             }
+            if (method == SwipeMethod.THREE_SEGMENT) {
+                swipeThreeSegment(service, fromX, fromY, toX, toY, onDone)
+            } else {
+                swipeWaypointChain(service, fromX, fromY, toX, toY, onDone)
+            }
+            return true
+        }
 
+        /**
+         * 三段式滑动（对齐 irminsul/genshin-scanner-app 已验证实现）：3 路 continueStroke 链。
+         * 段1 快滑 90% → 段2 缓速 10%（越过终点 1px）→ 段3 回退 1px 精确落在终点（末速≈0 无 fling）。
+         */
+        private fun swipeThreeSegment(
+            service: AccessibilityService,
+            fromX: Int,
+            fromY: Int,
+            toX: Int,
+            toY: Int,
+            onDone: ((Boolean) -> Unit)?,
+        ) {
             val dx = toX - fromX
             val dy = toY - fromY
-            if (dx == 0 && dy == 0) return false
-            // 段1：快滑 90%（整像素，避免亚像素段间漂移）
+            if (dx == 0 && dy == 0) {
+                onDone?.invoke(false)
+                return
+            }
             val midX = fromX + Math.round(dx * SWIPE_FAST_RATIO)
             val midY = fromY + Math.round(dy * SWIPE_FAST_RATIO)
-            // 段2：终点 + 1px 余量（沿运动方向）；段3 回退 1px = 精确落在 toX/toY
+            // 段2 末越过终点 1px（沿运动方向），段3 回退 1px = 精确落在 toX/toY 且末速≈0
             val unitX = if (dx >= 0) 1 else -1
             val unitY = if (dy >= 0) 1 else -1
             val preX = toX + unitX
             val preY = toY + unitY
-            val fastMs = SWIPE_FAST_MS.coerceAtMost(durationMs)
 
-            var stroke = GestureDescription.StrokeDescription(
+            val s1 = GestureDescription.StrokeDescription(
                 Path().apply {
                     moveTo(fromX.toFloat(), fromY.toFloat())
                     lineTo(midX.toFloat(), midY.toFloat())
                 },
                 0L,
-                fastMs,
+                THREE_SEG_MAIN_MS,
                 /* willContinue = */ true,
             )
-            // 段1
             val accepted = service.dispatchGesture(
-                GestureDescription.Builder().addStroke(stroke).build(),
-                callback { ok ->
-                    if (!ok) {
+                GestureDescription.Builder().addStroke(s1).build(),
+                callback { ok1 ->
+                    if (!ok1) {
                         onDone?.invoke(false)
                         return@callback
                     }
-                    // 段2：缓速 10% → 终点+1px
-                    stroke = stroke.continueStroke(
+                    val s2 = s1.continueStroke(
                         Path().apply {
                             moveTo(midX.toFloat(), midY.toFloat())
                             lineTo(preX.toFloat(), preY.toFloat())
                         },
                         0L,
-                        SWIPE_SLOW_MS,
+                        THREE_SEG_CRAWL_MS,
                         /* willContinue = */ true,
                     )
-                    val accepted2 = service.dispatchGesture(
-                        GestureDescription.Builder().addStroke(stroke).build(),
+                    service.dispatchGesture(
+                        GestureDescription.Builder().addStroke(s2).build(),
                         callback { ok2 ->
                             if (!ok2) {
                                 onDone?.invoke(false)
                                 return@callback
                             }
-                            // 段3：回退 1px 到精确终点，willContinue=false 结束手势
-                            stroke = stroke.continueStroke(
+                            val s3 = s2.continueStroke(
                                 Path().apply {
                                     moveTo(preX.toFloat(), preY.toFloat())
                                     lineTo(toX.toFloat(), toY.toFloat())
                                 },
                                 0L,
-                                SWIPE_BACK_MS,
+                                THREE_SEG_DWELL_MS,
                                 /* willContinue = */ false,
                             )
                             service.dispatchGesture(
-                                GestureDescription.Builder().addStroke(stroke).build(),
+                                GestureDescription.Builder().addStroke(s3).build(),
                                 callback(onDone),
                                 null,
                             )
                         },
                         null,
                     )
-                    if (!accepted2) onDone?.invoke(false)
                 },
                 null,
             )
-            return accepted
+            if (!accepted) onDone?.invoke(false)
         }
+
+        /**
+         * 路标链滑动（§12.2 改造，2026-09-05）：把三段长笔画降为「快滑 90%（4×80ms）→
+         * 缓速 10%（3×120ms）→ 越过终点 1px → 回退 1px（100ms）」的 9 路标点短笔画链，
+         * 每路 willContinue 串联，事件密度与 uiauto 标定手势一致（行为确定 std≤4px）。
+         */
+        private fun swipeWaypointChain(
+            service: AccessibilityService,
+            fromX: Int,
+            fromY: Int,
+            toX: Int,
+            toY: Int,
+            onDone: ((Boolean) -> Unit)?,
+        ) {
+            val dx = toX - fromX
+            val dy = toY - fromY
+            if (dx == 0 && dy == 0) {
+                onDone?.invoke(false)
+                return
+            }
+            val midX = fromX + Math.round(dx * SWIPE_FAST_RATIO)
+            val midY = fromY + Math.round(dy * SWIPE_FAST_RATIO)
+            // 缓速段末越过终点 1px（沿运动方向），末路回退 1px = 精确落在 toX/toY 且末速≈0
+            val unitX = if (dx >= 0) 1 else -1
+            val unitY = if (dy >= 0) 1 else -1
+            val preX = toX + unitX
+            val preY = toY + unitY
+
+            val waypoints = ArrayList<IntArray>() // [x, y, ms]
+            for (i in 1..WP_FAST_STEPS) {
+                waypoints.add(
+                    intArrayOf(
+                        fromX + Math.round((midX - fromX).toFloat() * i / WP_FAST_STEPS),
+                        fromY + Math.round((midY - fromY).toFloat() * i / WP_FAST_STEPS),
+                        WP_FAST_MS.toInt(),
+                    )
+                )
+            }
+            for (i in 1..WP_SLOW_STEPS) {
+                waypoints.add(
+                    intArrayOf(
+                        midX + Math.round((preX - midX).toFloat() * i / WP_SLOW_STEPS),
+                        midY + Math.round((preY - midY).toFloat() * i / WP_SLOW_STEPS),
+                        WP_SLOW_MS.toInt(),
+                    )
+                )
+            }
+            waypoints.add(intArrayOf(toX, toY, WP_BACK_MS.toInt()))
+
+            fun dispatchWaypoint(index: Int, stroke: GestureDescription.StrokeDescription) {
+                val isLast = index == waypoints.lastIndex
+                val accepted = service.dispatchGesture(
+                    GestureDescription.Builder().addStroke(stroke).build(),
+                    callback { ok ->
+                        if (!ok) {
+                            onDone?.invoke(false)
+                            return@callback
+                        }
+                        if (isLast) {
+                            onDone?.invoke(true)
+                        } else {
+                            val nextIndex = index + 1
+                            val wp = waypoints[nextIndex]
+                            val nextStroke = stroke.continueStroke(
+                                Path().apply {
+                                    moveTo(waypoints[index][0].toFloat(), waypoints[index][1].toFloat())
+                                    lineTo(wp[0].toFloat(), wp[1].toFloat())
+                                },
+                                0L,
+                                wp[2].toLong(),
+                                /* willContinue = */ nextIndex != waypoints.lastIndex,
+                            )
+                            dispatchWaypoint(nextIndex, nextStroke)
+                        }
+                    },
+                    null,
+                )
+                if (!accepted) onDone?.invoke(false)
+            }
+
+            val first = waypoints[0]
+            val stroke = GestureDescription.StrokeDescription(
+                Path().apply {
+                    moveTo(fromX.toFloat(), fromY.toFloat())
+                    lineTo(first[0].toFloat(), first[1].toFloat())
+                },
+                0L,
+                first[2].toLong(),
+                /* willContinue = */ true,
+            )
+            dispatchWaypoint(0, stroke)
+        }
+
+        /** 方法字符串 → SwipeMethod（未知/空 = 路标链，生产默认）。 */
+        private fun parseMethod(value: String?): SwipeMethod =
+            when (value) {
+                "three_segment" -> SwipeMethod.THREE_SEGMENT
+                else -> SwipeMethod.WAYPOINT_CHAIN
+            }
 
         /** GestureResultCallback → Boolean 回调适配（回调在主线程）。 */
         private fun callback(onDone: ((Boolean) -> Unit)?) =
@@ -453,6 +584,25 @@ class InputAccessibilityService : AccessibilityService() {
          */
         private fun toggleProbeOverlay(): Boolean {
             val service = instance ?: return false
+            // ViewRootImpl 必须在带 Looper 的线程创建；binder 线程调用 ContentProvider.call 时无 Looper。
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                return toggleProbeOverlayOnMain(service)
+            }
+            val latch = CountDownLatch(1)
+            val holder = booleanArrayOf(false)
+            Handler(Looper.getMainLooper()).post {
+                holder[0] = toggleProbeOverlayOnMain(service)
+                latch.countDown()
+            }
+            return try {
+                latch.await(3, TimeUnit.SECONDS)
+                holder[0]
+            } catch (_: InterruptedException) {
+                false
+            }
+        }
+
+        private fun toggleProbeOverlayOnMain(service: AccessibilityService): Boolean {
             val wm = service.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val existing = probeView
             if (existing != null) {
@@ -470,7 +620,7 @@ class InputAccessibilityService : AccessibilityService() {
                 setPadding(20, 12, 20, 12)
             }
             val title = TextView(service).apply {
-                text = "A11y Overlay ✓"
+                text = "A11y Overlay ✓（仅视觉验证·不可点击）"
                 setTextColor(Color.WHITE)
                 textSize = 15f
             }
@@ -492,15 +642,17 @@ class InputAccessibilityService : AccessibilityService() {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
                 y = 160
             }
-            try {
+            return try {
                 wm.addView(container, lp)
                 probeView = container
                 probeProgressView = progress
-                return true
-            } catch (_: Throwable) {
+                Log.i(TAG, "probe overlay mounted")
+                true
+            } catch (e: Throwable) {
+                Log.e(TAG, "probe overlay mount failed", e)
                 probeView = null
                 probeProgressView = null
-                return false
+                false
             }
         }
 
@@ -566,7 +718,8 @@ class InputAccessibilityService : AccessibilityService() {
             val ctx = appContext ?: return null
             return try {
                 ctx.contentResolver.call(bridgeUri(ctx), method, null, extras)
-            } catch (_: Exception) {
+            } catch (e: Exception) {
+                Log.e(TAG, "remoteCall failed: $method", e)
                 null
             }
         }
@@ -581,3 +734,6 @@ class InputAccessibilityService : AccessibilityService() {
         private const val EXTRA_SHOW_FRAGMENT_ARGS = ":settings:show_fragment_args"
     }
 }
+
+/** 翻页滑动实现方式：三段式（3-stroke continueStroke 链）/ 路标链（9-waypoint continueStroke 链）。 */
+enum class SwipeMethod { THREE_SEGMENT, WAYPOINT_CHAIN }

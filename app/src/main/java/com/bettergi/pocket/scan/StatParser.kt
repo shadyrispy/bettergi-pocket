@@ -1,5 +1,8 @@
 package com.bettergi.pocket.scan
 
+import com.bettergi.pocket.recognition.name.GoodNames
+import com.bettergi.pocket.recognition.name.NameMatcher
+
 /**
  * zh 词条名 → GOOD key 解析（移植自 GOODScanner stat_parser.rs，键风格一致：
  * hp/hp_/atk_/enerRech_/critRate_/critDMG_/eleMas/heal_/元素 dmg_；percent 值存百分数形式如 5.8）。
@@ -46,15 +49,38 @@ object StatParser {
 
     data class ParsedStat(val key: String, val value: Double, val inactive: Boolean)
 
-    fun slotKeyOf(text: String): String? =
-        SLOT_KEYS.firstOrNull { (zh, _) -> clean(text).contains(zh) }?.second
+    /**
+     * 部位名 → slotKey。
+     * @param names 注入名称词典时优先走 [NameMatcher]（模糊容错）；否则回退内置表。
+     */
+    fun slotKeyOf(text: String, names: GoodNames? = null): String? {
+        val t = clean(text)
+        if (names != null) {
+            NameMatcher.match(t, names.slots)?.let { return it.key }
+        }
+        return SLOT_KEYS.firstOrNull { (zh, _) -> t.contains(zh) }?.second
+    }
 
     /**
      * 解析 "暴击率+5.8%" / "生命值+717" / "元素充能效率+12.4%" 类文本。
+     * @param names 注入名称词典时，词条**名**走 [NameMatcher]；数值解析逻辑不变。
      */
-    fun parse(text: String): ParsedStat? {
+    fun parse(text: String, names: GoodNames? = null): ParsedStat? {
         val t = clean(text)
         if (t.isEmpty()) return null
+        if (names != null) {
+            val hasPercent = t.contains("%")
+            val table = names.stats.associate { it.zh to it.key }
+            val matched = NameMatcher.match(t, table)
+            if (matched != null) {
+                val entry = names.stats.firstOrNull { it.zh == matched.name }
+                if (entry != null) {
+                    val value = extractValue(t) ?: return null
+                    val key = if (hasPercent && entry.percentKey != null) entry.percentKey else entry.key
+                    return ParsedStat(key, value, t.contains("待激活"))
+                }
+            }
+        }
         val entry = ENTRIES.firstOrNull { (zh, _) -> t.contains(zh) }
             ?: ENTRIES.firstOrNull { (zh, _) -> suffixMatch(t, zh) }
             ?: return null

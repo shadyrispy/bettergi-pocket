@@ -29,6 +29,10 @@ class ScreenProfile(
     companion object {
         /** 宽高比失真告警阈值（2%——16:9 vs 20:9 是 25%，远超阈值）。 */
         const val ASPECT_DISTORTION_WARN = 0.02
+        /** §12.1 起点 y 偏置：锚行上沿往下 5px（方案定稿，配合常量 BIAS=+5）。 */
+        const val ADVANCE_Y_BIAS = 5
+        /** 祝圣 yShift 基准值（3200x1440 帧像素）；分辨率专属 profile 用 zhushengYShiftFrame 覆盖。 */
+        const val ZHUSHENG_YSHIFT_BASE = 63
         const val TAG = "BetterGI.Profile"
 
         /** 从 assets/dsl/profiles.json 构建。 */
@@ -70,8 +74,30 @@ class ScreenProfile(
         }
     }
 
+    /**
+     * §12.5 网格行偏移（翻页相位残差）：仅作用于**网格类**坐标
+     * （gridGeometry.rowYs / cellCenter / cardRelRect / gridBounds / advanceStart），
+     * panel rect/point/zone 等固定 UI 坐标不受影响。
+     */
+    @Volatile internal var gridRowOffset: Int = 0
+
+    /** 返回网格行整体平移 [dy] px 的轻量视图（共享同一 JSON）。测量类调用（GridAlign 相位参考）须用原始 profile。 */
+    fun withGridRowOffset(dy: Int): ScreenProfile =
+        ScreenProfile(root, frameWidth, frameHeight).also { it.gridRowOffset = dy }
+
     val scaleX: Double get() = frameWidth.toDouble() / baseWidth
     val scaleY: Double get() = frameHeight.toDouble() / baseHeight
+
+    /**
+     * 祝圣 yShift（帧像素，crafted 时作用于 level/lock/astral/sub1-4）。
+     * 分辨率专属 profile 可用顶层 "zhushengYShiftFrame" 直接给定（如 2244x1080 = 47）；
+     * 缺省按基准 [ZHUSHENG_YSHIFT_BASE] × [scaleY] 换算。
+     */
+    val zhushengShiftPx: Int
+        get() {
+            val v = root.optInt("zhushengYShiftFrame", Int.MIN_VALUE)
+            return if (v != Int.MIN_VALUE) v else Math.round(ZHUSHENG_YSHIFT_BASE * scaleY).toInt()
+        }
 
     /**
      * 宽高比失真度 = |sx - sy| / min(sx, sy)。
@@ -145,7 +171,7 @@ class ScreenProfile(
         val origin = grid.getJSONArray("cardOrigin")
         val pitch = grid.getJSONArray("pitch")
         val ox = origin.getInt(0) + col * pitch.getInt(0)
-        val oy = origin.getInt(1) + row * pitch.getInt(1)
+        val oy = origin.getInt(1) + gridRowOffset + row * pitch.getInt(1)
         return FrameRect(
             left = scale(ox + rel[0], scaleX),
             top = scale(oy + rel[1], scaleY),
@@ -156,6 +182,15 @@ class ScreenProfile(
 
     /** 网格第 [index] 个 cell 中心（行主序：index = row*cols + col）。 */
     fun cellCenter(gridKey: String, index: Int): FramePoint {
+        val g = gridGeometry(gridKey)
+        if (g != null) {
+            val col = index % g.cols
+            val row = index / g.cols
+            val x = g.colXs.getOrElse(col) { g.colXs.last() } + g.cardW / 2
+            val y = g.rowYs.getOrElse(row) { g.rowYs.last() } + g.cardH / 2
+            return scalePoint(x, y)
+        }
+        // 回退：仅 cardOrigin+pitch 写法（历史行为）
         val grid = rawObject("grids.$gridKey") ?: error("grid '$gridKey' missing")
         val cols = grid.getInt("cols")
         val origin = grid.getJSONArray("cardOrigin")
@@ -164,8 +199,99 @@ class ScreenProfile(
         val col = index % cols
         val row = index / cols
         val x = origin.getInt(0) + col * pitch.getInt(0) + size.getInt(0) / 2
-        val y = origin.getInt(1) + row * pitch.getInt(1) + size.getInt(1) / 2
+        val y = origin.getInt(1) + gridRowOffset + row * pitch.getInt(1) + size.getInt(1) / 2
         return scalePoint(x, y)
+    }
+
+    /**
+     * §12.1 起点规范化：翻页滑动起点 = 该行**最末尾两个卡片中间空隙的中点**，
+     * y = 锚行（被底栏遮挡行，= visibleRows）上边缘往下 5px。
+     *
+     * 目的：落点避开卡内标签/图标（旧写死坐标 x 正好偏一个 pitch.x，落在第 5 列卡中间）。
+     * 几何不足（缺 cardSize/列/行）返回 null → 调用方回退到 profiles.advance.from。
+     */
+    fun advanceStart(gridKey: String): FramePoint? {
+        val g = gridGeometry(gridKey) ?: return null
+        if (g.colXs.size < 2 || g.rowYs.size < 2) return null
+        val lastPitchX = g.colXs.last() - g.colXs[g.colXs.size - 2]
+        val x = g.colXs[g.colXs.size - 2] + g.cardW + (lastPitchX - g.cardW) / 2
+        val anchorRow = g.rowYs.size // 锚行 = visibleRows（第 4 行，被底栏遮挡、不遍历）
+        val y = g.rowYs[anchorRow - 1] + ADVANCE_Y_BIAS
+        return scalePoint(x, y) // 与 cellCenter 一致：一律返回帧坐标
+    }
+
+    /**
+     * §12.1 翻页距离 = traverseRows × 行距（行距：pitch.y 或 rowY 差分均值）。
+     * 反验：artifact/weapon = 3×292 = 876、char_popup = 3×280.3 ≈ 841，与 profiles 硬编码
+     * advance.distance 完全一致 → 几何模型可信。
+     */
+    fun advanceDistance(gridKey: String): Int? {
+        val grid = rawObject("grids.$gridKey") ?: return null
+        val g = gridGeometry(gridKey) ?: return null
+        val rows = grid.optInt("traverseRows", -1)
+        if (rows <= 0) return null
+        return scale(Math.round(rows * g.rowPitch).toInt(), scaleY) // 同样返回帧坐标尺度
+    }
+
+    /**
+     * 网格几何（对外暴露，供 GridAlign / VoteJudges 复用）：统一 profiles 里两种写法
+     * —— cardOrigin+pitch 与 colX/rowY 数组。
+     */
+    fun gridGeometryFor(gridKey: String): GridGeometry? = gridGeometry(gridKey)
+
+    /** 网格可见区（帧坐标）：首列左边界 → 末列右边界、首行上沿 → 末行下沿。几何不足返回 null。 */
+    fun gridBounds(gridKey: String): FrameRect? {
+        val g = gridGeometry(gridKey) ?: return null
+        return FrameRect(
+            left = scale(g.colXs.first(), scaleX),
+            top = scale(g.rowYs.first(), scaleY),
+            right = scale(g.colXs.last() + g.cardW, scaleX),
+            bottom = scale(g.rowYs.last() + g.cardH, scaleY),
+        )
+    }
+
+    /** 网格几何：统一 profiles 里两种写法 —— cardOrigin+pitch 与 colX/rowY 数组。 */
+    private fun gridGeometry(gridKey: String): GridGeometry? {
+        val grid = rawObject("grids.$gridKey") ?: return null
+        val size = grid.optJSONArray("cardSize") ?: return null
+        val cardW = size.optInt(0, -1)
+        val cardH = size.optInt(1, -1)
+        if (cardW <= 0 || cardH <= 0) return null
+        // set_filter_popup 的 cols 是 {left,right} 对象 → optInt 回退默认 → 拒绝（非卡片网格）
+        val cols = grid.optInt("cols", -1)
+        if (cols < 2) return null
+
+        val colX = grid.optJSONArray("colX")
+        val rowY = grid.optJSONArray("rowY")
+        if (colX != null && rowY != null && colX.length() >= cols && rowY.length() >= 2) {
+            return GridGeometry(
+                cols = cols, cardW = cardW, cardH = cardH,
+                colXs = IntArray(cols) { colX.getInt(it) },
+                rowYs = IntArray(rowY.length()) { rowY.getInt(it) + gridRowOffset },
+            )
+        }
+        val origin = grid.optJSONArray("cardOrigin") ?: return null
+        val pitch = grid.optJSONArray("pitch") ?: return null
+        val vis = grid.optInt("visibleRows", -1)
+        if (vis < 2) return null
+        return GridGeometry(
+            cols = cols, cardW = cardW, cardH = cardH,
+            colXs = IntArray(cols) { origin.getInt(0) + it * pitch.getInt(0) },
+            rowYs = IntArray(vis) { origin.getInt(1) + gridRowOffset + it * pitch.getInt(1) },
+        )
+    }
+
+    /** 网格几何（基准坐标）：列左边界数组 / 行上沿数组 / 卡片尺寸 / 列数。 */
+    class GridGeometry(
+        val cols: Int,
+        val cardW: Int,
+        val cardH: Int,
+        val colXs: IntArray,
+        val rowYs: IntArray,
+    ) {
+        /** 行距（末行-首行 差分均值）。 */
+        val rowPitch: Double
+            get() = if (rowYs.size < 2) 0.0 else (rowYs.last() - rowYs.first()).toDouble() / (rowYs.size - 1)
     }
 
     fun gridInt(gridKey: String, field: String): Int =

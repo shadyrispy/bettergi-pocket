@@ -2,6 +2,7 @@ package com.bettergi.pocket.scan
 
 import com.bettergi.pocket.capture.FrameSource
 import com.bettergi.pocket.capture.FrameTimeoutException
+import com.bettergi.pocket.recognition.name.GoodNames
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -188,36 +189,30 @@ class ScanEngineDryRunTest {
         val profile = ScreenProfile(JSONObject(File(assetsDir(), "profiles.json").readText()))
         profile.calibrate(3200, 1440)
         val flow = JSONObject(File(assetsDir(), "flows/artifact_scan.json").readText())
-        val dict = ArtifactSetDictionary(JSONObject(File(assetsDir(), "tools/artifactSetPieces.json").readText()))
+        // 单一名称词典（角色/武器/套装/单件/词条/部位）——与生产同路径
+        val names = try {
+            GoodNames.fromJson(JSONObject(File(assetsDir(), "tools/good_names.json").readText()))
+        } catch (_: Exception) {
+            null
+        }
 
         val h = Harness(pages)
         numberScript.forEach { h.numberScript.addLast(it) }
         // dedupe=false：dry-run 的 21 格 mock OCR 文本相同（人工场景），全量入库便于断言；
         // 真机每件内容不同，生产默认 true。
         // clock 注入真实时间：JVM 单测 SystemClock 被 returnDefaultValues 恒 0，会让 settle 轮询死循环
-        val weaponDict = try {
-            WeaponDictionary(JSONObject(File(assetsDir(), "tools/mappings.json").readText()))
-        } catch (_: Exception) {
-            null
-        }
-        val charDict = try {
-            CharacterDictionary(JSONObject(File(assetsDir(), "tools/mappings.json").readText()))
-        } catch (_: Exception) {
-            null
-        }
-        // 命名参数：weaponDictionary 位于 setDictionary 之后——位置参数易错位
         val engine = ScanEngine(
             flowJson = flow,
             profile = profile,
             frameSource = h.frameSource,
             actions = h.actions,
             ocr = h.ocr,
-            setDictionary = dict,
-            weaponDictionary = weaponDict,
-            characterDictionary = charDict,
+            names = names,
             listener = h.listener,
             dedupe = dedupe,
             clock = { System.nanoTime() / 1_000_000 },
+            // 合成帧不随点击变化：clickDelay 注入短值，避免每格白等固定延时
+            clickDelayMs = 10L,
         )
         runBlocking { engine.run() }
         return RunResult(engine, h)
@@ -284,8 +279,9 @@ class ScanEngineDryRunTest {
         assertEquals(250 to 415, h.clicks[1])
         // 第一次格点击 = cell(0,0) 中心 (416+100, 297+126)=(516,423)
         assertEquals(516 to 423, h.clicks[2])
-        // 翻页滑动 = grid advance (1614,1150)→(1614,274)
-        assertEquals((1614 to 1150) to (1614 to 274), h.swipes[0])
+        // 翻页滑动 = §12.1 几何起点 (1858,1178) 上滑 dist=876 → (1858,302)
+        // （旧写死坐标 (1614,1150)→(1614,274) 已由几何公式取代：落点从第 5 列卡中间移到末尾两卡间隙）
+        assertEquals((1858 to 1178) to (1858 to 302), h.swipes[0])
     }
 
     @Test

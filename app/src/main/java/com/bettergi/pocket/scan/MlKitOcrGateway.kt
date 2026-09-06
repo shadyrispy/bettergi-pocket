@@ -1,18 +1,26 @@
 package com.bettergi.pocket.scan
 
 import android.util.Log
+import com.bettergi.pocket.recognition.IntRect
+import com.bettergi.pocket.recognition.OcrText
+import com.bettergi.pocket.recognition.ocr.IOcrService
 import com.bettergi.pocket.recognition.ocr.OcrFactory
+import com.bettergi.pocket.recognition.ocr.UnavailableOcrService
 import com.bettergi.pocket.recognition.opencv.MatOps
 import org.opencv.core.Mat
 
 /**
- * OcrGateway 的 ML Kit 实现（P1-b 先行；ONNX PaddleOCR det+rec 移植后可替换，
- * ScanEngine 不感知——方案 P1 验收「OcrMatch 原语在 ML Kit/ONNX 两种 default 下均通过」）。
+ * OcrGateway 实现（ScanEngine 不感知具体引擎——方案 P1 验收
+ * 「OcrMatch 原语在 ML Kit/ONNX 两种 default 下均通过」）。
+ *
+ * 分发策略（审计建议 #1）：按 [IOcrService.hasFastRecOnlyBatch] 选择单槽路径——
+ * - ONNX：recognizeRois（rec-only，跳过整帧 det），每槽 ~2ms vs 全管线 ~44ms；
+ * - ML Kit：原逐槽 recognizeText，保留 <80px 2x 放大增强（见 recognizeText 注释）。
  */
 class MlKitOcrGateway : OcrGateway {
 
     override suspend fun readNumber(frame: Mat, rect: FrameRect): Int? {
-        val text = recognizeRoi(frame, rect) ?: return null
+        val text = recognizeText(frame, rect) ?: return null
         // "圣遗物 1026/2400" → 斜杠前数字；无斜杠取最后一个数字
         val cleaned = StatParser.clean(text)
         val slash = Regex("(\\d+)\\s*/\\s*\\d+").find(cleaned)
@@ -22,12 +30,46 @@ class MlKitOcrGateway : OcrGateway {
     }
 
     override suspend fun readLines(frame: Mat, rects: List<FrameRect>): List<String> {
-        return rects.mapNotNull { rect -> recognizeRoi(frame, rect)?.takeIf { it.isNotBlank() } }
+        return rects.mapNotNull { rect -> recognizeText(frame, rect)?.takeIf { it.isNotBlank() } }
     }
 
-    private fun recognizeRoi(frame: Mat, rect: FrameRect): String? {
+    /**
+     * 批量槽位读取：rec-only 引擎（ONNX）走一次 recognizeRois（N 个 rec 推理，~2ms/槽）；
+     * ML Kit 逐槽原路径（含 <80px 2x 放大）。返回与 rects 一一对应，blank 保留为空串。
+     */
+    override suspend fun readRois(frame: Mat, rects: List<FrameRect>): List<String> {
         val service = OcrFactory.default
-        if (service is com.bettergi.pocket.recognition.ocr.UnavailableOcrService) return null
+        if (service is UnavailableOcrService) return rects.map { "" }
+        if (frame.cols() <= 0 || frame.rows() <= 0) return rects.map { "" }
+        if (service.hasFastRecOnlyBatch) {
+            return service.recognizeRois(frame, rects.map { it.toIntRect() })
+                .map { OcrText.removeAllSpace(it.text) }
+        }
+        return rects.map { rect -> recognizeRoiWithUpscale(frame, rect, service).orEmpty() }
+    }
+
+    /**
+     * 单槽文本，按引擎能力分发。
+     *
+     * ⚠️ <80px 2x 放大**不能**挪进 MlKitOcrService.recognize：ImageRegion 的 OcrMatch
+     * 直接消费 recognize 返回的 region 坐标（放大后坐标会错位），所以放大只能留在
+     * 这里这条「只要文本不要坐标」的路径上。
+     */
+    private fun recognizeText(frame: Mat, rect: FrameRect): String? {
+        val service = OcrFactory.default
+        if (service is UnavailableOcrService) return null
+        if (frame.cols() <= 0 || frame.rows() <= 0) return null
+        if (service.hasFastRecOnlyBatch) {
+            // rec-only：PP-OCR rec 以 48px 高为工作点，无需预放大
+            val region = service.recognizeRois(frame, listOf(rect.toIntRect())).firstOrNull()
+                ?: return null
+            return OcrText.removeAllSpace(region.text).takeIf { it.isNotBlank() }
+        }
+        return recognizeRoiWithUpscale(frame, rect, service)
+    }
+
+    /** ML Kit 原路径：<80px 小字 2x 放大增强 + recognizeText。 */
+    private fun recognizeRoiWithUpscale(frame: Mat, rect: FrameRect, service: IOcrService): String? {
         if (frame.cols() <= 0 || frame.rows() <= 0) return null
         val x = rect.left.coerceIn(0, frame.cols() - 1)
         val y = rect.top.coerceIn(0, frame.rows() - 1)
@@ -46,4 +88,6 @@ class MlKitOcrGateway : OcrGateway {
             roi.release()
         }
     }
+
+    private fun FrameRect.toIntRect(): IntRect = IntRect(left, top, width, height)
 }

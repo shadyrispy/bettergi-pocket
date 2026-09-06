@@ -90,6 +90,7 @@
     },
     "select_3col": {
       "colX": [179, 415, 651], "rowY": [205, 485, 765, 1045], "cardSize": [210, 262],
+      "cols": 3, "visibleRows": 4, "traverseRows": 3,
       "advance": {
         "type": "snap", "snapAlignY": 917, "animMs": 300,
         "peekCols": [[284, 1215], [520, 1215], [756, 1215]],
@@ -122,7 +123,7 @@
       "starBand": { "y": [599, 640], "x0": 2228, "pitch": 56, "judge": "逐格采样 cell=46px, 格内金像素(R>170,G120-220,B<150)>100 → 该星点亮; 星数=亮格数。⚠️5★ 星形大带辉光, 整带列投影会相邻合并(实测 723 连成 2339-2560), 必须逐格", "verified": "5707 4★=4颗 / 5706 3★=3颗 / 5723 5★=5颗(逐格 1019/1047/1181/1489/1861)" },
       "level": [2200, 716, 2400, 766],
       "subStats": [[2230, 794, 2990, 848], [2230, 858, 2990, 912], [2230, 922, 2990, 976], [2230, 986, 2990, 1040]],
-      "setName": { "collect": false, "reason": "用户定稿(2026-09-01)：背包面板 set_name 被遮挡 OCR 识别不到，不标定不采集；set_name 由圣遗物单件名 name 经词典反推", "reverseDict": "tools/artifactSetPieces.json（pieceToSet 276 件/56 套，2026-09-02 自 biligame wiki 构建，四图 OCR 回验 4/4 命中）", "archivedMeasure": "动态 set_top=800+nSubs*64(±4) 实测留档，勿用于采集" },
+      "setName": { "collect": false, "reason": "用户定稿(2026-09-01)：背包面板 set_name 被遮挡 OCR 识别不到，不标定不采集；set_name 由圣遗物单件名 name 经词典反推", "reverseDict": "tools/good_names.json（artifactPieces 276 件/56 套，由 dsl/scripts/gen_good_names.py 生成）", "archivedMeasure": "动态 set_top=800+nSubs*64(±4) 实测留档，勿用于采集" },
       "equipped": [2291, 1170, 2736, 1210],
       "banner": [2680, 205, 2840, 285],
       "zhusheng": { "yShift": 63, "fields": ["level", "subStats", "lock", "astral"], "detect": "紫横幅三采样点" }
@@ -168,7 +169,7 @@
   },
   "assets": {
     "dictionaries": {
-      "mappings": "tools/mappings.json",
+      "mappings": "tools/good_names.json",
       "keys": { "weapons": 236, "characters": 121, "artifactSets": 56 },
       "note": "1★/2★武器未收录（止扫靠稀有度判据）"
     },

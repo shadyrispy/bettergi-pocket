@@ -57,7 +57,11 @@ dependencies {
     implementation(libs.opencv)
     implementation(libs.mlkit.text.recognition.chinese)
     implementation(libs.kotlinx.coroutines.android)
+    // ONNX Runtime：PaddleOCR det+rec 推理（方案 §6.1）；~10-15MB/ABI，ML Kit 保留为降级兜底
+    implementation(libs.onnxruntime.android)
     testImplementation(libs.junit)
+    // JVM 版 onnxruntime：本地单测跑真实推理（速度/精度对拍），不进 Android 主包
+    testImplementation(libs.onnxruntime.jvm)
     val desktopOpenCv = file("libs/opencv-4.9.0-0.jar")
     if (desktopOpenCv.exists()) {
         testImplementation(files(desktopOpenCv))

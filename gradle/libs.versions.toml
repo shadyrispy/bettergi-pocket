@@ -13,6 +13,7 @@ opencv = "4.12.0"
 opencvDesktop = "4.9.0-0"
 mlkitTextRecognitionChinese = "16.0.1"
 coroutines = "1.9.0"
+onnxruntime = "1.20.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -20,6 +21,9 @@ opencv = { group = "org.opencv", name = "opencv", version.ref = "opencv" }
 opencv-desktop = { group = "org.openpnp", name = "opencv", version.ref = "opencvDesktop" }
 mlkit-text-recognition-chinese = { group = "com.google.mlkit", name = "text-recognition-chinese", version.ref = "mlkitTextRecognitionChinese" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
+onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntime" }
+# JVM 版供本地单测跑真实推理对拍（Android 主包仍用 onnxruntime-android）
+onnxruntime-jvm = { group = "com.microsoft.onnxruntime", name = "onnxruntime", version.ref = "onnxruntime" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }

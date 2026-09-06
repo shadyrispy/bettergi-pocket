@@ -98,6 +98,10 @@ JAVA_HOME=$(mise where java) ./gradlew -p <abs-path> :app:testDebugUnitTest :app
 ⚠️ `app/assets/`（无 src/main 前缀）不是 assets 目录——文件放那里不进 APK（fix45 教训：mappings.json 曾因此全部 unavailable）。
 dsl 变更后须手动重拷并跑守门测试；同步机制 P4 订阅管理解决。
 
+**名称词典只有一份**：`tools/good_names.json`（角色/武器/套装/圣遗物单件/词条/部位），
+由 `../dsl/scripts/gen_good_names.py` 生成并同步。`../dsl/tools/mappings.json` 与
+`artifactSetPieces.json` 只是 dsl 侧的**生成源**，不再拷进 app（守门测试钉死：出现即红）。
+
 ## 路线
 
 - ~~P0 原语层~~ / ~~P1 扫描核心~~ / ~~P3 脚本化（17 do 原语全实现 + DoCoverageTest 守门）~~

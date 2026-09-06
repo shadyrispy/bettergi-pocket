@@ -1,0 +1,103 @@
+{
+  "version": "1.0.0",
+  "note": "模板锚点配置。匹配=OpenCV TM_CCOEFF_NORMED + NMS，取最高响应；在 rect 外扩 margin 的 ROI 内搜索（全帧兜底）。阈值需真机/模拟器标定。",
+  "defaults": {
+    "method": "TM_CCOEFF_NORMED",
+    "threshold": 0.8,
+    "margin": 48,
+    "nmsRadius": 24
+  },
+  "templates": {
+    "slotTab.shengzhihua": {
+      "file": "dsl/templates/slotTab_shengzhihua.jpg",
+      "rect": [
+        197,
+        27,
+        302,
+        132
+      ],
+      "source": "template_shengzhihua_1000053587_197_27_302_132.jpg"
+    },
+    "slotTab.sizhiyu": {
+      "file": "dsl/templates/slotTab_sizhiyu.jpg",
+      "rect": [
+        337,
+        27,
+        442,
+        132
+      ],
+      "source": "template_sizhiyu_1000053587_337_27_442_132.jpg"
+    },
+    "slotTab.shizhisha": {
+      "file": "dsl/templates/slotTab_shizhisha.jpg",
+      "rect": [
+        476,
+        27,
+        581,
+        132
+      ],
+      "source": "template_shizhisha_1000053587_476_27_581_132.jpg"
+    },
+    "slotTab.kongzhibei": {
+      "file": "dsl/templates/slotTab_kongzhibei.jpg",
+      "rect": [
+        616,
+        27,
+        721,
+        132
+      ],
+      "source": "template_kongzhibei_1000053587_616_27_721_132.jpg"
+    },
+    "slotTab.lizhiguan": {
+      "file": "dsl/templates/slotTab_lizhiguan.jpg",
+      "rect": [
+        756,
+        27,
+        861,
+        132
+      ],
+      "source": "template_lizhiguan_1000053587_756_27_861_132.jpg"
+    },
+    "charPopup.close": {
+      "file": "dsl/templates/charPopup_close.jpg",
+      "rect": [
+        2913,
+        41,
+        2991,
+        119
+      ],
+      "source": "template_close_22f85295_2913_41_2991_119.jpg"
+    },
+    "charPopup.gridCorner": {
+      "file": "dsl/templates/charPopup_gridCorner.jpg",
+      "rect": [
+        190,
+        172,
+        262,
+        252
+      ],
+      "source": "template_charselect_gridcorner_22f85295_190_172_262_252.jpg"
+    }
+  },
+  "anchors": {
+    "5 部位 tab": {
+      "mode": "all",
+      "desc": "圣遗物管理界面 5 个部位 tab 同时可见（profiles 记零偏移）",
+      "templates": [
+        "slotTab.shengzhihua",
+        "slotTab.sizhiyu",
+        "slotTab.shizhisha",
+        "slotTab.kongzhibei",
+        "slotTab.lizhiguan"
+      ]
+    },
+    "charselect 网格外框": {
+      "mode": "any",
+      "desc": "角色选择弹窗：网格外框左上角（内容无关）+ 同帧关闭钮，任一命中即通过",
+      "templates": [
+        "charPopup.gridCorner",
+        "charPopup.close"
+      ]
+    }
+  }
+}

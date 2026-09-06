@@ -1,6 +1,7 @@
 package com.bettergi.pocket.scan
 
 import org.json.JSONObject
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -27,9 +28,14 @@ class DslAssetsIntegrityTest {
     private fun requiredFiles() = listOf(
         "profiles.json",
         "flows/artifact_scan.json",
+        // 单一名称词典（由 dsl/scripts/gen_good_names.py 生成）：GoodNames 运行时唯一依赖。
+        // fix45 教训：文件放在 app/assets/（无 src/main 前缀）不进 APK → 词典全部 unavailable。
+        "tools/good_names.json",
+    )
+
+    /** 运行时只吃上面那一份：mappings.json / artifactSetPieces.json 仅为 dsl/ 侧的生成源，不再拷进 app。 */
+    private fun retiredFiles() = listOf(
         "tools/artifactSetPieces.json",
-        // fix45 教训：mappings.json 曾被拷到 app/assets/（非标准目录，不进 APK）
-        // → 真机上 CharacterDictionary/WeaponDictionary 全部 unavailable。清单钉死防再犯。
         "tools/mappings.json",
     )
 
@@ -71,9 +77,24 @@ class DslAssetsIntegrityTest {
     }
 
     @Test
-    fun `set dictionary has pieceToSetId entries`() {
-        val dict = JSONObject(File(assetsDir(), "tools/artifactSetPieces.json").readText())
-        val map = dict.getJSONObject("pieceToSetId")
-        assertTrue("pieceToSetId should have 276 entries", map.length() >= 270)
+    fun `single name dictionary is the only tools asset`() {
+        val base = assetsDir()
+        for (rel in retiredFiles()) {
+            assertFalse(
+                "$rel 不应再出现在 app assets（运行时已统一为 good_names.json；dsl/ 侧仍保留为生成源）",
+                File(base, rel).exists(),
+            )
+        }
+    }
+
+    @Test
+    fun `name dictionary has artifact pieces entries`() {
+        val dict = JSONObject(File(assetsDir(), "tools/good_names.json").readText())
+        val pieces = dict.getJSONArray("artifactPieces")
+        assertTrue("artifactPieces should have 276 entries", pieces.length() >= 270)
+        assertTrue(
+            "artifactPieces 每条须带 setId",
+            (0 until pieces.length()).all { pieces.getJSONObject(it).has("setId") },
+        )
     }
 }

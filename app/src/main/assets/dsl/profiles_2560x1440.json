@@ -742,7 +742,7 @@
    "setName": {
     "collect": false,
     "reason": "用户定稿(2026-09-01)：背包面板 set_name 被遮挡 OCR 识别不到，不标定不采集；set_name 由圣遗物单件名 name 经词典反推",
-    "reverseDict": "tools/artifactSetPieces.json（pieceToSet 276 件/56 套，2026-09-02 自 biligame wiki 构建，四图 OCR 回验 4/4 命中）",
+    "reverseDict": "tools/good_names.json（artifactPieces 276 件/56 套，由 dsl/scripts/gen_good_names.py 生成）",
     "archivedMeasure": "动态 set_top=800+nSubs*64(±4) 实测留档，勿用于采集"
    },
    "equipped": [
@@ -1063,7 +1063,7 @@
  },
  "assets": {
   "dictionaries": {
-   "mappings": "tools/mappings.json",
+   "mappings": "tools/good_names.json",
    "keys": {
     "weapons": 236,
     "characters": 121,
