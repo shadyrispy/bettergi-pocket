@@ -58,16 +58,46 @@
       ],
       "source": "template_lizhiguan_1000053587_756_27_861_132.jpg"
     },
-    "charPopup.close": {
-      "file": "dsl/templates/charPopup_close.jpg",
-      "rect": [
-        2913,
-        41,
-        2991,
-        119
-      ],
-      "source": "template_close_22f85295_2913_41_2991_119.jpg"
-    },
+ "charPopup.close": {
+  "file": "dsl/templates/charPopup_close.jpg",
+  "rect": [
+   2913,
+   41,
+   2991,
+   119
+  ],
+  "source": "template_close_22f85295_2913_41_2991_119.jpg"
+ },
+ "ui.return": {
+  "file": "dsl/templates/charPopup_close.jpg",
+  "rect": [
+   2913,
+   41,
+   2991,
+   119
+  ],
+  "source": "template_close_22f85295_2913_41_2991_119.jpg（右上角返回/关闭钮，§15 归位用）"
+ },
+ "home.bagpack": {
+  "file": "dsl/templates/home_bagpack.jpg",
+  "rect": [
+   2786,
+   36,
+   2862,
+   125
+  ],
+  "source": "template_bagpack_f590061e_2786_36_2862_125.jpg"
+ },
+ "home.character": {
+  "file": "dsl/templates/home_character.jpg",
+  "rect": [
+   2925,
+   36,
+   3001,
+   125
+  ],
+  "source": "template_character_f590061e_2925_36_3001_125.jpg"
+ },
     "charPopup.gridCorner": {
       "file": "dsl/templates/charPopup_gridCorner.jpg",
       "rect": [

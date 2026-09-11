@@ -13,11 +13,14 @@ import org.opencv.core.Mat
  * OcrGateway 实现（ScanEngine 不感知具体引擎——方案 P1 验收
  * 「OcrMatch 原语在 ML Kit/ONNX 两种 default 下均通过」）。
  *
+ * 原名 MlKitOcrGateway，2026-09-08 改名：本类**不依赖 ML Kit**，只是按
+ * [IOcrService] 能力分发的统一网关；改名是移除 ML Kit 的前置清理（避免误以为绑定引擎）。
+ *
  * 分发策略（审计建议 #1）：按 [IOcrService.hasFastRecOnlyBatch] 选择单槽路径——
  * - ONNX：recognizeRois（rec-only，跳过整帧 det），每槽 ~2ms vs 全管线 ~44ms；
- * - ML Kit：原逐槽 recognizeText，保留 <80px 2x 放大增强（见 recognizeText 注释）。
+ * - ML Kit（待移除）：原逐槽 recognizeText，保留 <80px 2x 放大增强（见 recognizeText 注释）。
  */
-class MlKitOcrGateway : OcrGateway {
+class OcrGatewayImpl : OcrGateway {
 
     override suspend fun readNumber(frame: Mat, rect: FrameRect): Int? {
         val text = recognizeText(frame, rect) ?: return null
@@ -81,7 +84,7 @@ class MlKitOcrGateway : OcrGateway {
         val scaledOwned = scaled !== roi
         return try {
             val text = service.recognizeText(scaled)
-            Log.d("BetterGI.Ocr", "roi(${w}x$h${if (scaledOwned) " x2" else ""}) -> '$text'")
+            Log.d("BetterGI.Ocr", "[${OcrFactory.engineLabel}] roi(${w}x$h${if (scaledOwned) " x2" else ""}) -> '$text'")
             text
         } finally {
             if (scaledOwned) scaled.release()

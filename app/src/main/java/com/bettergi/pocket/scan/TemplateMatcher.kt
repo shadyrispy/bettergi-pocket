@@ -2,6 +2,7 @@ package com.bettergi.pocket.scan
 
 import android.content.res.AssetManager
 import android.util.Log
+import com.bettergi.pocket.dsl.FlowSource
 import org.json.JSONObject
 import org.opencv.core.Core
 import org.opencv.core.CvType
@@ -28,6 +29,9 @@ import org.opencv.imgproc.Imgproc
 object TemplateMatcher {
     private const val TAG = "BetterGI.Template"
     private const val CONFIG_PATH = "dsl/templates.json"
+    /** 模板裁切基准分辨率（dsl/uploaded 源图统一 3200×1440）。 */
+    private const val TEMPLATE_BASE_W = 3200.0
+    private const val TEMPLATE_BASE_H = 1440.0
 
     /** 单次匹配结果：是否命中 + 最高响应分 + 命中位置（基准坐标）。 */
     data class MatchResult(val matched: Boolean, val score: Double, val x: Int, val y: Int)
@@ -37,6 +41,9 @@ object TemplateMatcher {
 
     @Volatile
     private var assets: AssetManager? = null
+
+    /** 模板是否已注册（无需取帧/解码，供调用方判断是否可用）。 */
+    fun hasTemplate(key: String): Boolean = templateSpec(key) != null
 
     /** 模板位图缓存（解码一次，避免每帧 IO）。 */
     private val templateCache = HashMap<String, Mat>()
@@ -48,7 +55,7 @@ object TemplateMatcher {
         synchronized(lock) {
             assets = assetManager
             config = try {
-                JSONObject(assetManager.open(CONFIG_PATH).bufferedReader().use { it.readText() })
+                JSONObject(FlowSource.open(assetManager, CONFIG_PATH).bufferedReader().use { it.readText() })
             } catch (e: Exception) {
                 Log.w(TAG, "templates.json 读取失败，模板锚点将不可用：${e.message}")
                 null
@@ -76,12 +83,28 @@ object TemplateMatcher {
         return file to rect
     }
 
+    /**
+     * 分辨率相关模板 rect 覆盖：读 `profiles.templateRects.<key>`（key 含点号，不走点路径），
+     * 按 profile 缩放换算为**帧坐标**（与 [ScreenProfile.rect] 同语义）。
+     * 未配置 → null，退回 templates.json 的 3200 基准 rect + 左右锚换算。
+     */
+    private fun profileRect(key: String, profile: ScreenProfile?): IntArray? {
+        val arr = profile?.rawObject("templateRects")?.optJSONArray(key) ?: return null
+        if (arr.length() < 4) return null
+        return intArrayOf(
+            (arr.getInt(0) * profile.scaleX).toInt(),
+            (arr.getInt(1) * profile.scaleY).toInt(),
+            (arr.getInt(2) * profile.scaleX).toInt(),
+            (arr.getInt(3) * profile.scaleY).toInt(),
+        )
+    }
+
     private fun loadTemplate(key: String): Mat? {
         templateCache[key]?.let { return it }
         val (file, _) = templateSpec(key) ?: return null
         val am = assets ?: return null
         return try {
-            val bytes = am.open(file).use { it.readBytes() }
+            val bytes = FlowSource.open(am, file).use { it.readBytes() }
             val mat = Imgcodecs.imdecode(MatOfByte(*bytes), Imgcodecs.IMREAD_COLOR)
             if (mat.empty()) {
                 Log.w(TAG, "模板解码失败：$key ($file)")
@@ -104,28 +127,42 @@ object TemplateMatcher {
         val spec = templateSpec(templateKey) ?: return MatchResult(false, -1.0, 0, 0)
         val tpl = loadTemplate(templateKey) ?: return MatchResult(false, -1.0, 0, 0)
 
-        // 模板按基准分辨率裁切 → 缩放到当前帧分辨率
+        // 模板恒按 3200×1440 基准裁切 → 统一按「高比」缩放（游戏的 fit-height 布局）。
+        // 不能用 profile.scaleX/scaleY：2244×1080 profile 的 scale 恒为 1，会让 3200 系坐标直接越界。
+        val s = frame.rows().toDouble() / TEMPLATE_BASE_H
         val scaled = Mat()
-        Imgproc.resize(
-            tpl, scaled, Size(),
-            profile.scaleX.toDouble(), profile.scaleY.toDouble(),
-            Imgproc.INTER_AREA,
-        )
+        Imgproc.resize(tpl, scaled, Size(), s, s, Imgproc.INTER_AREA)
         val (tw, th) = scaled.cols() to scaled.rows()
         if (tw <= 0 || th <= 0 || tw > frame.cols() || th > frame.rows()) {
             scaled.release()
             return MatchResult(false, -1.0, 0, 0)
         }
 
-        // 搜索 ROI：标定 rect 外扩 margin（缩放后）；越界/无 rect → 全帧
+        // 搜索 ROI 两种来源：
+        // ① profiles.templateRects.<key>（分辨率相关覆盖，帧坐标系）→ 直接外扩 margin。
+        //    16:9（2560×1440）右侧控件相对 3200 基准横向偏移约 150px，超过 margin 会把图标挤出 ROI
+        //    （Bluestacks 上 home.bagpack/home.character 因此永远命中不了，returnToHome 空点 8 次）。
+        // ② templates.json 的 3200 基准 rect → x 依半区选锚（右半右锚/左半左锚），y 恒 ×s。
         val m = margin()
-        val roi = spec.second?.let { r ->
-            val x0 = (profile.scale(r[0] - m, profile.scaleX)).coerceIn(0, frame.cols() - tw)
-            val y0 = (profile.scale(r[1] - m, profile.scaleY)).coerceIn(0, frame.rows() - th)
-            val x1 = (profile.scale(r[2] + m, profile.scaleX)).coerceIn(x0 + tw, frame.cols())
-            val y1 = (profile.scale(r[3] + m, profile.scaleY)).coerceIn(y0 + th, frame.rows())
+        val override = profileRect(templateKey, profile)
+        val roi = if (override != null) {
+            val x0 = (override[0] - m).coerceIn(0, frame.cols() - tw)
+            val y0 = (override[1] - m).coerceIn(0, frame.rows() - th)
+            val x1 = (override[2] + m).coerceIn(x0 + tw, frame.cols())
+            val y1 = (override[3] + m).coerceIn(y0 + th, frame.rows())
             Rect(x0, y0, x1 - x0, y1 - y0)
-        } ?: Rect(0, 0, frame.cols(), frame.rows())
+        } else {
+            spec.second?.let { r ->
+                val anchorRight = (r[0] + r[2]) / 2.0 >= TEMPLATE_BASE_W / 2.0
+                fun px(v: Int): Int =
+                    if (anchorRight) ((v - TEMPLATE_BASE_W) * s + frame.cols()).toInt() else (v * s).toInt()
+                val x0 = px(r[0] - m).coerceIn(0, frame.cols() - tw)
+                val y0 = ((r[1] - m) * s).toInt().coerceIn(0, frame.rows() - th)
+                val x1 = px(r[2] + m).coerceIn(x0 + tw, frame.cols())
+                val y1 = ((r[3] + m) * s).toInt().coerceIn(y0 + th, frame.rows())
+                Rect(x0, y0, x1 - x0, y1 - y0)
+            } ?: Rect(0, 0, frame.cols(), frame.rows())
+        }
 
         val search = Mat(frame, roi)
         val result = Mat()

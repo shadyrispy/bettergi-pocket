@@ -139,13 +139,24 @@ class OnnxOcrEngine(
         shape: LongArray,
     ): FloatArray {
         val e = env ?: return FloatArray(0)
+        val t0 = System.nanoTime()
         return try {
             OnnxTensor.createTensor(e, input, shape).use { tensor ->
                 session.run(Collections.singletonMap(inputName, tensor)).use { result ->
                     val t = result.get(0) as? OnnxTensor ?: return FloatArray(0)
                     t.floatBuffer.let { b -> FloatArray(b.remaining()).also { b.get(it) } }
                 }
-            }.also { consecutiveFailures.set(0) }
+            }.also {
+                // 慢推理看门狗：ORT native run 不可中断，无法真超时，只能事后判定并计入失败
+                // 以触发 EP 降档（XNNPACK 在部分 ROM 上会整体挂起，远超此阈值）。
+                val ms = (System.nanoTime() - t0) / 1_000_000
+                if (ms > SLOW_INFER_MS) {
+                    Log.w(TAG, "slow inference ${ms}ms (tier=${tier.label}, $inputName) > ${SLOW_INFER_MS}ms")
+                    consecutiveFailures.incrementAndGet()
+                } else {
+                    consecutiveFailures.set(0)
+                }
+            }
         } catch (e: Throwable) {
             // 不静默吞：NNAPI 在某些 ROM 上会中途崩，日志是唯一线索
             Log.e(TAG, "ORT run failed (tier=${tier.label}, input=$inputName, shape=${shape.toList()})", e)
@@ -204,5 +215,8 @@ class OnnxOcrEngine(
             NNAPIFlags.USE_FP16,
             NNAPIFlags.USE_NCHW,
         )
+
+        /** 慢推理阈值（ms）：超此值计一次失败，累计触发 EP 降档。det 真机 CPU 档约 1s，留 3x 余量。 */
+        private const val SLOW_INFER_MS = 3000L
     }
 }

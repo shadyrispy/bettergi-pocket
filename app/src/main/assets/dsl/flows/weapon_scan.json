@@ -1,105 +1,106 @@
 {
- "flow": "weapon_scan",
- "version": "1.0.0",
- "profile": "android_3200x1440",
- "description": "流程一：武器背包全量扫描 → GoodWeapon (GOOD v3)",
- "vars": {
-  "total": "int",
-  "seen": "set<fingerprint>",
-  "results": "list<GoodWeapon>"
- },
- "steps": [
-  {
-   "do": "enterScreen",
-   "target": "weapon_backpack",
-   "chain": [
-    "game_home→bagpack(2786,36)",
-    "weapon_tab(210,196,290,321)"
-   ],
-   "anchor": {
-    "kind": "ocr",
-    "rect": "$screens.weapon_backpack.count",
-    "expect": "武器 \\d+/\\d+",
-    "prefixStrict": true
-   }
+  "flow": "weapon_scan",
+  "version": "1.1.0",
+  "profile": "android_3200x1440",
+  "description": "流程一：武器背包全量扫描 → GoodWeapon (GOOD v3)",
+  "vars": {
+    "total": "int",
+    "seen": "set<fingerprint>",
+    "results": "list<GoodWeapon>"
   },
-  {
-   "do": "readCount",
-   "rect": "$screens.weapon_backpack.count",
-   "as": "total",
-   "onZero": "reopenAndRetry"
-  },
-  {
-   "do": "pagedGrid",
-   "grid": "weapon_backpack",
-   "fingerprintSkip": true,
-   "visit": [
+  "steps": [
     {
-     "do": "vote",
-     "zone": "weapon.card.starStrip",
-     "passes": 3,
-     "as": "rarity"
-    },
-    {
-     "do": "stopWhen",
-     "expr": "rarity <= 2",
-     "action": "Stop+flush",
-     "note": "拍板定稿：检测到 1★灰/2★绿即止扫，不再用武器名名单"
-    },
-    {
-     "do": "vote",
-     "zone": "weapon.card.lockBadge",
-     "passes": 3,
-     "as": "locked"
-    },
-    {
-     "do": "click",
-     "fast": {
-      "at": "$cell.center"
-     },
-     "fallback": [
-      {
-       "kind": "ocrAnchor",
-       "region": "$panel.weapon_backpack.name"
+      "do": "enterScreen",
+      "target": "weapon_backpack",
+      "chain": [
+        "game_home→bagpack(2786,36)",
+        "weapon_tab(210,196,290,321)"
+      ],
+      "anchor": {
+        "kind": "ocr",
+        "rect": "$screens.weapon_backpack.count",
+        "expect": "武器 \\d+/\\d+",
+        "prefixStrict": true
       }
-     ]
     },
     {
-     "do": "parsePanel",
-     "panel": "weapon_backpack",
-     "fields": [
-      "name",
-      "slot",
-      "mainLabel",
-      "mainValue",
-      "baseLabel",
-      "baseValue",
-      "level",
-      "refine",
-      "equipped"
-     ],
-     "dict": {
-      "name": "mappings.weapons",
-      "fuzzy": 1
-     }
+      "do": "readCount",
+      "rect": "$screens.weapon_backpack.count",
+      "as": "total",
+      "onZero": "reopenAndRetry"
     },
     {
-     "do": "emit",
-     "as": "GoodWeapon",
-     "compose": {
-      "rarity": "$rarity",
-      "locked": "$locked"
-     }
+      "do": "pagedGrid",
+      "grid": "weapon_backpack",
+      "scrollToTop": true,
+      "fingerprintSkip": true,
+      "visit": [
+        {
+          "do": "stopWhen",
+          "expr": "rarity <= 2",
+          "action": "Stop+flush",
+          "note": "拍板定稿：检测到 1★灰/2★绿即止扫，不再用武器名名单"
+        },
+        {
+          "do": "vote",
+          "zone": "weapon.card.lockBadge",
+          "passes": 3,
+          "as": "locked"
+        },
+        {
+          "do": "click",
+          "fast": {
+            "at": "$cell.center"
+          },
+          "fallback": [
+            {
+              "kind": "ocrAnchor",
+              "region": "$panel.weapon_backpack.name"
+            }
+          ]
+        },
+        {
+          "do": "vote",
+          "zone": "weapon.panel.starBand",
+          "as": "rarity",
+          "note": "★ 2026-09-11：星级改由**详情面板星行**判定（必须排在 click 之后——面板显示的是选中件）。卡片 starStrip 在 3★/4★ 边界抖动（同件两次 3★/4★，36 件中 10 件）；面板星行固定坐标、大而清晰，逐格金像素>100 计亮格数=星数。代价：低星件也要点一下才能知道星级（stopWhen 因此略滞后，可接受）。"
+        },
+        {
+          "do": "parsePanel",
+          "panel": "weapon_backpack",
+          "fields": [
+            "name",
+            "slot",
+            "mainLabel",
+            "mainValue",
+            "baseLabel",
+            "baseValue",
+            "level",
+            "refine",
+            "equipped"
+          ],
+          "dict": {
+            "name": "mappings.weapons",
+            "fuzzy": 1
+          }
+        },
+        {
+          "do": "emit",
+          "as": "GoodWeapon",
+          "compose": {
+            "rarity": "$rarity",
+            "locked": "$locked"
+          }
+        }
+      ]
     }
-   ]
-  }
- ],
- "endConditions": [
-  "stopWhen 触发",
-  "pagedGrid 自然遍历完（总数核对 total==len(results)）"
- ],
- "pending": [
-  "swipe settle 真机",
-  "2★ 绿色底色旁证补采样（非阻断）"
- ]
+  ],
+  "endConditions": [
+    "stopWhen 触发",
+    "pagedGrid 自然遍历完（总数核对 total==len(results)）"
+  ],
+  "pending": [
+    "swipe settle 真机",
+    "2★ 绿色底色旁证补采样（非阻断）"
+  ]
 }

@@ -1,0 +1,215 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "goodscanner-pocket/primitives.schema.json",
+  "title": "GOODScanner-pocket DSL v1.0（2026-09-01 终稿）",
+  "description": "原语执行器的流程文件校验 Schema。稳定面 = 原语名 + 谓词语法（D6）；坐标只存在于 profiles（D1 分文件）。",
+  "definitions": {
+    "rect": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      },
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "fallbackStep": {
+      "type": "object",
+      "description": "降级层，最多 2 层（D5）；再失败终止并输出诊断截图包",
+      "properties": {
+        "kind": {
+          "enum": [
+            "template",
+            "ocrAnchor",
+            "ocrWithRetry"
+          ]
+        },
+        "ref": {
+          "type": "string"
+        },
+        "region": {
+          "$ref": "#/definitions/rect"
+        },
+        "find": {
+          "type": "string"
+        },
+        "dict": {
+          "type": "string"
+        },
+        "threshold": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "predicate": {
+      "type": "string",
+      "description": "D3 定稿：表达式字符串，如 'rarity<=2'、'pageMinLevel > max(targets.level)'；变量=$vote结果/panel字段/flow vars；运行端 30 行解析器"
+    },
+    "step": {
+      "type": "object",
+      "properties": {
+        "do": {
+          "enum": [
+            "enterScreen",
+            "readCount",
+            "pagedGrid",
+            "vote",
+            "parsePanel",
+            "dualStateButton",
+            "dialog",
+            "swipePage",
+            "ocrWithRetry",
+            "stopWhen",
+            "click",
+            "setFilter",
+            "navigate",
+            "foreach",
+            "ifMatch",
+            "emit",
+            "verify",
+            "exit",
+            "clicks",
+            "rosterFind"
+          ]
+        },
+        "fast": {
+          "type": "object",
+          "properties": {
+            "at": {
+              "type": "array",
+              "items": {
+                "type": "integer"
+              },
+              "minItems": 2,
+              "maxItems": 2
+            },
+            "assert": {
+              "type": "object",
+              "properties": {
+                "zone": {
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "pixel",
+                    "ocr",
+                    "template"
+                  ]
+                },
+                "expect": {}
+              }
+            }
+          }
+        },
+        "fallback": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/fallbackStep"
+          },
+          "maxItems": 2
+        },
+        "grid": {
+          "type": "string",
+          "description": "profiles.grids 键"
+        },
+        "panel": {
+          "type": "string",
+          "description": "profiles.panels 键"
+        },
+        "zone": {
+          "type": "string",
+          "description": "profiles.zones 键"
+        },
+        "expr": {
+          "$ref": "#/definitions/predicate"
+        },
+        "action": {
+          "type": "string"
+        },
+        "passes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "dict": {
+          "type": "object"
+        },
+        "chain": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "anchor": {
+          "type": "object"
+        },
+        "preReset": {
+          "type": "object",
+          "description": "D7 定稿：网格复位=enterScreen.preReset 参数"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/step"
+          }
+        }
+      },
+      "required": [
+        "do"
+      ]
+    }
+  },
+  "type": "object",
+  "properties": {
+    "flow": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "profile": {
+      "const": "android_3200x1440"
+    },
+    "vars": {
+      "type": "object"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/step"
+      }
+    },
+    "endConditions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "pending": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "flow",
+    "version",
+    "profile",
+    "steps"
+  ],
+  "executionSemantics": {
+    "calibration": "D2 定稿：每设备 offsets.json {step_id: {dx,dy,verified_at}}；zone 断言连续失败 N 次 → 该屏自动重校准",
+    "fallbackDepth": "≤2 层（D5）；超限终止 + 诊断截图包",
+    "judgePriority": "vote(像素) > ocrWithRetry(文本) > template(兜底)（D3 前置拍板③）",
+    "compat": "D6 定稿：PC 订阅下发只换 profiles+flows；原语名+谓词语法为稳定面，执行器随 app 版本"
+  }
+}

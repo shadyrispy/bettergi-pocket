@@ -1,6 +1,7 @@
 package com.bettergi.pocket.scan
 
 import android.util.Log
+import com.bettergi.pocket.dsl.FlowSource
 import org.json.JSONObject
 
 /**
@@ -37,7 +38,7 @@ class ScreenProfile(
 
         /** 从 assets/dsl/profiles.json 构建。 */
         fun load(assets: android.content.res.AssetManager): ScreenProfile {
-            val text = assets.open("dsl/profiles.json").bufferedReader().use { it.readText() }
+            val text = FlowSource.open(assets, "dsl/profiles.json").bufferedReader().use { it.readText() }
             return ScreenProfile(JSONObject(text))
         }
 
@@ -48,7 +49,7 @@ class ScreenProfile(
         fun loadFor(assets: android.content.res.AssetManager, frameWidth: Int, frameHeight: Int): ScreenProfile {
             val specific = "dsl/profiles_${frameWidth}x${frameHeight}.json"
             return try {
-                val text = assets.open(specific).bufferedReader().use { it.readText() }
+                val text = FlowSource.open(assets, specific).bufferedReader().use { it.readText() }
                 Log.i(TAG, "using resolution-specific profile: $specific")
                 ScreenProfile(JSONObject(text), frameWidth, frameHeight)
             } catch (e: java.io.FileNotFoundException) {
@@ -133,6 +134,13 @@ class ScreenProfile(
 
     fun rawObject(path: String): JSONObject? = resolve(path) as? JSONObject
 
+    /**
+     * 任意节点（JSONArray / JSONObject / 标量）。
+     * ⚠️ [rawObject] 只认 JSONObject，数组型配置（如 `screens.artifact_manage.resetChain` 是 JSONArray）
+     * 用它取恒 null → 复位链静默失效；数组/不确定类型一律走本函数。
+     */
+    fun rawAny(path: String): Any? = resolve(path)
+
     /** 路径存在性（flow "$..." 引用静态校验用）。 */
     fun hasPath(path: String): Boolean = resolve(path) != null
 
@@ -190,10 +198,11 @@ class ScreenProfile(
             val y = g.rowYs.getOrElse(row) { g.rowYs.last() } + g.cardH / 2
             return scalePoint(x, y)
         }
-        // 回退：仅 cardOrigin+pitch 写法（历史行为）
+        // 回退：仅 cardOrigin+pitch 写法（历史行为）。无 cardOrigin 时给明确报错（勿裸抛 JSONException）
         val grid = rawObject("grids.$gridKey") ?: error("grid '$gridKey' missing")
         val cols = grid.getInt("cols")
-        val origin = grid.getJSONArray("cardOrigin")
+        val origin = grid.optJSONArray("cardOrigin")
+            ?: error("grid '$gridKey' 既无 colX/rowY 几何也无 cardOrigin 回退")
         val pitch = grid.getJSONArray("pitch")
         val size = grid.getJSONArray("cardSize")
         val col = index % cols
@@ -239,8 +248,19 @@ class ScreenProfile(
      */
     fun gridGeometryFor(gridKey: String): GridGeometry? = gridGeometry(gridKey)
 
-    /** 网格可见区（帧坐标）：首列左边界 → 末列右边界、首行上沿 → 末行下沿。几何不足返回 null。 */
+    /** 网格可见区（帧坐标）：首列左边界 → 末列右边界、首行上沿 → 末行下沿。几何不足返回 null。
+     * 优先读 grids.<key>.bounds 显式矩形（如 set_filter_popup 双列结构）。 */
     fun gridBounds(gridKey: String): FrameRect? {
+        val grid = rawObject("grids.$gridKey")
+        val explicit = grid?.optJSONArray("bounds")
+        if (explicit != null && explicit.length() == 4) {
+            return FrameRect(
+                left = scale(explicit.getInt(0), scaleX),
+                top = scale(explicit.getInt(1), scaleY),
+                right = scale(explicit.getInt(2), scaleX),
+                bottom = scale(explicit.getInt(3), scaleY),
+            )
+        }
         val g = gridGeometry(gridKey) ?: return null
         return FrameRect(
             left = scale(g.colXs.first(), scaleX),
@@ -258,8 +278,9 @@ class ScreenProfile(
         val cardH = size.optInt(1, -1)
         if (cardW <= 0 || cardH <= 0) return null
         // set_filter_popup 的 cols 是 {left,right} 对象 → optInt 回退默认 → 拒绝（非卡片网格）
+        // 1 列网格（char_strip 左列头像条）合法 → 门限为 <1 而非 <2
         val cols = grid.optInt("cols", -1)
-        if (cols < 2) return null
+        if (cols < 1) return null
 
         val colX = grid.optJSONArray("colX")
         val rowY = grid.optJSONArray("rowY")
@@ -298,6 +319,35 @@ class ScreenProfile(
         rawObject("grids.$gridKey")?.getInt(field) ?: error("grids.$gridKey.$field missing")
 
     private fun resolve(path: String): Any? {
+        // ⚠️ zones 顶层 key 自身含点号（char_popup.collapse / artifact.panel.lock …）→ 点分拆分前
+        // 先按「最长前缀整键命中」试解，否则 "zones.char_popup.collapse.rect" 会拆成 zones→char_popup
+        // → opt(null) 恒 null（旧行为：clicks 链静默跳过 / rect() 直接抛）。
+        if (path.startsWith("zones.")) {
+            val rest = path.removePrefix("zones.")
+            val zones = root.optJSONObject("zones")
+            if (zones != null) {
+                var hit: Any? = null
+                var hitLen = -1
+                val it = zones.keys()
+                while (it.hasNext()) {
+                    val k = it.next()
+                    if ((rest == k || rest.startsWith("$k.")) && k.length > hitLen) {
+                        var node: Any? = zones.opt(k)
+                        if (rest != k) {
+                            for (seg in rest.removePrefix(k).removePrefix(".").split('.')) {
+                                node = (node as? JSONObject)?.opt(seg)
+                                if (node == null) break
+                            }
+                        }
+                        if (node != null) {
+                            hit = node
+                            hitLen = k.length
+                        }
+                    }
+                }
+                if (hit != null) return hit
+            }
+        }
         var node: Any? = root
         for (seg in path.split('.')) {
             node = when (node) {

@@ -1,13 +1,14 @@
 {
   "flow": "artifact_scan",
   "version": "1.0.0",
+  "info": { "name": "artifact_scan", "version": 2, "min_host_version": "0.0.0", "type": "pocket-script" },
   "profile": "android_3200x1440",
   "description": "流程二：圣遗物背包全量扫描 → GoodArtifact",
   "vars": { "total": "int", "results": "list<GoodArtifact>" },
   "steps": [
     { "do": "enterScreen", "target": "artifact_backpack",
       "chain": ["game_home→bagpack(2786,36)", "artifact_tab(213,359,287,472)"],
-      "anchor": { "kind": "ocr", "rect": "$screens.artifact_backpack.count", "expect": "圣遗物 \\d+/\\d+" } },
+      "anchor": { "kind": "ocr", "rect": "$screens.artifact_backpack.count", "expect": "圣遗物 \\d+/\\d+", "prefixStrict": true } },
     { "do": "dualStateButton", "ref": "$screens.artifact_backpack.fiveStarToggle",
       "ensure": "off", "judge": "bgColor(底色判态)", "note": "五星筛选关闭态保持" },
     { "do": "readCount", "rect": "$screens.artifact_backpack.count", "as": "total", "onZero": "reopenAndRetry" },

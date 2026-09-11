@@ -17,7 +17,8 @@ class CapturePermissionActivity : AppCompatActivity() {
                 if (result.resultCode == RESULT_OK && result.data != null) {
                     action = TriggerForegroundService.ACTION_CAPTURE_RESULT
                     putExtra(TriggerForegroundService.EXTRA_RESULT_CODE, result.resultCode)
-                    putExtra(TriggerForegroundService.EXTRA_RESULT_DATA, result.data)
+                    // 嵌套 Intent 的 IBinder extra 在 parcel 时会丢失 → 改走进程内单例
+                    CaptureResultHolder.pendingResultData = result.data
                 } else {
                     action = TriggerForegroundService.ACTION_CAPTURE_DENIED
                 }

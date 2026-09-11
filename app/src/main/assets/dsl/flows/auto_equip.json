@@ -1,46 +1,167 @@
 {
   "flow": "auto_equip",
-  "version": "1.0.0",
+  "version": "1.2.1",
   "profile": "android_3200x1440",
-  "description": "流程五：角色自动配装。遍历=click-to-snap 零滑动；面板=manage profile（与背包面板不同构）",
-  "vars": { "plan": "list<{char, slot, target:GoodArtifact}>" },
+  "description": "流程五：角色自动配装（换装执行）。顺序依 canonical flow5 文档修正：花名册找角色(先)→详情页圣遗物菜单→替换→筛选→3列网格 snap 选件→替换/确认。1.0.0 版 enterScreen(artifact_manage) 置于 rosterFind 前系顺序错误（引擎 returnToHome 打断名册上下文，equip5-7 实证）",
+  "vars": {
+    "plan": "list<{char, slot, target:GoodArtifact}>"
+  },
   "steps": [
-    { "do": "enterScreen", "target": "artifact_manage",
-      "chain": ["game_home→character(2925,36)", "圣遗物菜单→tihuan(2700,1291)"],
-      "anchor": { "kind": "template", "ref": "5 部位 tab ✅零偏移" },
-      "preReset": { "chain": ["sortBtn(828,1320)", "重置[311,1310]", "确认[766,1309]"],
-        "note": "D7 定稿：复位=enterScreen 到达前参数（方案 B）" } },
-    { "do": "foreach", "over": "$plan", "as": "task",
+    {
+      "do": "foreach",
+      "over": "$plan",
+      "as": "task",
       "steps": [
-        { "do": "enterScreen", "target": "char_interface.artifactTab",
-          "chain": ["rosterFind(task.char)（田→弹窗遍历，复用 character_scan）", "圣遗物菜单(453,452)", "tihuan(2700,1291)"] },
-        { "do": "setFilter", "entry": "PILL",
-          "chain": ["pill 直达：整条[171,1280,758,1360]或非开关区[325,1281,757,1359]"],
-          "stateGuard": "三态模板判态：①整条直达 / ②③开关[183,1281,318,1359]仅切态",
-          "selectByOcr": { "grid": "set_filter_popup", "dict": "mappings.artifactSets", "match": "exact" } },
-        { "do": "pagedGrid", "grid": "select_3col", "mode": "snap",
-          "visit": [
-            { "do": "click", "fast": { "at": "$cell.center" }, "snap": "peek 点击触发上弹(对齐 y≈917)" },
-            { "do": "parsePanel", "panel": "artifact_manage",
-              "fields": ["name", "slot", "mainName", "mainValue", "level", "subStats", "setName"],
-              "note": "管理面板 set_name 可读可采集（区别于背包面板的遮挡不可读）；动态Y=598+56×nSubs（5★恒4词条→固定y822，4★初始2最高3→y710/y766）；异常时兜底由 name 反推",
-              "icons": { "lockChip": "红掩码>150px=已锁", "starChip": "金掩码≥100px=已收藏（灰星基线0-7px）", "starBand": "y425-510逐格→星数", "evidence": "verify/_icon_scan_5723_5724_5725.json" },
-              "dict": { "setName": "mappings.artifactSets" } },
-            { "do": "stopWhen", "expr": "panelMatch(target, tol=0.1)",
-              "matchOrder": "level→main→sub1-4→set_name" }
+        {
+          "do": "enterScreen",
+          "target": "char_interface",
+          "chain": [
+            "game_home→character(2925,36)"
           ],
-          "end": "peek 消失指纹 + 补点遮挡槽" },
-        { "do": "dualStateButton", "ref": "$screens.artifact_manage.leftBtn",
-          "states": { "替换": "click→dialog(equipConfirm)", "卸下": "click→preReset 网格复位" },
-          "note": "卸下无确认弹窗；卸下后网格不回第一行→复位链" },
-        { "do": "dialog", "ref": "$dialogs.equipConfirm",
+          "anchor": {
+            "kind": "ocr",
+            "rect": "$panels.char_profile.header",
+            "retries": 3,
+            "expect": "元素",
+            "note": "★ 2026-09-11 修(③): 原锚点 rect=$panels.char_profile.name 且无 expect → assertAnchor 直接『跳过文本断言』→ returnToHome 8 次失败后仍盲跑(实测从任务界面起跑: 全格 name/lv 空/added=0)。expect 用『元素』: char_profile.header 在所有 tab 恒显示 <元素>元素/角色名, 而世界等其它界面该 ROI 无『元素』二字 → 可靠区分是否到达。"
+          },
+          "note": "canonical #1-2：回主界面→角色界面。**入口图标实测 (2403,76)**（game_home→character 链的 profile 矩形 [2409,36,2485,125] 模板分 0.9455 命中，但点矩形中心曾落到「好友」面板 → 入口待复核，见 profiles_2560x1440 note）"
+        },
+        {
+          "do": "navigate",
+          "leftMenu": [
+            "属性"
+          ],
+          "note": "★ 2026-09-11 真机2244 修：不在「属性」页时 rosterFind 的 name ROI($panels.char_profile.name) 会读到右侧圣遗物/武器面板 → char 读空 → 找不到目标（2560 恰好在属性页故未暴露）。"
+        },
+        {
+          "do": "clicks",
+          "chain": [
+            "tian"
+          ],
+          "note": "★ 只有 auto_equip 走 char_popup（用户 2026-09-10 定）：角色选择弹层 3×4=12 卡，密度高于左列头像条(6)，找单个角色更快。tian 经 CHAIN_ANCHOR_PATHS → screens.char_interface.tianBtn"
+        },
+        {
+          "do": "rosterFind",
+          "char": "$task.char",
+          "grid": "char_popup",
+          "note": "canonical #2 花名册 OCR 遍历找角色；弹层态命中后停在角色详情页（弹层保持打开）"
+        },
+        {
+          "do": "clicks",
+          "chain": [
+            "弹层收起"
+          ],
+          "note": "★ 收弹层：**不能用田**（实测弹层态下田(89,1281,167,1359)被弹层自己的底栏 漏斗/等级顺序/排序 覆盖，田只在弹层关时可见）→ 点弹层左上收起钮 (185,78)，实测可收且仍留在角色界面。不收则后续「圣遗物菜单」被弹层遮住（弹层遮 x0-750）点不到"
+        },
+        {
+          "do": "clicks",
+          "chain": [
+            "圣遗物菜单(453,452)",
+            "tihuan(2700,1291)"
+          ],
+          "note": "canonical #3：详情页圣遗物菜单→替换 → 圣遗物管理界面。字面 (x,y) 为 3200 占位，链项名命中 CHAIN_ANCHOR_PATHS 走 profile 机读"
+        },
+        {
+          "do": "clicks",
+          "chain": [
+            "sortBtn(828,1320)",
+            "sortPopupConfirm(655,1335)"
+          ],
+          "note": "preReset 方案B（用户拍板）：排序圆钮→排序弹窗确认 → 网格回第一行"
+        },
+        {
+          "do": "setFilter",
+          "entry": "PILL",
+          "chain": [
+            "pill 直达：整条[171,1280,758,1360]"
+          ],
+          "stateGuard": "三态模板判态：①整条直达 / ②③开关[183,1281,318,1359]仅切态",
+          "selectByOcr": {
+            "grid": "set_filter_popup",
+            "dict": "mappings.artifactSets",
+            "match": "exact"
+          },
+          "note": "canonical #7：药丸直达套装筛选（不经筛选面板弹窗），确认后直接退回"
+        },
+        {
+          "do": "pagedGrid",
+          "grid": "select_3col",
+          "mode": "snap",
+          "visit": [
+            {
+              "do": "click",
+              "fast": {
+                "at": "$cell.center"
+              },
+              "snap": "peek 点击触发上弹(对齐 y≈917)"
+            },
+            {
+              "do": "parsePanel",
+              "panel": "artifact_manage",
+              "fields": [
+                "name",
+                "slot",
+                "mainName",
+                "mainValue",
+                "level",
+                "subStats",
+                "setName"
+              ],
+              "note": "管理面板 set_name 可读可采集（区别于背包面板的遮挡不可读）；动态Y=598+56×nSubs（5★恒4词条→固定y822，4★初始2最高3→y710/y766）；异常时兜底由 name 反推",
+              "icons": {
+                "lockChip": "红掩码>150px=已锁",
+                "starChip": "金掩码≥100px=已收藏（灰星基线0-7px）",
+                "starBand": "y425-510逐格→星数",
+                "evidence": "verify/_icon_scan_5723_5724_5725.json"
+              },
+              "dict": {
+                "setName": "mappings.artifactSets"
+              }
+            },
+            {
+              "do": "stopWhen",
+              "expr": "panelMatch(target, tol=0.1)",
+              "matchOrder": "level→main→sub1-4→set_name"
+            }
+          ],
+          "end": "peek 消失指纹 + 补点遮挡槽"
+        },
+        {
+          "do": "dualStateButton",
+          "ref": "$screens.artifact_manage.leftBtn",
+          "states": {
+            "替换": "click→dialog(equipConfirm)",
+            "卸下": "click→preReset 网格复位"
+          },
+          "note": "canonical #12：卸下无确认弹窗；卸下后网格不回第一行→复位链"
+        },
+        {
+          "do": "dialog",
+          "ref": "$dialogs.equipConfirm",
           "onShow": "click confirm(1915,1082)",
-          "trigger": "仅跨角色替换" },
-        { "do": "dualStateButton", "ref": "$screens.artifact_manage.rightBtn", "readonly": true,
-          "states": { "强化": "未满级", "重塑": "+20" } }
-      ] },
-    { "do": "exit", "via": "return[2913,41]", "per": "char" }
+          "trigger": "仅跨角色替换"
+        },
+        {
+          "do": "dualStateButton",
+          "ref": "$screens.artifact_manage.rightBtn",
+          "readonly": true,
+          "states": {
+            "强化": "未满级",
+            "重塑": "+20"
+          }
+        }
+      ]
+    },
+    {
+      "do": "exit",
+      "via": "return[2913,41]",
+      "per": "char"
+    }
   ],
   "resultStates": 8,
-  "pending": ["set_filter swipe settle 真机"]
+  "pending": [
+    "pagedGrid snap 遍历引擎未实现（当前仅首屏 12 格）",
+    "set_filter swipe settle 真机"
+  ]
 }

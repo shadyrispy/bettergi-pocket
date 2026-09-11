@@ -5,25 +5,33 @@
   "description": "流程四：按外部规则批量加解锁。输入 = lock/unlock 的 GoodArtifact 列表（决策在执行器外）",
   "vars": { "targets": "list<GoodArtifact>" },
   "steps": [
-    { "do": "enterScreen", "target": "artifact_backpack", "chain": ["同 artifact_scan 入口"] },
+    { "do": "enterScreen", "target": "artifact_backpack",
+      "chain": ["game_home→bagpack", "artifact_tab"],
+      "anchor": { "kind": "ocr", "rect": "$screens.artifact_backpack.count.rect", "expect": "\\d+\\s*/\\s*\\d+" } },
     { "do": "setFilter", "entry": "BACKPACK",
       "chain": ["filterRoundBtn(357,1294)", "filterPanel.setPlus(600,340)"],
       "selectByOcr": { "grid": "set_filter_popup", "dict": "mappings.artifactSets", "match": "exact" },
       "tailGuard": "确认后若 filterPanel 锚[179,50,419,104]仍在 → 点 ok[798,1307]（双层关闭，拍板成立；guard 为冗余防护）" },
-    { "do": "pagedGrid", "grid": "artifact_backpack",
-      "pageSkip": { "expr": "pageMinLevel > max(targets.level)", "note": "末格 OCR 等级 → 全页跳过" },
-      "visit": [
-        { "do": "vote", "zone": "artifact.card.lockBadge", "passes": 3, "as": "gridLocked" },
-        { "do": "click", "fast": { "at": "$cell.center" } },
-        { "do": "parsePanel", "panel": "artifact_backpack", "fields": ["全部字段"], "match": "hardMatch(副词条容差0.100001)" },
-        { "do": "ifMatch", "then": [
-          { "do": "vote", "zone": "artifact.panel.lock", "as": "curLock", "ambiguous": "sleep重截×2" },
-          { "do": "click", "fast": { "at": [2830, 735] },
-            "note": "面板 lock ROI 点击即加/解锁（用户定稿）；祝圣 yShift+63" },
-          { "do": "verify", "zone": "artifact.panel.lock", "expect": "toggle($curLock)" }
-        ] }
-      ],
-      "stopWhenPageEnd": { "expr": "allMatched && stop_on_all_matched" } }
+    { "do": "foreach", "over": "$plan", "as": "task",
+      "note": "§15 P0-3：ifMatch 以 currentTask 为闸，必须经 foreach 注入才有值",
+      "steps": [
+        { "do": "pagedGrid", "grid": "artifact_backpack",
+          "pageSkip": { "expr": "pageMinLevel > max(targets.level)", "note": "末格 OCR 等级 → 全页跳过" },
+          "visit": [
+            { "do": "vote", "zone": "artifact.card.lockBadge", "passes": 3, "as": "gridLocked" },
+            { "do": "click", "fast": { "at": "$cell.center" } },
+            { "do": "parsePanel", "panel": "artifact_backpack", "fields": ["全部字段"], "match": "hardMatch(副词条容差0.100001)" },
+            { "do": "ifMatch", "then": [
+              { "do": "vote", "zone": "artifact.panel.lock", "as": "curLock", "ambiguous": "sleep重截×2" },
+              { "do": "ifMatch", "when": "curLock == false", "then": [
+                { "do": "click", "fast": { "at": "$zones.artifact.panel.lock" },
+                  "note": "面板 lock 钮机读：$zones.artifact.panel.lock（2560 实测 [2286,724,2332,764] center(2309,744)）；祝圣 yShift+63" },
+                { "do": "verify", "zone": "artifact.panel.lock", "expect": "true" }
+              ] }
+            ] }
+          ],
+          "stopWhenPageEnd": { "expr": "allMatched && stop_on_all_matched" } }
+      ] }
   ],
   "endConditions": ["全部 matched + stop_on_all_matched", "遍历完"],
   "pending": ["swipe settle 真机"]

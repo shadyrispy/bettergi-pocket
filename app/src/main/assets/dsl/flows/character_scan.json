@@ -1,33 +1,111 @@
 {
   "flow": "character_scan",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "profile": "android_3200x1440",
   "description": "流程三：角色两阶段扫描（快扫 + 可疑重扫）。Android 已免除逐项天赋/命座点击（概览页判据直读）",
-  "vars": { "roster": "list", "suspects": "list" },
+  "vars": {
+    "roster": "list",
+    "suspects": "list"
+  },
   "steps": [
-    { "do": "enterScreen", "target": "char_interface",
-      "chain": ["game_home→character(2925,36)"],
-      "anchor": { "kind": "ocr", "rect": "$panels.char_profile.name", "retries": 3 } },
-    { "do": "enterScreen", "target": "char_popup",
-      "chain": ["tian(209,1281,287,1359)"],
-      "anchor": { "kind": "template", "ref": "charselect 网格外框" } },
-    { "do": "pagedGrid", "grid": "char_popup", "loopVar": "char",
+    {
+      "do": "enterScreen",
+      "target": "char_interface",
+      "chain": [
+        "game_home→character(2925,36)"
+      ],
+      "anchor": {
+        "kind": "ocr",
+        "rect": "$panels.char_profile.header",
+        "retries": 3,
+        "expect": "元素",
+        "note": "★ 2026-09-11 修(③): 原锚点 rect=$panels.char_profile.name 且无 expect → assertAnchor 直接『跳过文本断言』→ returnToHome 8 次失败后仍盲跑(实测从任务界面起跑: 全格 name/lv 空/added=0)。expect 用『元素』: char_profile.header 在所有 tab 恒显示 <元素>元素/角色名, 而世界等其它界面该 ROI 无『元素』二字 → 可靠区分是否到达。"
+      }
+    },
+    {
+      "do": "pagedGrid",
+      "grid": "char_strip",
+      "scrollToTop": true,
+      "scrollToTopNote": "★ 2026-09-11 真机2244 修：头像条滚动位置**跨 run 残留**（列表跨会话保留）→ 不回顶则首页可能是末段、且 pagedGrid 会立刻判 reached end 漏扫角色。artifact_scan/weapon_scan 早有此步，character_scan 漏了。引擎 swipeGridToTop 支持 1 列网格（advanceStart 需 colXs≥2 故自动走 profile from/to）。",
+      "loopVar": "char",
+      "note": "★ 用户 2026-09-10 定：**角色遍历走左侧头像条的 1 列网格**（原生常驻列，不遮挡左侧菜单 → 可单趟交错读属性/命座/天赋）。char_popup 只留给 auto_equip（找单个角色用，密度高）。⚠️ 该列**自由滚动无吸附**，引擎需每轮重检槽位。",
       "visit": [
-        { "do": "click", "fast": { "at": "$cell.center" },
-          "fallback": [ { "kind": "ocrAnchor", "region": "$panels.char_profile.popupName" } ] },
-        { "do": "parsePanel", "panel": "char_profile", "fields": ["name", "level", "header", "favor"],
-          "dict": { "name": "mappings.characters", "fuzzy": 1 },
-          "note": "弹窗态角色名 ROI 与详情页一致（±2px 实测）" },
-        { "do": "navigate", "leftMenu": ["命之座", "天赋"],
+        {
+          "do": "click",
+          "fast": {
+            "at": "$cell.center"
+          },
+          "fallback": [
+            {
+              "kind": "ocrAnchor",
+              "region": "$panels.char_profile.popupName"
+            }
+          ]
+        },
+        {
+          "do": "navigate",
+          "leftMenu": [
+            "属性"
+          ],
+          "note": "★ 2026-09-10 修：上一格的 navigate 把页面留在「天赋」→ 本格 parsePanel 的 name ROI（y208-288）会读到天赋名（实测乱码形如「西风剑术.」「外域剑术.」）→ 必须先复位到属性页再解析。"
+        },
+        {
+          "do": "parsePanel",
+          "panel": "char_profile",
+          "fields": [
+            "name",
+            "level",
+            "header",
+            "favor"
+          ],
+          "dict": {
+            "name": "mappings.characters",
+            "fuzzy": 1
+          },
+          "note": "弹窗态角色名 ROI 与详情页一致（±2px 实测）"
+        },
+        {
+          "do": "navigate",
+          "leftMenu": [
+            "命之座",
+            "天赋"
+          ],
           "read": [
-            { "page": "char_constellation", "fields": ["6节点 locked 态（白锁判据）"] },
-            { "page": "char_talent", "fields": ["3 战斗 Lv + 被动/未锁态（灰锁判据）"] }
-          ] },
-        { "do": "emit", "as": "GoodCharacter",
-          "suspectIf": "level in [91..94,96..99,2..9] || (level>=40 && talents==1)" },
-        { "do": "stopWhen", "expr": "name == roster[0]", "action": "Stop", "note": "首名重现=遍历完" }
-      ] }
+            {
+              "page": "char_constellation",
+              "fields": [
+                "6节点 locked 态（白锁判据）"
+              ]
+            },
+            {
+              "page": "char_talent",
+              "fields": [
+                "3 战斗 Lv + 被动/未锁态（灰锁判据）"
+              ]
+            }
+          ]
+        },
+        {
+          "do": "stopWhen",
+          "mode": "duplicateStreak",
+          "streak": 3,
+          "action": "Stop",
+          "note": "★ 2026-09-11 用户定：停止条件 = **连续 3 个重复角色**（替代原 expr `name == roster[0]`）。① 原判据**从未生效**：`emitCharacter` 末尾清空 charName，而本步排在 emit 之后 ⇒ 判据读到的名字恒为空。② 「重复」= 该角色名**已在本轮入库过**；列表回卷（头像条可循环滚）或滑动失效时会连续读到已扫过的角色，而 `reachedEnd`（指纹到底）对回卷列表永不触发 ⇒ 本判据是**主收尾条件**。③ 判据在引擎 emitCharacter 内求值（那里才拿得到刚解析的名字与已入库集合），本步只负责**登记阈值**，故必须排在 emit **之前**。④ 重复件不入库（角色侧无 dedupe，入库会污染导出）。"
+        },
+        {
+          "do": "emit",
+          "as": "GoodCharacter",
+          "suspectIf": "level in [91..94,96..99,2..9] || (level>=40 && talents==1)"
+        }
+      ]
+    }
   ],
-  "endConditions": ["首名重现", "pagedGrid 遍历完"],
-  "pending": ["弹窗滑动 841px settle 真机"]
+  "endConditions": [
+    "连续 3 个重复角色（主力，抗列表回卷/滑动失效）",
+    "pagedGrid reachedEnd 指纹到底（非回卷列表的自然收尾）"
+  ],
+  "pending": [
+    "char_strip 自由滚动 → 引擎每轮重检槽位（GridAlign 相位检测对 cols=1 待实跑验证）",
+    "char_strip settle 真机实测"
+  ]
 }

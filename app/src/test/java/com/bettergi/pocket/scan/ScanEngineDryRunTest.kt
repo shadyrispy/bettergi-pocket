@@ -4,6 +4,7 @@ import com.bettergi.pocket.capture.FrameSource
 import com.bettergi.pocket.capture.FrameTimeoutException
 import com.bettergi.pocket.recognition.name.GoodNames
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -23,6 +24,9 @@ import java.io.File
 class ScanEngineDryRunTest {
 
     companion object {
+        /** engine.run() 单次 dry-run 上限（正常 <30s；超出即视为卡死，防整任务挂起）。 */
+        private const val ENGINE_RUN_TIMEOUT_MS = 180_000L
+
         @JvmStatic
         @org.junit.BeforeClass
         fun loadOpenCvNative() {
@@ -77,8 +81,10 @@ class ScanEngineDryRunTest {
             val x0 = 2228 + i * 56
             rect(m, x0, 599, x0 + 46, 640, GOLD)
         }
-        // ⑧ page>0：网格区内画灰块——模拟翻页后列表前进（否则网格指纹不变会被判到底）
-        if (page > 0) rect(m, 416, 297, 616, 550, Scalar(128.0, 128.0, 128.0))
+        // ⑧ page>0：网格区首行整行画灰——模拟翻页后列表前进（否则网格指纹不变会被判到底）。
+        //    ⚠️ 必须整行（x 到 2080）：翻页到底判据是「24×16 缩略图差异比例 ≤ GRID_SIMILAR_DIFF(0.10)」，
+        //    只画单卡（200×253）差异仅 ~3% 会被误判到底（真实翻页位移 3/4 行 ≈ 75%）。
+        if (page > 0) rect(m, 416, 297, 2080, 550, Scalar(128.0, 128.0, 128.0))
         return m
     }
 
@@ -96,7 +102,9 @@ class ScanEngineDryRunTest {
 
         // 按格递增的唯一件名（模拟真实网格每件不同）；页切换时重置（模拟跨页同件重叠 → 去重测试）
         private val NAME_RECT = FrameRect(2230, 220, 2630, 270)
-        private var nameCounter = 0
+        /** 当前「面板名」= 由**最后一次点击坐标**决定：同一格跨页同名（去重可判），
+         *  且不受遍历前链式点击影响。初始值供首次点击前读取。 */
+        private var lastNameCell = "晨光的明誓#0"
 
         // readNumber 可编程脚本（onZero 重试等按次序变化场景）；空则回退页静态值
         val numberScript = ArrayDeque<Int?>()
@@ -116,8 +124,17 @@ class ScanEngineDryRunTest {
         val actions = object : ScanEngine.ActionGateway {
             override fun back(): Boolean = true
 
+            override fun tap(x: Int, y: Int): Boolean {
+                clicks += x to y
+                return true
+            }
+
             override fun click(x: Int, y: Int, durationMs: Long): Boolean {
                 clicks += x to y
+                // ★ 名字由点击坐标决定（非全局自增）：同一格跨页同名 → 跨页去重可判，
+                //   且与遍历前的 enterScreen/setFilter 链式点击无关（曾用自增序号 → 页 1 序号被前置点击偏移，
+                //   页 2 重置后错位 → 去重漏 2 件：expected 21 but was 23）。
+                lastNameCell = "晨光的明誓#${x * 10000 + y}"
                 return true
             }
 
@@ -125,8 +142,6 @@ class ScanEngineDryRunTest {
                 swipes += (fromX to fromY) to (toX to toY)
                 // 滑动后画面切到下一页（模拟翻页后的新内容；末页保持不变 → 指纹判到底）
                 if (pageIndex < pages.size - 1) pageIndex++
-                // 新页件名重新编号：跨页同件重叠场景由去重测试显式使用
-                resetNameCounter()
                 return true
             }
         }
@@ -139,7 +154,13 @@ class ScanEngineDryRunTest {
 
             override suspend fun readLines(frame: Mat, rects: List<FrameRect>): List<String> =
                 rects.mapNotNull { r ->
-                    if (r == NAME_RECT) "晨光的明誓#${nameCounter++}" else pages[pageIndex].ocrLines[r]
+                    // ⚠️ 2026-09-11 修：原为 ${nameCounter++}（**每次读取**都变），而引擎
+                    //    visit 的「面板已稳定」判据要求 `名字已变 && 连续两次读数一致` —— 每次读都变
+                    //    使该条件永不成立 → 每格打满 PANEL_CHANGE_WAIT_MAX_MS(6000ms)。
+                    //    21 格/页 × 6s ≈ 126s/页，多页用例 250~500s（实测 three-star 用例 498.8s），
+                    //    表现为「单测跑不完」。改为**每次点击**推进（同格稳定、跨页因 swipe 重置而重号，
+                    //    去重语义与原先完全一致）。
+                    if (r == NAME_RECT) lastNameCell else pages[pageIndex].ocrLines[r]
                 }
         }
 
@@ -153,9 +174,6 @@ class ScanEngineDryRunTest {
             }
         }
 
-        fun resetNameCounter() {
-            nameCounter = 0
-        }
     }
 
     private fun pageLines(levelText: String, withCountLine: Boolean = true): Map<FrameRect, String> {
@@ -214,7 +232,10 @@ class ScanEngineDryRunTest {
             // 合成帧不随点击变化：clickDelay 注入短值，避免每格白等固定延时
             clickDelayMs = 10L,
         )
-        runBlocking { engine.run() }
+        // ⚠️ 护栏（2026-09-11）：engine.run() 出现过「无限等待」把整个单测任务挂死 1 小时+
+        //    （jstack：Test worker TIMED_WAITING 停在 BlockingCoroutine.joinBlocking → 内部某处 delay 循环不退出）。
+        //    加 withTimeout：卡死从「永久挂起」变成「失败 + 协程栈」，既防呆又能直接定位卡点。
+        runBlocking { withTimeout(ENGINE_RUN_TIMEOUT_MS) { engine.run() } }
         return RunResult(engine, h)
     }
 

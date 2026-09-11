@@ -30,6 +30,7 @@ import android.view.animation.PathInterpolator
 import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -47,9 +48,18 @@ import com.bettergi.pocket.genshin.GenshinPackages
 import com.bettergi.pocket.input.AccessibilityServiceHealth
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.input.SwipeMethod
+import com.bettergi.pocket.dsl.repo.RepoChannel
+import com.bettergi.pocket.dsl.repo.RepoManager
+import com.bettergi.pocket.dsl.repo.Subscription
+import com.bettergi.pocket.dsl.repo.SubscribeSpec
 import com.bettergi.pocket.log.RecognitionLog
 import com.bettergi.pocket.settings.TriggerSettings
 import com.bettergi.pocket.settings.TriggerSettingsRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -120,12 +130,33 @@ class OverlayWindowController(
     private var autoSkipMenuExpanded = false
     private var scanExtras: View? = null
     private var scanChevron: ImageView? = null
-    private var scanFlowChip: TextView? = null
+    /** 流程三选视图（flowKey → TextView）；选中态用文字色区分（金色/灰）。 */
+    private val flowViews = LinkedHashMap<String, TextView>()
+
+    /** 刷新流程三选选中态：选中金色、未选中灰。 */
+    private fun applyFlowSelection(flow: String) {
+        if (flowViews.isEmpty()) return
+        val on = context.getColor(R.color.overlay_gold)
+        val off = context.getColor(R.color.overlay_text)
+        flowViews.forEach { (k, v) -> v.setTextColor(if (k == flow) on else off) }
+    }
     private var scanMaxPagesEdit: EditText? = null
     private var scanMenuExpanded = false
     private var launchExtras: View? = null
     private var launchChevron: ImageView? = null
     private var launchMenuExpanded = false
+    // ---- §16.3 S4 脚本管理 ----
+    private var scriptsRow: View? = null
+    private var scriptsExtras: View? = null
+    private var scriptsChevron: ImageView? = null
+    private var scriptsSubtitle: TextView? = null
+    private var subsUrlEdit: EditText? = null
+    private var subscribeBtn: TextView? = null
+    private var updateAllBtn: TextView? = null
+    private var subsListContainer: View? = null
+    private var scriptsMenuExpanded = false
+    private val repoManager = RepoManager(context.applicationContext)
+    private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var logHandleView: View? = null
     private var logBodyView: View? = null
     private var logTitle: TextView? = null
@@ -264,13 +295,23 @@ class OverlayWindowController(
         // 扫描控制区（fix53：开始/停止/flow/maxPages/分享 GOOD 全部走悬浮窗，零通知依赖）
         scanExtras = root.findViewById(R.id.overlay_scan_extras)
         scanChevron = root.findViewById(R.id.overlay_scan_chevron)
-        scanFlowChip = root.findViewById<TextView>(R.id.overlay_scan_flow).also { chip ->
-            chip.setOnClickListener {
-                val next = if (settingsRepository.get().scanFlow == "artifact_scan") "weapon_scan" else "artifact_scan"
-                settingsRepository.setScanFlow(next)
-                chip.text = if (next == "artifact_scan") "圣遗物" else "武器"
+        // 流程三选（点选式）：选中项金色、未选中灰。视图 id 见 overlay_window.xml overlay_flow_*
+        // ⚠️ 悬浮窗内不用系统 PopupMenu/Spinner（overlay 类型窗口无 Activity token → BadTokenException 风险）
+        flowViews.clear()
+        listOf(
+            "artifact_scan" to R.id.overlay_flow_artifact,
+            "weapon_scan" to R.id.overlay_flow_weapon,
+            "character_scan" to R.id.overlay_flow_character,
+        ).forEach { (flow, id) ->
+            root.findViewById<TextView>(id).also { v ->
+                v.setOnClickListener {
+                    settingsRepository.setScanFlow(flow)
+                    applyFlowSelection(flow)
+                }
+                flowViews[flow] = v
             }
         }
+        applyFlowSelection(settingsRepository.get().scanFlow)
         scanMaxPagesEdit = root.findViewById<EditText>(R.id.overlay_scan_max_pages).apply {
             val saved = settingsRepository.get().scanMaxPages
             setText(if (saved <= 0) "" else saved.toString())
@@ -337,6 +378,23 @@ class OverlayWindowController(
             // 双击语义冲突防护：chevron 与开关并排，点击行体展开；开关自身事件不冒泡
         }
 
+        // §16.3 S4 脚本管理：订阅仓库 / 已订阅列表 / 手动更新
+        scriptsRow = root.findViewById(R.id.overlay_row_scripts)
+        scriptsExtras = root.findViewById(R.id.overlay_scripts_extras)
+        scriptsChevron = root.findViewById(R.id.overlay_scripts_chevron)
+        scriptsSubtitle = root.findViewById(R.id.overlay_scripts_subtitle)
+        subsUrlEdit = root.findViewById<EditText>(R.id.overlay_subs_url).apply {
+            setOnFocusChangeListener { _, has -> setPanelFocusable(has) }
+        }
+        subscribeBtn = root.findViewById<TextView>(R.id.overlay_subscribe).also { btn ->
+            btn.setOnClickListener { doSubscribe() }
+        }
+        updateAllBtn = root.findViewById<TextView>(R.id.overlay_update_all).also { btn ->
+            btn.setOnClickListener { doUpdateAll() }
+        }
+        subsListContainer = root.findViewById(R.id.overlay_subs_list)
+        scriptsRow?.setOnClickListener { setScriptsMenuExpanded(!scriptsMenuExpanded) }
+
         enabledSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (updatingUi) return@setOnCheckedChangeListener
             settingsRepository.setScreenShareEnabled(isChecked)
@@ -381,7 +439,8 @@ class OverlayWindowController(
         setAutoSkipMenuExpanded(prefs.getBoolean(KEY_AUTO_SKIP_EXPANDED, false), persist = false)
         setLaunchMenuExpanded(prefs.getBoolean(KEY_LAUNCH_EXPANDED, false), persist = false)
         setScanMenuExpanded(prefs.getBoolean(KEY_SCAN_EXPANDED, false), persist = false)
-        scanFlowChip?.text = if (settingsRepository.get().scanFlow == "weapon_scan") "武器" else "圣遗物"
+        setScriptsMenuExpanded(prefs.getBoolean(KEY_SCRIPTS_EXPANDED, false), persist = false)
+        applyFlowSelection(settingsRepository.get().scanFlow)
         settingsRepository.addListener(settingsListener)
         startScreenWatch()
         a11yWarningReady = false
@@ -401,6 +460,8 @@ class OverlayWindowController(
      * 避免每次模拟点击都改 FLAG_NOT_TOUCHABLE 导致窗口闪烁。
      */
     fun prepareClickPassthrough(x: Int, y: Int): Boolean {
+        // 扫描期常驻穿透（setScanClickThrough(true)）时无需逐点处理，也不允许 restore
+        if (scanClickThrough) return false
         var needed = false
         if (windowContains(params, rootView, x, y)) {
             applyTouchPassthrough(params, rootView, passthrough = true)
@@ -414,8 +475,38 @@ class OverlayWindowController(
     }
 
     fun restoreClickPassthrough() {
+        if (scanClickThrough) return
         applyTouchPassthrough(params, rootView, passthrough = false)
         applyTouchPassthrough(logHandleParams, logHandleView, passthrough = false)
+    }
+
+    /**
+     * 扫描期输入穿透开关。
+     *
+     * ⚠️ 根因修复（equip18-23 实证）：悬浮窗（悬浮球/日志把手）覆盖游戏界面左上区域时，
+     * 逐点 prepare/restore 的 FLAG_NOT_TOUCHABLE 时序无法保证手势 UP 也穿透 → 游戏只见
+     * DOWN 无 UP → 不触发 click（名册网格 9 格全停首格；非覆盖区右下按钮正常）。
+     * 扫描期改为**常驻 NOT_TOUCHABLE**（窗仍可见，仅不可交互）；hidden=true 时直接 GONE
+     * 用于排查对照。
+     */
+    @Volatile
+    var scanClickThrough: Boolean = false
+        private set
+
+    fun setScanClickThrough(enabled: Boolean, hidden: Boolean = false) {
+        scanClickThrough = enabled
+        val runnable = {
+            if (hidden && enabled) {
+                rootView?.visibility = android.view.View.GONE
+                logHandleView?.visibility = android.view.View.GONE
+            } else {
+                rootView?.visibility = android.view.View.VISIBLE
+            }
+            applyTouchPassthrough(params, rootView, passthrough = enabled)
+            applyTouchPassthrough(logHandleParams, logHandleView, passthrough = enabled)
+        }
+        if (rootView?.handler?.looper == android.os.Looper.myLooper()) runnable()
+        else rootView?.post(runnable) ?: Unit
     }
 
     /** 扫描进度副文本（主线程调用；P1-c 悬浮窗入口）。 */
@@ -919,6 +1010,163 @@ class OverlayWindowController(
         }
         launchExtras?.visibility = if (expanded) View.VISIBLE else View.GONE
         launchChevron?.animate()?.rotation(if (expanded) 90f else 0f)?.setDuration(160)?.start()
+    }
+
+    // ---- §16.3 S4 脚本管理：订阅 / 列表渲染 / 更新 / 退订 ----
+
+    /**
+     * 操作反馈：副文本为主通道 + Toast 辅助。
+     * EMUI/Android 10+ 会拦截后台 app 的 Toast（真机实测 ToastInterrupt DENY），
+     * 悬浮窗操作时 app 常处后台 → 副文本是唯一可靠反馈面。
+     */
+    private fun reportScriptsResult(msg: String) {
+        scriptsSubtitle?.text = msg
+        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun setScriptsMenuExpanded(expanded: Boolean, persist: Boolean = true) {
+        scriptsMenuExpanded = expanded
+        if (persist) {
+            prefs.edit().putBoolean(KEY_SCRIPTS_EXPANDED, expanded).apply()
+        }
+        scriptsExtras?.visibility = if (expanded) View.VISIBLE else View.GONE
+        scriptsChevron?.animate()?.rotation(if (expanded) 90f else 0f)?.setDuration(160)?.start()
+        if (expanded) renderSubscriptions() else setPanelFocusable(false)
+    }
+
+    private fun renderSubscriptions() {
+        val container = subsListContainer as? LinearLayout ?: return
+        container.removeAllViews()
+        val subs = repoManager.listSubscriptions()
+        if (subs.isEmpty()) {
+            container.addView(
+                TextView(themedContext).apply {
+                    text = "未订阅任何仓库"
+                    setTextColor(ContextCompat.getColor(themedContext, R.color.overlay_text_muted))
+                    textSize = 11f
+                },
+            )
+            return
+        }
+        subs.forEach { container.addView(buildSubsRow(it)) }
+    }
+
+    private fun buildSubsRow(sub: Subscription): View {
+        val row = LinearLayout(themedContext).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 4, 0, 4)
+        }
+        val name = TextView(themedContext).apply {
+            text = "${sub.name} (${sub.channel.id})"
+            setTextColor(ContextCompat.getColor(themedContext, R.color.overlay_text))
+            textSize = 12f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        val update = TextView(themedContext).apply {
+            text = "更新"
+            setTextColor(ContextCompat.getColor(themedContext, R.color.overlay_text_muted))
+            textSize = 11f
+            setBackgroundResource(R.drawable.bg_overlay_row_selectable)
+            gravity = Gravity.CENTER
+            minHeight = dp(40)
+            minWidth = dp(48)
+            setPadding(dp(12), 0, dp(12), 0)
+            contentDescription = "更新 ${sub.name}"
+            setOnClickListener { doUpdate(sub.name) }
+        }
+        val unsub = TextView(themedContext).apply {
+            text = "退订"
+            setTextColor(ContextCompat.getColor(themedContext, R.color.overlay_text_muted))
+            textSize = 11f
+            setBackgroundResource(R.drawable.bg_overlay_row_selectable)
+            gravity = Gravity.CENTER
+            minHeight = dp(40)
+            minWidth = dp(48)
+            setPadding(dp(12), 0, dp(12), 0)
+            contentDescription = "退订 ${sub.name}"
+            setOnClickListener { doUnsubscribe(sub.name) }
+        }
+        row.addView(name)
+        row.addView(update)
+        row.addView(unsub)
+        return row
+    }
+
+    private fun doSubscribe() {
+        val spec = parseSubscribeInput(subsUrlEdit?.text?.toString().orEmpty())
+        if (spec == null) {
+            Toast.makeText(context, "格式无效：请用 owner/repo 或完整 URL", Toast.LENGTH_SHORT).show()
+            return
+        }
+        setPanelFocusable(false)
+        subsUrlEdit?.setText("")
+        repoScope.launch {
+            val res = withContext(Dispatchers.IO) { repoManager.subscribe(spec) }
+            mainHandler.post {
+                res.onSuccess {
+                    reportScriptsResult("订阅成功：${spec.owner}/${spec.repo}")
+                    renderSubscriptions()
+                }.onFailure { e ->
+                    reportScriptsResult("订阅失败：${e.message}")
+                }
+            }
+        }
+    }
+
+    private fun doUpdateAll() {
+        repoScope.launch {
+            val results = withContext(Dispatchers.IO) { repoManager.updateAll() }
+            mainHandler.post {
+                val ok = results.count { it.second.isSuccess }
+                val msg = if (results.isEmpty()) "无订阅仓库" else "更新 ${ok} 成功 / ${results.size - ok} 失败"
+                reportScriptsResult(msg)
+                renderSubscriptions()
+            }
+        }
+    }
+
+    private fun doUpdate(name: String) {
+        repoScope.launch {
+            val res = withContext(Dispatchers.IO) { repoManager.update(name) }
+            mainHandler.post {
+                res.onSuccess { reportScriptsResult("已更新：$name") }
+                    .onFailure { e -> reportScriptsResult("更新失败 $name：${e.message}") }
+                renderSubscriptions()
+            }
+        }
+    }
+
+    private fun doUnsubscribe(name: String) {
+        repoManager.unsubscribe(name)
+        reportScriptsResult("已退订：$name")
+        renderSubscriptions()
+    }
+
+    /** 解析订阅输入：owner/repo、完整 github URL、ghproxy: 前缀。@ref 暂不支持（默认 main）。 */
+    private fun parseSubscribeInput(raw: String): SubscribeSpec? {
+        var t = raw.trim()
+        if (t.isEmpty()) return null
+        var channel = RepoChannel.GITHUB
+        if (t.startsWith("ghproxy:", true)) {
+            channel = RepoChannel.GHPROXY
+            t = t.removePrefix("ghproxy:")
+        }
+        if (t.startsWith("http", true)) {
+            t = t.substringAfter("github.com/")
+                .substringBefore("/archive")
+                .substringBefore("/tree")
+                .substringBefore("/blob")
+            if (t.isEmpty() || !t.contains("/")) return null
+        }
+        val parts = t.trim('/').split("/").filter { it.isNotEmpty() }
+        if (parts.size < 2) return null
+        return SubscribeSpec(
+            owner = parts[0],
+            repo = parts[1].removeSuffix(".git"),
+            ref = parts.getOrNull(2) ?: "main",
+            channel = channel,
+        )
     }
 
     private fun isTalking(): Boolean = System.currentTimeMillis() < talkingUntilMs
@@ -1447,6 +1695,7 @@ class OverlayWindowController(
         private const val KEY_AUTO_SKIP_EXPANDED = "auto_skip_expanded"
         private const val KEY_LAUNCH_EXPANDED = "launch_expanded"
         private const val KEY_SCAN_EXPANDED = "scan_expanded"
+        private const val KEY_SCRIPTS_EXPANDED = "scripts_expanded"
         private const val KEY_SWIPE_START_Y = "swipe_start_y"
         private const val KEY_SWIPE_DIST = "swipe_dist"
         private const val KEY_SWIPE_METHOD = "swipe_method"

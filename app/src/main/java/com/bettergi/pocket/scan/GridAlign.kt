@@ -1,5 +1,6 @@
 package com.bettergi.pocket.scan
 
+import android.util.Log
 import org.opencv.core.Mat
 
 /**
@@ -28,6 +29,7 @@ object GridAlign {
     private const val STEP_BELOW = 8   // below 窗：y+2 .. y+8
     private const val STEP_ABOVE = 8   // above 窗：y−8 .. y−2
     private const val WIN = 150        // 搜索窗口（±，帧坐标缩放）
+    private const val TAG = "BetterGI.Align"
     private const val THR = 10         // 单列台阶最小得分（对比阈值，不缩放）
     private const val MIN_VOTES = 6     // 共识门：有效列 ≥6/7（单列软边噪声由众数吸收）
     private const val PERIOD_TOL = 40  // 周期自检容差（|row3−row2−pitch|，帧坐标缩放）
@@ -128,15 +130,41 @@ object GridAlign {
         val gate = minOf(MIN_VOTES, g.cols)
 
         val base = detectStep(colProfiles, expected, win, gate)
-        if (base.validVotes < gate) return null
+        if (base.validVotes < gate) {
+            logDiag(gridKey, g.cols, gate, expected, pitch, base, null, "base 共识门不通过")
+            return null
+        }
 
         // 周期自检：第3行（基准行 + 行距）应同样检出且间距≈行距（拒特征翻转/翻票）
         if (g.rowYs.size > REF_ROW + 1) {
             val third = detectStep(colProfiles, expected + pitch, win, gate)
-            if (third.validVotes < gate) return null
-            if (Math.abs(third.consensus - base.consensus - pitch) > profile.scale(PERIOD_TOL, sy)) return null
+            if (third.validVotes < gate) {
+                logDiag(gridKey, g.cols, gate, expected, pitch, base, third, "third 共识门不通过")
+                return null
+            }
+            val period = profile.scale(PERIOD_TOL, sy)
+            if (Math.abs(third.consensus - base.consensus - pitch) > period) {
+                logDiag(gridKey, g.cols, gate, expected, pitch, base, third, "周期自检超差")
+                return null
+            }
         }
         return base.consensus
+    }
+
+    /**
+     * 失败诊断（D 级）：仅在检测失败时打，定位「为何 measureError 返回 null」
+     * ——Bluestacks 等软渲染环境列台阶 score 普遍低于 THR 会致 votes<gate。
+     */
+    private fun logDiag(
+        gridKey: String, cols: Int, gate: Int, expected: Int, pitch: Int,
+        base: StepResult, third: StepResult?, why: String,
+    ) {
+        Log.d(
+            TAG,
+            "alignDiag[$gridKey] $why: cols=$cols gate=$gate THR=$THR expected=$expected pitch=$pitch " +
+                "base(votes=${base.validVotes} y=${base.consensus}) " +
+                "third(votes=${third?.validVotes} y=${third?.consensus})",
+        )
     }
 
     /** 基准行期望 y（帧坐标）= 中段第2行（行数不足则末行）。 */

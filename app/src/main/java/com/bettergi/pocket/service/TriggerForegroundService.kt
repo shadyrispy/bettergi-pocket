@@ -14,9 +14,12 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
+import org.json.JSONArray
+import org.json.JSONObject
 import com.bettergi.pocket.MainActivity
 import com.bettergi.pocket.R
 import com.bettergi.pocket.capture.CapturePermissionActivity
+import com.bettergi.pocket.capture.CaptureResultHolder
 import com.bettergi.pocket.capture.ProjectionFrameSource
 import com.bettergi.pocket.capture.ScreenCaptureController
 import com.bettergi.pocket.feature.autopick.AutoPickFeature
@@ -27,11 +30,13 @@ import com.bettergi.pocket.input.AccessibilityAutomationController
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.overlay.OverlayWindowController
 import com.bettergi.pocket.recognition.RecognitionAssets
+import com.bettergi.pocket.recognition.ocr.OcrFactory
 import com.bettergi.pocket.scan.ScanListener
 import com.bettergi.pocket.scan.ScriptRunner
 import com.bettergi.pocket.settings.TriggerSettings
 import com.bettergi.pocket.settings.TriggerSettingsRepository
 import com.bettergi.pocket.trigger.TriggerEngine
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -128,6 +133,8 @@ class TriggerForegroundService : Service() {
         )
         settingsRepository.addListener(settingsListener)
         genshinLaunchMonitor.start()
+        // §16.3 S4：启动自动更新订阅仓库（后台协程，断网降级用已装副本）
+        scriptRunner.triggerRepoUpdateAtStartup()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -145,17 +152,13 @@ class TriggerForegroundService : Service() {
                 requestingCapturePermission = false
                 if (!settingsRepository.get().screenShareEnabled) {
                     captureController.stop()
+                    CaptureResultHolder.take() // 丢弃未消费的结果，避免下次误用
                     startInForeground(sharing = false)
                     return START_STICKY
                 }
                 val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
-                val resultData =
-                    if (Build.VERSION.SDK_INT >= 33) {
-                        intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(EXTRA_RESULT_DATA)
-                    }
+                // 从进程内单例取授权结果 Intent（避免嵌套 parcel 丢失 IBinder extra）
+                val resultData = CaptureResultHolder.take()
                 if (resultData != null) {
                     startInForeground(sharing = true)
                     captureController.start(resultCode, resultData)
@@ -191,6 +194,19 @@ class TriggerForegroundService : Service() {
             ACTION_DEBUG_SET_SCAN -> {
                 settingsRepository.setScanEnabled(intent.getBooleanExtra(EXTRA_ENABLED, false))
             }
+            ACTION_DEBUG_DUMP_GOOD -> {
+                val f = lastGoodFile
+                if (f == null) {
+                    Log.w(TAG, "dump good: 无 lastGoodFile（本轮未导出？）")
+                } else {
+                    runCatching {
+                        val dstDir = getExternalFilesDir(null) ?: filesDir
+                        val dst = java.io.File(dstDir, "sweep_last_good.json")
+                        java.io.File(filesDir, f).copyTo(dst, overwrite = true)
+                        Log.i(TAG, "dump good: $f -> ${dst.absolutePath} (${dst.length()}B)")
+                    }.onFailure { Log.w(TAG, "dump good failed", it) }
+                }
+            }
             ACTION_DEBUG_STATUS -> {
                 val s = settingsRepository.get()
                 Log.i(
@@ -214,6 +230,8 @@ class TriggerForegroundService : Service() {
                 val startY = intent.getIntExtra(EXTRA_START_Y, 1150)
                 val dist = intent.getIntExtra(EXTRA_DIST, 876)
                 val measure = intent.getBooleanExtra(EXTRA_MEASURE, false)
+                // 可测任意网格（weapon_backpack/char_popup/...）；缺省 artifact_backpack
+                val gridKey = intent.getStringExtra(EXTRA_GRID) ?: "artifact_backpack"
                 if (startY != null && dist != 0) {
                     val fromX = 1614
                     val toY = startY - dist
@@ -226,10 +244,10 @@ class TriggerForegroundService : Service() {
                         if (measure && ok) {
                             scriptRunner.scope.launch {
                                 delay(700)
-                                val err = scriptRunner.measureTopEdge("artifact_backpack")
+                                val err = scriptRunner.measureTopEdge(gridKey)
                                 Log.i(
                                     TAG,
-                                    "align[artifact_backpack]: swipeMeasured dist=$dist startY=$startY err=${err ?: "null"}",
+                                    "align[$gridKey]: swipeMeasured dist=$dist startY=$startY err=${err ?: "null"}",
                                 )
                             }
                         }
@@ -238,8 +256,8 @@ class TriggerForegroundService : Service() {
                     // 仅测量模式（dist=0）：不滑动，直接抓当前帧测上沿误差（逐点标定前取基准）
                     scriptRunner.scope.launch {
                         delay(200)
-                        val err = scriptRunner.measureTopEdge("artifact_backpack")
-                        Log.i(TAG, "align[artifact_backpack]: measureOnly err=${err ?: "null"}")
+                        val err = scriptRunner.measureTopEdge(gridKey)
+                        Log.i(TAG, "align[$gridKey]: measureOnly err=${err ?: "null"}")
                     }
                 } else {
                     Log.w(TAG, "debug swipe: startY invalid or dist=0 without measure")
@@ -250,15 +268,62 @@ class TriggerForegroundService : Service() {
                 val maxPages = intent.getIntExtra(EXTRA_MAX_PAGES, Int.MAX_VALUE)
                 val geoAdvance = intent.getBooleanExtra(EXTRA_GEO_ADVANCE, true)
                 val adaptive = intent.getBooleanExtra(EXTRA_ADAPTIVE_DIST, true)
+                // §16.4 标定/调试用 plan 注入：EXTRA_PLAN 直接 JSON（adb shell 会吞双引号→失效），
+                // EXTRA_PLAN_B64 为 base64(JSON)（仅 [A-Za-z0-9+/=]，device sh 不吞，标定稳定通道）。
+                val plan = (intent.getStringExtra(EXTRA_PLAN)
+                    ?: intent.getStringExtra(EXTRA_PLAN_B64)?.let { b64 ->
+                        try { String(android.util.Base64.decode(b64, android.util.Base64.DEFAULT)) }
+                        catch (e: Exception) { Log.w(TAG, "debug scan flow: bad planB64", e); null }
+                    })?.let { raw ->
+                    try {
+                        JSONArray(raw).let { arr ->
+                            (0 until arr.length()).map { arr.getJSONObject(it) }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "debug scan flow: invalid plan JSON, ignored", e)
+                        null
+                    }
+                }
+                // 时序覆盖：每轮扫描前应用（空 → 恢复默认，避免跨轮残留）
+                val timingSpec = intent.getStringExtra(EXTRA_TIMING)
+                com.bettergi.pocket.scan.TimingOverrides.apply(timingSpec)
+                Log.i(
+                    TAG,
+                    "debug scan flow: flow=$flow maxPages=$maxPages timing=" +
+                        com.bettergi.pocket.scan.TimingOverrides.summary(),
+                )
                 if (captureController.isRunning()) {
                     scriptRunner.startScan(
                         flow, maxPages,
                         useGeometryAdvance = geoAdvance,
                         useAdaptiveDistance = adaptive,
+                        plan = plan,
                     )
                 } else {
                     Log.w(TAG, "scan flow request ignored: projection not running")
                 }
+            }
+            ACTION_DEBUG_OCR_BENCH -> {
+                // 真机 OCR 基准：det/rec 中位耗时（EP 选型/瓶颈定位，IO 线程不阻塞主线程）
+                scriptRunner.scope.launch(Dispatchers.IO) {
+                    Log.i(TAG, "ocr bench: ${OcrFactory.bench()}")
+                }
+            }
+            ACTION_DEBUG_OCR_DET -> {
+                // ONNX det 全管线真机探针（任意界面可跑，为移除 ML Kit 做验收）
+                scriptRunner.scope.launch(Dispatchers.IO) {
+                    val out = runCatching { scriptRunner.ocrDetProbe() }
+                        .getOrDefault("probe failed: ${captureController.isRunning()}")
+                    Log.i(TAG, "ocr det probe: $out")
+                }
+            }
+            ACTION_DEBUG_CLICK -> {
+                val x = intent.getIntExtra(EXTRA_CLICK_X, 0)
+                val y = intent.getIntExtra(EXTRA_CLICK_Y, 0)
+                val duration = intent.getIntExtra(EXTRA_CLICK_DURATION, 120).toLong()
+                Log.i(TAG, "debug click at ($x,$y) duration=$duration")
+                val ok = InputAccessibilityService.click(x, y, duration)
+                Log.i(TAG, "debug click at ($x,$y) accepted=$ok")
             }
         }
         return START_STICKY
@@ -462,21 +527,46 @@ class TriggerForegroundService : Service() {
         const val ACTION_DEBUG_SET_SCREEN_SHARE = "com.bettergi.pocket.action.DEBUG_SET_SCREEN_SHARE"
         const val ACTION_DEBUG_SET_SCAN = "com.bettergi.pocket.action.DEBUG_SET_SCAN"
         const val ACTION_DEBUG_STATUS = "com.bettergi.pocket.action.DEBUG_STATUS"
+
+        /**
+         * 把最近一次 GOOD 导出**拷贝到外部目录**供 adb 拉取（标定/回归比对用）。
+         * 背景：BlueStacks 禁用 `run-as`（setegid 失败）且无 su ⇒ 私有 filesDir 读不到。
+         * 落点：`/sdcard/Android/data/<pkg>/files/sweep_last_good.json`（adb shell 有 ext_data_rw 可读）。
+         */
+        const val ACTION_DEBUG_DUMP_GOOD = "com.bettergi.pocket.action.DEBUG_DUMP_GOOD"
         const val ACTION_DEBUG_SET_PROBE = "com.bettergi.pocket.action.DEBUG_SET_PROBE"
         const val ACTION_DEBUG_SET_VERBOSE = "com.bettergi.pocket.action.DEBUG_SET_VERBOSE"
         const val ACTION_DEBUG_SWIPE_TEST = "com.bettergi.pocket.action.DEBUG_SWIPE_TEST"
         const val ACTION_DEBUG_SCAN_FLOW = "com.bettergi.pocket.action.DEBUG_SCAN_FLOW"
+        const val ACTION_DEBUG_CLICK = "com.bettergi.pocket.action.DEBUG_CLICK"
+        const val ACTION_DEBUG_OCR_BENCH = "com.bettergi.pocket.action.DEBUG_OCR_BENCH"
+        const val ACTION_DEBUG_OCR_DET = "com.bettergi.pocket.action.DEBUG_OCR_DET"
 
         const val EXTRA_ENABLED = "enabled"
         const val EXTRA_START_Y = "startY"
         const val EXTRA_DIST = "dist"
         const val EXTRA_MEASURE = "measure"
+        const val EXTRA_GRID = "grid"
         const val EXTRA_FLOW = "flow"
         const val EXTRA_MAX_PAGES = "maxPages"
+        /** §14 P4：外部任务计划 JSON 数组（明文，adb shell 会吞双引号，标定用请走 planB64）。 */
+        const val EXTRA_PLAN = "plan"
+        /** §16.4 标定稳定通道：base64(JSON) 的 plan，device sh 不吞引号，标定/调试首选。 */
+        const val EXTRA_PLAN_B64 = "planB64"
+
+        /**
+         * 时序覆盖（仅调试标定）：`--es timing "nav=650,poll=120,sstable=150,swFastMs=110,..."`
+         * 见 [com.bettergi.pocket.scan.TimingOverrides] 与 dsl/verify/_audit/PERF-timing.md 档位计划。
+         * 空/缺省 → 全默认（与改动前逐位一致）。
+         */
+        const val EXTRA_TIMING = "timing"
         /** §12.1 A/B：true=几何推导翻页落点，false=profiles 写死坐标。 */
         const val EXTRA_GEO_ADVANCE = "geoAdvance"
         /** §12.2 A/B：true=每页按相位误差自适应翻页距离。 */
         const val EXTRA_ADAPTIVE_DIST = "adaptiveDist"
+        const val EXTRA_CLICK_X = "x"
+        const val EXTRA_CLICK_Y = "y"
+        const val EXTRA_CLICK_DURATION = "duration"
         const val EXTRA_RESULT_CODE = "extra_result_code"
         const val EXTRA_RESULT_DATA = "extra_result_data"
 

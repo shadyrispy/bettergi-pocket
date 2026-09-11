@@ -92,6 +92,25 @@ object OcrFactory {
         private set
 
     /**
+     * 是否有可用 OCR 引擎。
+     *
+     * 移除 ML Kit 后，ONNX 不可用时不再有兜底 → 扫描会静默读出空文本（比崩溃更难查）。
+     * 调用方（ScriptRunner）须在开跑前查此值并显式失败。
+     */
+    val available: Boolean
+        get() = default !== UnavailableOcrService
+
+    /** 活跃的 ONNX 服务（基准用）；未启用 ONNX 时为 null。 */
+    @Volatile
+    private var onnxService: OnnxPaddleOcrService? = null
+
+    /** 诊断基准（adb DEBUG_OCR_BENCH）：当前引擎 det/rec 中位耗时；非 ONNX 时说明原因。 */
+    fun bench(): String {
+        val s = onnxService
+        return if (s != null) s.bench() else "engine=$engineLabel (onnx inactive, no bench)"
+    }
+
+    /**
      * 初始化 OCR。
      *
      * **两段式**（方案 §6.1 规则 2「init 在后台执行」）：
@@ -110,16 +129,19 @@ object OcrFactory {
             val onnx = runCatching { createOnnx(app) }.getOrNull()
             if (onnx != null) {
                 default = onnx
+                onnxService = onnx
                 engineLabel = "onnx:${onnx.tierLabel}"
                 Log.i(TAG, "OCR engine → ONNX (${onnx.tierLabel})")
             } else {
-                Log.w(TAG, "ONNX unavailable, keep ML Kit fallback")
+                // ML Kit 移除后此为致命路径：ONNX 不可用 = 无 OCR，必须显式告警
+                Log.e(TAG, "ONNX unavailable, keep ML Kit fallback (OCR 能力取决于 ML Kit)")
             }
         }
     }
 
     /** 构造 ONNX 服务并预热；任一步失败返回 null（调用方兜底 ML Kit）。 */
     private fun createOnnx(context: Context): OnnxPaddleOcrService? {
+        Log.i(TAG, "ONNX init start")
         val assets = OnnxModelAssets(context)
         if (!assets.ensure()) {
             Log.w(TAG, "ONNX model assets incomplete")
@@ -128,9 +150,11 @@ object OcrFactory {
         val engine = OnnxOcrEngine(assets.detModel(), assets.recModel())
         val service = OnnxPaddleOcrService(engine, assets.loadDict())
         if (!service.prepare()) {
+            Log.w(TAG, "ONNX prepare failed")
             engine.close()
             return null
         }
+        Log.i(TAG, "ONNX init success")
         return service
     }
 

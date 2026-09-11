@@ -9,6 +9,10 @@ import com.bettergi.pocket.capture.FrameSource
 import com.bettergi.pocket.capture.ScreenCaptureController
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.overlay.OverlayWindowController
+import com.bettergi.pocket.dsl.FlowSource
+import com.bettergi.pocket.dsl.FlowValidator
+import com.bettergi.pocket.dsl.repo.RepoManager
+import com.bettergi.pocket.recognition.ocr.OcrFactory
 import com.bettergi.pocket.recognition.name.GoodNames
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +36,8 @@ class ScriptRunner(
     private val listener: ScanListener,
 ) {
     private val appContext = context.applicationContext
+    /** §16.3 S4：脚本仓库管理器（订阅/更新）。执行前与启动自动更新共用。 */
+    val repoManager = RepoManager(appContext)
     private val mainHandler = Handler(Looper.getMainLooper())
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -42,6 +48,22 @@ class ScriptRunner(
         get() = currentJob?.isActive == true
 
     private val actions = object : ScanEngine.ActionGateway {
+        override fun tap(x: Int, y: Int): Boolean {
+            val dispatched = dispatchOnMain {
+                val needPassthrough = overlayController.prepareClickPassthrough(x, y)
+                val ok = InputAccessibilityService.tap(x, y)
+                if (!ok && needPassthrough) overlayController.restoreClickPassthrough()
+                ok to needPassthrough
+            }
+            if (dispatched != null) {
+                // ⚠️ restore 必须晚于手势 UP 注入：a11y dispatchGesture 的事件注入有排队延迟，
+                // 过早恢复 FLAG_NOT_TOUCHABLE → UP 被自家悬浮窗吞掉，游戏只见 DOWN 无 UP → 不触发 click
+                // （equip18-22 实证：overlay 覆盖区（名册左上网格）点击全灭、非覆盖区（右下按钮）正常）
+                scheduleRestorePassthrough(dispatched.second, PASSTHROUGH_RESTORE_SLACK_MS)
+            }
+            return onActionDispatched(dispatched != null && dispatched.first)
+        }
+
         override fun click(x: Int, y: Int, durationMs: Long): Boolean {
             val dispatched = dispatchOnMain {
                 val needPassthrough = overlayController.prepareClickPassthrough(x, y)
@@ -50,7 +72,7 @@ class ScriptRunner(
                 ok to needPassthrough
             }
             if (dispatched != null) {
-                scheduleRestorePassthrough(dispatched.second, durationMs)
+                scheduleRestorePassthrough(dispatched.second, durationMs + PASSTHROUGH_RESTORE_SLACK_MS)
             }
             return onActionDispatched(dispatched != null && dispatched.first)
         }
@@ -122,6 +144,7 @@ class ScriptRunner(
         /** 外部任务计划（P4 规则层注入）：artifact_lock 的 targets / auto_equip 的 plan。 */
         plan: List<JSONObject>? = null,
     ) {
+        FlowSource.install(appContext)
         if (running) {
             Log.w(TAG, "scan already running")
             return
@@ -136,19 +159,52 @@ class ScriptRunner(
             listener.onFinished("no_frame_size")
             return
         }
-        val validFlows = setOf("artifact_scan", "weapon_scan", "character_scan", "artifact_lock", "auto_equip")
+        val validFlows = setOf("artifact_scan", "weapon_scan", "character_scan", "artifact_lock", "auto_equip", "char_calibrate", "setfilter_calibrate")
         val flowFile = "dsl/flows/$flowName.json"
         if (flowName !in validFlows) {
             Log.w(TAG, "unknown flow $flowName; default to artifact_scan")
             startScan("artifact_scan"); return
         }
+        // ML Kit 移除前的前置检查：无可用 OCR 则显式失败（避免静默读出空文本）
+        if (!OcrFactory.available) {
+            Log.e(TAG, "no OCR engine available; abort scan")
+            listener.onFinished("ocr_unavailable"); return
+        }
         currentJob = scope.launch {
             try {
+                // §16.3 S4：执行前自动更新到期订阅（对齐 PC AutoUpdateBeforeCommandLineRun）；
+                // 到期检查为本地时间戳比对，无到期时立即返回，不拖慢扫描启动。
+                try {
+                    repoManager.updateAllIfDue()
+                } catch (e: Exception) {
+                    Log.w(TAG, "repo auto-update before scan failed", e)
+                }
                 val profile = ScreenProfile.loadFor(appContext.assets, size.first, size.second)
                 profile.calibrate(size.first, size.second)
-                val flow = JSONObject(
-                    appContext.assets.open(flowFile).bufferedReader().use { it.readText() },
-                )
+                @Suppress("DEPRECATION")
+                val appVersion = try {
+                    appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName ?: "0.0.0"
+                } catch (_: Exception) { "0.0.0" }
+                val flowText = FlowSource.open(appContext.assets, flowFile).bufferedReader().use { it.readText() }
+                val flow = try {
+                    JSONObject(flowText)
+                } catch (e: Exception) {
+                    Log.w(TAG, "flow $flowName JSON 解析失败", e)
+                    listener.onFinished("flow_parse_error"); return@launch
+                }
+                // §16.3 S2 门禁：min_host_version 拒跑 + schema 快速校验
+                val info = FlowValidator.parseInfo(flow, flowName)
+                if (!FlowValidator.hostSatisfies(info.minHostVersion, appVersion)) {
+                    Log.w(TAG, "flow $flowName 需宿主 >= ${info.minHostVersion}，当前 $appVersion 过低")
+                    listener.onFinished("host_version_too_low"); return@launch
+                }
+                val issues = FlowValidator.validate(flow)
+                if (issues.isNotEmpty()) {
+                    Log.w(TAG, "flow $flowName schema 非法: ${issues.joinToString { "${it.path}: ${it.message}" }}")
+                    listener.onFinished("flow_schema_invalid"); return@launch
+                }
+                // §15：真机启动路径默认开启前置归位（flow 可显式 returnHome:false 关闭，如标定流）
+                if (!flow.has("returnHome")) flow.put("returnHome", true)
                 // 模板锚点匹配器：注入 assets 并预读 dsl/templates.json（flow 的 anchor.kind=template 依赖）
                 TemplateMatcher.attach(appContext.assets)
                 // 副词条档位表：flow 的 dict.subStats="rollTable" 依赖（dsl/tools/rollTable.json）
@@ -164,7 +220,7 @@ class ScriptRunner(
                     profile = profile,
                     frameSource = frameSource,
                     actions = actions,
-                    ocr = MlKitOcrGateway(),
+                    ocr = OcrGatewayImpl(),
                     names = names,
                     listener = listener,
                     maxPages = maxPages,
@@ -174,7 +230,13 @@ class ScriptRunner(
                     // §13：流程名 → 识别日志的来源标签（LOCK/EQUIP/CHAR/SCAN）
                     flowName = flowName,
                 )
-                engine.run()
+                // 扫描期悬浮窗常驻输入穿透（防自遮挡吞掉游戏点击；hidden=排查用）
+                overlayController.setScanClickThrough(true, hidden = SCAN_OVERLAY_HIDDEN)
+                try {
+                    engine.run()
+                } finally {
+                    overlayController.setScanClickThrough(false)
+                }
                 val total = engine.results.size + engine.resultsWeapons.size + engine.resultsCharacters.size
                 if (total > 0) {
                     val file = GoodExporter.export(
@@ -193,6 +255,10 @@ class ScriptRunner(
                         ),
                     )
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // 主动 stop()：取消非失败，不刷 error 日志（真机实测 JobCancellationException 噪音）
+                Log.i(TAG, "scan cancelled")
+                listener.onFinished("cancelled")
             } catch (e: Exception) {
                 Log.e(TAG, "scan failed", e)
                 listener.onFinished("error: ${e.message}")
@@ -209,6 +275,32 @@ class ScriptRunner(
     }
 
     fun isRunning(): Boolean = running
+
+    /**
+     * ONNX **det 全管线**探针（移除 ML Kit 前的验收工具）：抓当前帧跑一次 det+rec，
+     * 报告引擎/区域数/耗时/前 80 字。任意界面可用——不必进游戏背包即可验证 det 路径。
+     */
+    suspend fun ocrDetProbe(): String {
+        if (!captureController.isRunning()) return "no projection"
+        val frame = frameSource.grabFresh(0L, 2500L)
+        return try {
+            val t0 = System.nanoTime()
+            val res = OcrFactory.default.recognize(frame)
+            val ms = (System.nanoTime() - t0) / 1_000_000
+            // 带上每个文本块的矩形：面板 ROI 标定可直接取识别框坐标，无需看图
+            val boxes = res.regions.joinToString(" | ") {
+                "'${it.text}'@${it.rect.x},${it.rect.y},${it.rect.width}x${it.rect.height}"
+            }
+            "engine=${OcrFactory.engineLabel} regions=${res.regions.size} detTotal=${ms}ms\n$boxes"
+        } finally {
+            frame.release()
+        }
+    }
+
+    /** §16.3 S4：启动自动更新（fire-and-forget，后台协程，不阻塞服务启动）。 */
+    fun triggerRepoUpdateAtStartup() {
+        scope.launch(Dispatchers.IO) { runCatching { repoManager.updateAllIfDue() } }
+    }
 
     /**
      * 调试：抓取当前帧，测网格首行上沿相位误差（§12.2 GridAlign.measureError）。
@@ -235,5 +327,9 @@ class ScriptRunner(
         const val TAG = "BetterGI.ScanRunner"
         const val RESTORE_TOUCH_DELAY_MS = 40L
         const val MAIN_DISPATCH_TIMEOUT_MS = 5000L
+        /** 点击后恢复悬浮窗可触摸的宽放余量：须晚于 a11y 手势 UP 注入（否则 UP 被吞→无 click）。 */
+        const val PASSTHROUGH_RESTORE_SLACK_MS = 600L
+        /** 排查开关：true=扫描期直接隐藏悬浮窗（GONE）；false=窗可见但常驻 NOT_TOUCHABLE。 */
+        const val SCAN_OVERLAY_HIDDEN = false
     }
 }

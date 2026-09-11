@@ -1,180 +1,1163 @@
 {
   "$schema": "primitives.schema.json",
   "profile": "android_3200x1440",
+  "base": {
+    "w": 3200,
+    "h": 1440,
+    "axisNote": "⚠️ 跨档坐标轴规则（2026-09-10 审计修正）：**不存在统一缩放规则**。① `grids.*` 网格层 2560 系**实机实测**，与 3200 不成固定比（char_popup rowY 两档恰相同；weapon/artifact grid cardOrigin.y 3200→2560 约 ×0.955）——不得由 3200 反推 2560；② `panels.*`/`screens.*` 层 3200→2560 约 ×0.8（2560 档该部分为**推导待实测**）；③ 2244（真机 2244×1080，**非 16:9**）→ 2560 的 **y 实测 ×0.9375**（33 项一致），x ≈ ×0.877，**两者不同**，不可用 h/1440=0.75 换算。"
+  },
   "version": "1.0.0",
   "date": "2026-09-01",
   "note": "坐标事实源 = flow1-5 终稿表 + verify/_ocr_backpack_panel.json(2026-09-01 四图定谳) + verify/_manage_panel_regions.json。rect 均为 [x0,y0,x1,y1]。祝圣 yShift=+63 作用于背包面板 level/lock/astral/sub1-4。",
   "screens": {
     "game_home": {
-      "anchors": { "bagpack": [2786, 36, 2862, 125], "character": [2925, 36, 3001, 125] }
+      "anchors": {
+        "bagpack": [
+          2786,
+          36,
+          2862,
+          125
+        ],
+        "character": [
+          2925,
+          36,
+          3001,
+          125
+        ]
+      },
+      "anchorNote": "✅ 入口 anchor 定谳（2026-09-10）：本档(3200) home.character=[2925,36,3001,125]（原始 3200 截图模板核验 0.9986 零偏移）。2560 档实测 [2409,36,2485,125]（点中心 (2447,80) 与 (2403,76) 均稳定进角色界面，两帧 diff 6.14）。**两档各自独立标定，勿互相串用**。另：野外按 BACK 直接弹「确认退出游戏」（非派蒙菜单）→ 归位勿用 BACK 循环。"
     },
     "weapon_backpack": {
-      "tab": { "rect": [210, 196, 290, 321], "template": "template_weapon_tab_1000053537_210_196_290_321.jpg" },
-      "count": { "rect": [2603, 60, 2846, 98], "format": "武器 {n}/{cap}" }
+      "tab": {
+        "rect": [
+          210,
+          196,
+          290,
+          321
+        ],
+        "template": "template_weapon_tab_1000053537_210_196_290_321.jpg"
+      },
+      "count": {
+        "rect": [
+          2603,
+          60,
+          2846,
+          98
+        ],
+        "format": "武器 {n}/{cap}"
+      }
     },
     "artifact_backpack": {
-      "tab": { "rect": [213, 359, 287, 472], "template": "artifact_tab" },
-      "count": { "rect": [2674, 63, 2874, 95], "format": "圣遗物 {n}/{cap}" },
-      "filterRoundBtn": { "rect": [357, 1294, 441, 1378], "template": "shaixuan_357" },
+      "tab": {
+        "rect": [
+          213,
+          359,
+          287,
+          472
+        ],
+        "template": "artifact_tab"
+      },
+      "count": {
+        "rect": [
+          2674,
+          63,
+          2874,
+          95
+        ],
+        "format": "圣遗物 {n}/{cap}"
+      },
+      "filterRoundBtn": {
+        "rect": [
+          357,
+          1294,
+          441,
+          1378
+        ],
+        "template": "shaixuan_357"
+      },
       "fiveStarToggle": {
-        "label": [1527, 210, 1984, 244],
-        "pill": [2009, 199, 2126, 260],
-        "off": "深藏青底+金圈×在左", "on": "金底+深✓在右",
-        "templates": ["template_wuxing_off_2009_199_2126_260.jpg", "template_wuxing_on_2009_199_2126_260.jpg"]
+        "label": [
+          1527,
+          210,
+          1984,
+          244
+        ],
+        "pill": [
+          2009,
+          199,
+          2126,
+          260
+        ],
+        "off": "深藏青底+金圈×在左",
+        "on": "金底+深✓在右",
+        "templates": [
+          "template_wuxing_off_2009_199_2126_260.jpg",
+          "template_wuxing_on_2009_199_2126_260.jpg"
+        ]
       }
     },
     "artifact_manage": {
       "slotTabs": {
-        "生之花": [197, 27], "死之羽": [337, 27], "时之沙": [476, 27], "空之杯": [616, 27], "理之冠": [756, 27],
-        "size": [105, 105], "verified": "✅全部零偏移机核"
+        "生之花": [
+          197,
+          27
+        ],
+        "死之羽": [
+          337,
+          27
+        ],
+        "时之沙": [
+          476,
+          27
+        ],
+        "空之杯": [
+          616,
+          27
+        ],
+        "理之冠": [
+          756,
+          27
+        ],
+        "size": [
+          105,
+          105
+        ],
+        "verified": "✅全部零偏移机核"
       },
-      "returnBtn": [2913, 41],
+      "returnBtn": [
+        2913,
+        41
+      ],
       "pill": {
-        "whole": [171, 1280, 758, 1360],
-        "toggle": [183, 1281, 318, 1359],
-        "directArea": [325, 1281, 757, 1359],
-        "states": { "1": "未选套装=整条直达套装筛选", "2": "生效中", "3": "暂未生效" },
-        "templates": ["shaixuan_weixuan_1000053587", "shaixuan_shengxiao_1000053602", "shaixuan_weishengxiao_1000053601"]
+        "whole": [
+          171,
+          1280,
+          758,
+          1360
+        ],
+        "toggle": [
+          183,
+          1281,
+          318,
+          1359
+        ],
+        "directArea": [
+          325,
+          1281,
+          757,
+          1359
+        ],
+        "states": {
+          "1": "未选套装=整条直达套装筛选",
+          "2": "生效中",
+          "3": "暂未生效"
+        },
+        "templates": [
+          "shaixuan_weixuan_1000053587",
+          "shaixuan_shengxiao_1000053602",
+          "shaixuan_weishengxiao_1000053601"
+        ]
       },
-      "sortBtn": { "rect": [773, 1286, 883, 1368], "center": [828, 1320], "template": "template_paixu_1000053601_773_1286_883_1368.jpg" },
-      "leftBtn": { "rect": [2430, 1291, 2524, 1345], "states": { "替换": "默认", "卸下": "选中件=当前角色正穿戴" } },
-      "rightBtn": { "rect": [2790, 1290, 2890, 1347], "states": { "强化": "未满级", "重塑": "+20" }, "templates": ["zhongsu_1000053601", "qianghua_1000053602"] },
-      "resetChain": ["sortBtn(828,1320)", "重置[311,1310,483,1363]", "确认[766,1309,938,1361]"]
+      "sortBtn": {
+        "rect": [
+          773,
+          1286,
+          883,
+          1368
+        ],
+        "center": [
+          828,
+          1320
+        ],
+        "template": "template_paixu_1000053601_773_1286_883_1368.jpg"
+      },
+      "leftBtn": {
+        "rect": [
+          2430,
+          1291,
+          2524,
+          1345
+        ],
+        "states": {
+          "替换": "默认",
+          "卸下": "选中件=当前角色正穿戴"
+        }
+      },
+      "rightBtn": {
+        "rect": [
+          2790,
+          1290,
+          2890,
+          1347
+        ],
+        "states": {
+          "强化": "未满级",
+          "重塑": "+20"
+        },
+        "templates": [
+          "zhongsu_1000053601",
+          "qianghua_1000053602"
+        ]
+      },
+      "resetChain": [
+        "sortBtn(828,1320)",
+        "重置[311,1310,483,1363]",
+        "确认[766,1309,938,1361]"
+      ]
     },
     "char_interface": {
       "leftMenu": {
-        "属性": [461, 216, 605, 293], "武器": [453, 336, 627, 412], "圣遗物": [453, 452, 627, 528],
-        "命之座": [453, 568, 627, 644], "天赋": [453, 684, 627, 760], "资料": [447, 800, 623, 869],
+        "属性": [
+          461,
+          216,
+          605,
+          293
+        ],
+        "武器": [
+          453,
+          336,
+          627,
+          412
+        ],
+        "圣遗物": [
+          453,
+          452,
+          627,
+          528
+        ],
+        "命之座": [
+          453,
+          568,
+          627,
+          644
+        ],
+        "天赋": [
+          453,
+          684,
+          627,
+          760
+        ],
+        "资料": [
+          447,
+          800,
+          623,
+          869
+        ],
         "pitch": 118
       },
-      "tianBtn": [209, 1281, 287, 1359],
-      "artifactTab": { "detail": [2496, 489, 2701, 531], "setEffect": [2315, 577, 2483, 626], "kuaisu": [2365, 1293, 2534, 1342], "tihuan": [2700, 1291, 2794, 1345] }
+      "tianBtn": [
+        209,
+        1281,
+        287,
+        1359
+      ],
+      "artifactTab": {
+        "detail": [
+          2496,
+          489,
+          2701,
+          531
+        ],
+        "setEffect": [
+          2315,
+          577,
+          2483,
+          626
+        ],
+        "kuaisu": [
+          2365,
+          1293,
+          2534,
+          1342
+        ],
+        "tihuan": [
+          2700,
+          1291,
+          2794,
+          1345
+        ]
+      }
     },
     "dialogs": {
       "equipConfirm": {
-        "frame": [842, 242, 2149, 1197],
-        "text": [1190, 652, 1985, 703],
-        "cancelPill": [1009, 1031, 1567, 1133], "confirmPill": [1632, 1031, 2199, 1133], "confirmClick": [1915, 1082],
+        "frame": [
+          842,
+          242,
+          2149,
+          1197
+        ],
+        "text": [
+          1190,
+          652,
+          1985,
+          703
+        ],
+        "cancelPill": [
+          1009,
+          1031,
+          1567,
+          1133
+        ],
+        "confirmPill": [
+          1632,
+          1031,
+          2199,
+          1133
+        ],
+        "confirmClick": [
+          1915,
+          1082
+        ],
         "trigger": "跨角色替换；同角色换装无弹窗；卸下无弹窗"
       },
       "sortPopup": {
         "mainStatRows": "6×rect(243, 495+i*128, 533, 551+i*128)",
-        "reset": [311, 1310, 483, 1363], "confirm": [766, 1309, 938, 1361]
+        "reset": [
+          311,
+          1310,
+          483,
+          1363
+        ],
+        "confirm": [
+          766,
+          1309,
+          938,
+          1361
+        ]
       },
       "filterPanel": {
-        "anchorTitle": [179, 50, 419, 104], "setHeader": [178, 186, 348, 235],
-        "setPlus": { "rect": [172, 288, 1028, 391], "center": [600, 340], "template": "template_tianjia_1000053621_558_306_642_370.jpg" },
-        "optLock": { "标记": [246, 632, 343, 686], "仅锁定": [687, 631, 823, 685], "未锁定": [248, 753, 381, 803] },
-        "optLevel": { "满级": [249, 960, 342, 1012], "未满级": [689, 961, 821, 1012] },
-        "optEquip": { "已装备": [250, 1168, 381, 1221], "未装备": [689, 1167, 820, 1220] },
-        "reset": [348, 1308, 454, 1366], "ok": [798, 1307, 907, 1368]
+        "anchorTitle": [
+          179,
+          50,
+          419,
+          104
+        ],
+        "setHeader": [
+          178,
+          186,
+          348,
+          235
+        ],
+        "setPlus": {
+          "rect": [
+            172,
+            288,
+            1028,
+            391
+          ],
+          "center": [
+            600,
+            340
+          ],
+          "template": "template_tianjia_1000053621_558_306_642_370.jpg"
+        },
+        "optLock": {
+          "标记": [
+            246,
+            632,
+            343,
+            686
+          ],
+          "仅锁定": [
+            687,
+            631,
+            823,
+            685
+          ],
+          "未锁定": [
+            248,
+            753,
+            381,
+            803
+          ]
+        },
+        "optLevel": {
+          "满级": [
+            249,
+            960,
+            342,
+            1012
+          ],
+          "未满级": [
+            689,
+            961,
+            821,
+            1012
+          ]
+        },
+        "optEquip": {
+          "已装备": [
+            250,
+            1168,
+            381,
+            1221
+          ],
+          "未装备": [
+            689,
+            1167,
+            820,
+            1220
+          ]
+        },
+        "reset": [
+          348,
+          1308,
+          454,
+          1366
+        ],
+        "ok": [
+          798,
+          1307,
+          907,
+          1368
+        ],
+        "confirm": [
+          934,
+          1307,
+          1045,
+          1368
+        ],
+        "note": "两层关闭结构（2560 OCR 实测定谳）：ok=(852,1337) 为套装子面板「确认筛选」（仅收起子面板），confirm 为主面板「确认」（应用筛选并关闭）。confirm 尚无 3200 实测，按 2560 面板几何等比推导（reset 中心 401 + 2560 实测间距 470×1.25 ≈ 989），待 3200 真机校验；3200 artifact_lock 未 e2e 过。"
       }
     }
   },
   "grids": {
     "weapon_backpack": {
-      "cardOrigin": [416, 201], "cardSize": [200, 253], "pitch": [244, 292],
-      "cols": 7, "visibleRows": 4, "traverseRows": 3,
-      "advance": { "type": "swipe", "from": [1248, 1150], "to": [1248, 274], "distance": 876, "settle": "TBD真机" }
+      "cardOrigin": [
+        416,
+        201
+      ],
+      "cardSize": [
+        200,
+        253
+      ],
+      "pitch": [
+        244,
+        292
+      ],
+      "cols": 7,
+      "visibleRows": 4,
+      "traverseRows": 3,
+      "advance": {
+        "type": "swipe",
+        "from": [
+          1248,
+          1150
+        ],
+        "to": [
+          1248,
+          274
+        ],
+        "distance": 876
+      }
     },
     "artifact_backpack": {
-      "cardOrigin": [416, 297], "cardSize": [200, 253], "pitch": [244, 292],
-      "cols": 7, "visibleRows": 4, "traverseRows": 3,
+      "cardOrigin": [
+        416,
+        297
+      ],
+      "cardSize": [
+        200,
+        253
+      ],
+      "pitch": [
+        244,
+        292
+      ],
+      "cols": 7,
+      "visibleRows": 4,
+      "traverseRows": 3,
       "note": "第4行(顶1173)被底栏遮挡=滑动锚，不遍历",
-      "advance": { "type": "swipe", "from": [1614, 1150], "to": [1614, 274], "distance": 876, "settle": "TBD真机" }
+      "advance": {
+        "type": "swipe",
+        "from": [
+          1614,
+          1150
+        ],
+        "to": [
+          1614,
+          274
+        ],
+        "distance": 876
+      }
     },
     "char_popup": {
-      "colX": [200, 433, 666], "rowY": [188, 467, 748, 1029], "cardSize": [205, 242],
-      "cols": 3, "visibleRows": 4, "traverseRows": 3,
-      "advance": { "type": "swipe", "from": [433, 1150], "to": [433, 309], "distance": 841, "settle": "TBD真机" }
+      "colX": [
+        200,
+        433,
+        666
+      ],
+      "rowY": [
+        188,
+        467,
+        748,
+        1029
+      ],
+      "cardSize": [
+        205,
+        242
+      ],
+      "cols": 3,
+      "visibleRows": 4,
+      "traverseRows": 3,
+      "advance": {
+        "type": "swipe",
+        "from": [
+          433,
+          1150
+        ],
+        "to": [
+          433,
+          309
+        ],
+        "distance": 841
+      }
     },
     "select_3col": {
-      "colX": [179, 415, 651], "rowY": [205, 485, 765, 1045], "cardSize": [210, 262],
-      "cols": 3, "visibleRows": 4, "traverseRows": 3,
+      "colX": [
+        179,
+        415,
+        651
+      ],
+      "rowY": [
+        205,
+        485,
+        765,
+        1045
+      ],
+      "cardSize": [
+        210,
+        262
+      ],
+      "cols": 3,
+      "visibleRows": 4,
+      "traverseRows": 3,
       "advance": {
-        "type": "snap", "snapAlignY": 917, "animMs": 300,
-        "peekCols": [[284, 1215], [520, 1215], [756, 1215]],
-        "loopClicks": [[520, 1048], [756, 1048]],
+        "type": "snap",
+        "snapAlignY": 917,
+        "animMs": 300,
+        "peekCols": [
+          [
+            284,
+            1215
+          ],
+          [
+            520,
+            1215
+          ],
+          [
+            756,
+            1215
+          ]
+        ],
+        "loopClicks": [
+          [
+            520,
+            1048
+          ],
+          [
+            756,
+            1048
+          ]
+        ],
         "end": "peek 消失指纹(槽917不变)→补点遮挡槽(顶1045)→停止"
       }
     },
     "set_filter_popup": {
-      "rowYTop": [210, 346, 482, 618, 754, 890, 1026, 1162], "rowPitch": 136, "rowHeight": 120,
+      "rowYTop": [
+        210,
+        346,
+        482,
+        618,
+        754,
+        890,
+        1026,
+        1162
+      ],
+      "rowPitch": 136,
+      "rowHeight": 120,
       "cols": {
-        "left": { "checkboxX": 240, "nameBox": [379, 667], "countRight": 1105 },
-        "right": { "checkboxX": 1233, "nameBox": [1345, 1631], "countRight": 2070 }
+        "left": {
+          "checkboxX": 240,
+          "nameBox": [
+            379,
+            667
+          ],
+          "countRight": 1105
+        },
+        "right": {
+          "checkboxX": 1233,
+          "nameBox": [
+            1345,
+            1631
+          ],
+          "countRight": 2070
+        }
       },
-      "advance": { "type": "swipe", "from": [620, 1150], "to": [620, 300], "distance": 952, "settle": "TBD真机" }
+      "advance": {
+        "type": "swipe",
+        "from": [
+          620,
+          1150
+        ],
+        "to": [
+          620,
+          300
+        ],
+        "distance": 952
+      },
+      "bounds": [
+        200,
+        200,
+        2070,
+        1292
+      ],
+      "note": "bounds 覆盖双列套装列表区（checkboxX/countRight/rowYTop 推导），供翻页指纹判稳/到底。"
+    },
+    "char_strip": {
+      "colX": [
+        104
+      ],
+      "rowY": [
+        183,
+        343,
+        503,
+        663,
+        823,
+        983
+      ],
+      "cardSize": [
+        112,
+        160
+      ],
+      "cols": 1,
+      "visibleRows": 6,
+      "traverseRows": 5,
+      "advance": {
+        "type": "swipe",
+        "from": [
+          100,
+          1063
+        ],
+        "to": [
+          100,
+          263
+        ],
+        "distance": 800,
+        "note": "n−1 规则：visibleRows 6 → traverseRows 5；distance = 5 × pitch(160) = 800（引擎三段无惯性 swipe ⇒ 滚动量 = 手指净行程）。"
+      },
+      "note": "左列竖排头像条（1 列网格，cols=1）。rowY 已取**均匀** pitch（原实测槽心含 Hough 抖动 ±10 不可用）。**自由滚动无吸附** → 每轮须重检槽位。⚠️ cardH 必须 == pitch（引擎相位校正阈值取 cardH/2，须与 pitch/2 混叠边界对齐）。"
     }
   },
   "panels": {
     "weapon_backpack": {
-      "name": [2221, 214, 2728, 273], "slot": [2210, 308, 2450, 362],
-      "mainLabel": [2210, 355, 2450, 409], "mainValue": [2210, 399, 2370, 454],
-      "baseLabel": [2210, 457, 2410, 507], "baseValue": [2210, 500, 2390, 586],
-      "stars": [2680, 180, 2700, 200], "starColor": [2680, 180, 2720, 220],
-      "level": [2210, 709, 2455, 763], "refine": [2285, 779, 2443, 837],
-      "lock": [2897, 709, 2925, 758], "equipped": [2305, 1163, 2685, 1217],
+      "name": [
+        2221,
+        214,
+        2728,
+        273
+      ],
+      "slot": [
+        2210,
+        308,
+        2450,
+        362
+      ],
+      "mainLabel": [
+        2210,
+        355,
+        2450,
+        409
+      ],
+      "mainValue": [
+        2210,
+        399,
+        2370,
+        454
+      ],
+      "baseLabel": [
+        2210,
+        457,
+        2410,
+        507
+      ],
+      "baseValue": [
+        2210,
+        500,
+        2390,
+        586
+      ],
+      "stars": [
+        2680,
+        180,
+        2700,
+        200
+      ],
+      "starColor": [
+        2680,
+        180,
+        2720,
+        220
+      ],
+      "level": [
+        2210,
+        709,
+        2455,
+        763
+      ],
+      "refine": [
+        2285,
+        779,
+        2443,
+        837
+      ],
+      "lock": [
+        2897,
+        709,
+        2925,
+        758
+      ],
+      "equipped": [
+        2305,
+        1163,
+        2685,
+        1217
+      ],
       "note": "name→level 左对齐 x0≈2221；字段 OCR det 框±8px 内"
     },
     "artifact_backpack": {
-      "name": [2230, 220, 2630, 270], "slot": [2210, 306, 2450, 364],
-      "mainName": [2210, 444, 2460, 500], "mainValue": [2210, 490, 2510, 590],
-      "starBand": { "y": [599, 640], "x0": 2228, "pitch": 56, "judge": "逐格采样 cell=46px, 格内金像素(R>170,G120-220,B<150)>100 → 该星点亮; 星数=亮格数。⚠️5★ 星形大带辉光, 整带列投影会相邻合并(实测 723 连成 2339-2560), 必须逐格", "verified": "5707 4★=4颗 / 5706 3★=3颗 / 5723 5★=5颗(逐格 1019/1047/1181/1489/1861)" },
-      "level": [2200, 716, 2400, 766],
-      "subStats": [[2230, 794, 2990, 848], [2230, 858, 2990, 912], [2230, 922, 2990, 976], [2230, 986, 2990, 1040]],
-      "setName": { "collect": false, "reason": "用户定稿(2026-09-01)：背包面板 set_name 被遮挡 OCR 识别不到，不标定不采集；set_name 由圣遗物单件名 name 经词典反推", "reverseDict": "tools/good_names.json（artifactPieces 276 件/56 套，由 dsl/scripts/gen_good_names.py 生成）", "archivedMeasure": "动态 set_top=800+nSubs*64(±4) 实测留档，勿用于采集" },
-      "equipped": [2291, 1170, 2736, 1210],
-      "banner": [2680, 205, 2840, 285],
-      "zhusheng": { "yShift": 63, "fields": ["level", "subStats", "lock", "astral"], "detect": "紫横幅三采样点" }
+      "name": [
+        2230,
+        220,
+        2630,
+        270
+      ],
+      "slot": [
+        2210,
+        306,
+        2450,
+        364
+      ],
+      "mainName": [
+        2210,
+        444,
+        2460,
+        500
+      ],
+      "mainValue": [
+        2210,
+        490,
+        2510,
+        590
+      ],
+      "starBand": {
+        "y": [
+          599,
+          640
+        ],
+        "x0": 2228,
+        "pitch": 56,
+        "judge": "逐格采样 cell=46px, 格内金像素(R>170,G120-220,B<150)>100 → 该星点亮; 星数=亮格数。⚠️5★ 星形大带辉光, 整带列投影会相邻合并(实测 723 连成 2339-2560), 必须逐格",
+        "verified": "5707 4★=4颗 / 5706 3★=3颗 / 5723 5★=5颗(逐格 1019/1047/1181/1489/1861)"
+      },
+      "level": [
+        2200,
+        716,
+        2400,
+        766
+      ],
+      "subStats": [
+        [
+          2230,
+          794,
+          2990,
+          848
+        ],
+        [
+          2230,
+          858,
+          2990,
+          912
+        ],
+        [
+          2230,
+          922,
+          2990,
+          976
+        ],
+        [
+          2230,
+          986,
+          2990,
+          1040
+        ]
+      ],
+      "setName": {
+        "collect": false,
+        "reason": "用户定稿(2026-09-01)：背包面板 set_name 被遮挡 OCR 识别不到，不标定不采集；set_name 由圣遗物单件名 name 经词典反推",
+        "reverseDict": "tools/good_names.json（artifactPieces 276 件/56 套，由 dsl/scripts/gen_good_names.py 生成）",
+        "archivedMeasure": "动态 set_top=800+nSubs*64(±4) 实测留档，勿用于采集"
+      },
+      "equipped": [
+        2291,
+        1170,
+        2736,
+        1210
+      ],
+      "banner": [
+        2680,
+        205,
+        2840,
+        285
+      ],
+      "zhusheng": {
+        "yShift": 63,
+        "fields": [
+          "level",
+          "subStats",
+          "lock",
+          "astral"
+        ],
+        "detect": "紫横幅三采样点"
+      }
     },
     "artifact_manage": {
-      "name": [2308, 194, 2790, 266], "slot": [2308, 284, 2520, 342],
-      "mainName": [2305, 352, 2740, 420], "mainValue": [2740, 350, 2992, 422],
-      "level": [2305, 505, 2530, 570],
-      "subStats": [[2305, 576, 2995, 636], [2305, 632, 2995, 692], [2305, 690, 2995, 748], [2305, 744, 2995, 804]],
-      "starBand": { "y": [425, 510], "x0": 2321, "pitch": 56, "cell": 46, "judge": "逐格金像素(R>170,G120-220,B<150)>100 → 星点亮; 5★=5格/4★=4格", "verified": "5724 5★ 逐格 697/707/707/703/705 全亮; 5725 4★ 前4格 696-706 亮、第5格 7" },
-      "setName": { "rule": "动态Y线性公式: set_top = 598 + 56×nSubs(绿字行顶, 绿掩码 G>140,G-R>25,G-B>25 行投影)", "x": [2308, 2780], "height": 54, "samples": "n=2→y710(5725 4★2词条) / n=4→y822(5724/3587/3601/3602 4★5★ 4词条, 实测box 818-866)", "note": "b=56 与副词条 pitch 56.3 一致; 5★ 恒 4 词条 → 固定 y822; 4★ 初始2最高3 → y710/y766 两态; 3★/2★=止扫标识不解析", "evidence": "verify/_icon_scan_5723_5724_5725.json" },
-      "setEffect": [2305, 868, 2998, 1158],
-      "equipped": [2415, 1172, 2900, 1232],
-      "bottomBand": { "rect": [2305, 1165, 2990, 1235], "rule": "OCR含『已装备』→装备态；否则为风味文本" },
-      "lockChip": { "roi": [2862, 288, 2912, 338], "judge": "红掩码(r>140,r-g>60,r-b>60)>150px=已锁；红≈0+深灰图形=未锁", "evidence": "m3587/m3601 闭锁 627px / m3602 开锁 0px（_icon_scan_manage3.json）" },
-      "starChip": { "roi": [2943, 288, 2992, 338], "judge": "金掩码(R>170,G120-220,B<150)≥100px=已收藏(点亮); ≤20px=未收藏(灰星)", "evidence": "点亮 5724/5725 各 625px; 灰星基线 m3587=7/m3601=0/m3602=0（_icon_scan_5723_5724_5725.json）" },
-      "elixir": { "collect": false, "reason": "用户拍板(2026-09-02)：圣遗物管理界面不考虑祝圣，没意义——elixir/祝圣横幅不标定" },
+      "name": [
+        2308,
+        194,
+        2790,
+        266
+      ],
+      "slot": [
+        2308,
+        284,
+        2520,
+        342
+      ],
+      "mainName": [
+        2305,
+        352,
+        2740,
+        420
+      ],
+      "mainValue": [
+        2740,
+        350,
+        2992,
+        422
+      ],
+      "level": [
+        2305,
+        505,
+        2530,
+        570
+      ],
+      "subStats": [
+        [
+          2305,
+          576,
+          2995,
+          636
+        ],
+        [
+          2305,
+          632,
+          2995,
+          692
+        ],
+        [
+          2305,
+          690,
+          2995,
+          748
+        ],
+        [
+          2305,
+          744,
+          2995,
+          804
+        ]
+      ],
+      "starBand": {
+        "y": [
+          425,
+          510
+        ],
+        "x0": 2321,
+        "pitch": 56,
+        "cell": 46,
+        "judge": "逐格金像素(R>170,G120-220,B<150)>100 → 星点亮; 5★=5格/4★=4格",
+        "verified": "5724 5★ 逐格 697/707/707/703/705 全亮; 5725 4★ 前4格 696-706 亮、第5格 7"
+      },
+      "setName": {
+        "rule": "动态Y线性公式: set_top = 598 + 56×nSubs(绿字行顶, 绿掩码 G>140,G-R>25,G-B>25 行投影)",
+        "x": [
+          2308,
+          2780
+        ],
+        "height": 54,
+        "samples": "n=2→y710(5725 4★2词条) / n=4→y822(5724/3587/3601/3602 4★5★ 4词条, 实测box 818-866)",
+        "note": "b=56 与副词条 pitch 56.3 一致; 5★ 恒 4 词条 → 固定 y822; 4★ 初始2最高3 → y710/y766 两态; 3★/2★=止扫标识不解析",
+        "evidence": "verify/_icon_scan_5723_5724_5725.json"
+      },
+      "setEffect": [
+        2305,
+        868,
+        2998,
+        1158
+      ],
+      "equipped": [
+        2415,
+        1172,
+        2900,
+        1232
+      ],
+      "bottomBand": {
+        "rect": [
+          2305,
+          1165,
+          2990,
+          1235
+        ],
+        "rule": "OCR含『已装备』→装备态；否则为风味文本"
+      },
+      "lockChip": {
+        "roi": [
+          2862,
+          288,
+          2912,
+          338
+        ],
+        "judge": "红掩码(r>140,r-g>60,r-b>60)>150px=已锁；红≈0+深灰图形=未锁",
+        "evidence": "m3587/m3601 闭锁 627px / m3602 开锁 0px（_icon_scan_manage3.json）"
+      },
+      "starChip": {
+        "roi": [
+          2943,
+          288,
+          2992,
+          338
+        ],
+        "judge": "金掩码(R>170,G120-220,B<150)≥100px=已收藏(点亮); ≤20px=未收藏(灰星)",
+        "evidence": "点亮 5724/5725 各 625px; 灰星基线 m3587=7/m3601=0/m3602=0（_icon_scan_5723_5724_5725.json）"
+      },
+      "elixir": {
+        "collect": false,
+        "reason": "用户拍板(2026-09-02)：圣遗物管理界面不考虑祝圣，没意义——elixir/祝圣横幅不标定"
+      },
       "uncalibrated": []
     },
     "char_profile": {
-      "name": [2319, 214, 2498, 282], "level": [2323, 345, 2594, 397],
-      "header": [354, 55, 647, 100], "favor": [2835, 894, 2890, 947],
-      "popupName": [2320, 216, 2497, 280]
+      "name": [
+        2319,
+        214,
+        2498,
+        282
+      ],
+      "level": [
+        2323,
+        345,
+        2594,
+        397
+      ],
+      "header": [
+        354,
+        55,
+        647,
+        100
+      ],
+      "favor": [
+        2835,
+        894,
+        2890,
+        947
+      ],
+      "popupName": [
+        2320,
+        216,
+        2497,
+        280
+      ]
     },
     "char_constellation": {
-      "nodes": [[2408, 283], [2501, 490], [2532, 662], [2564, 842], [2503, 1027], [2383, 1212]],
-      "roi": 55, "judge": "白锁紧凑块 RGB>195 fill>0.4 → locked（颜色判态禁用）"
+      "nodes": [
+        [
+          2408,
+          283
+        ],
+        [
+          2501,
+          490
+        ],
+        [
+          2532,
+          662
+        ],
+        [
+          2564,
+          842
+        ],
+        [
+          2503,
+          1027
+        ],
+        [
+          2383,
+          1212
+        ]
+      ],
+      "roi": 55,
+      "judge": "白锁紧凑块 RGB>195 fill>0.4 → locked（颜色判态禁用）"
     },
     "char_talent": {
-      "lvRois": [[2627, 280, 2710, 325], [2615, 433, 2708, 477], [2610, 584, 2708, 629]],
-      "iconColX": [2745, 2850],
+      "lvRois": [
+        [
+          2627,
+          280,
+          2710,
+          325
+        ],
+        [
+          2615,
+          433,
+          2708,
+          477
+        ],
+        [
+          2610,
+          584,
+          2708,
+          629
+        ]
+      ],
+      "iconColX": [
+        2745,
+        2850
+      ],
       "judge": "图标框低饱和亮块 min>140 sat<34 fill>0.4 → locked"
     }
   },
   "zones": {
-    "weapon.card.starStrip": { "rel": [30, 170, 170, 212], "judge": "金像素(r>170,g>130,b<110,r-b>70)计数 → stars=round(count/555)", "samples": "1★=561/3★≈1600/4★≈2300/5★≈2700" },
-    "weapon.card.lockBadge": { "rel": [0, 44, 44, 88], "judge": "pink>60=已锁", "pink": "r>190,g100-200,b120-215,r-b>40,r-g>30" },
-    "artifact.card.lockBadge": { "rel": [8, 6, 48, 46], "judge": "pink>60=已锁", "pink": "R>200,120<G<215,110<B<215,R-B>30" },
-    "artifact.panel.lock": { "rect": [2811, 730, 2845, 758], "judge": "gold>=40=已锁; gold==0 且 dark>400=未锁" },
-    "artifact.panel.astral": { "rect": [2900, 713, 2947, 757], "judge": "gold>=400=已收藏; gold==0=未收藏" },
-    "artifact.panel.zhusheng": { "points": [[2390, 703], [2400, 703], [2410, 703]], "judge": "≥2/3点 5×5 紫占比>0.6 → crafted(yShift+63)" },
-    "artifact.rarity": { "banner": [2680, 205, 2840, 285], "classify": "B>R+40且B>180且R<130→3★蓝; B>180且R>130→4★紫; R>B+80→5★橙", "crossCheck": "星数列投影 band y[599,640] pitch56" }
+    "weapon.card.starStrip": {
+      "rel": [
+        30,
+        170,
+        170,
+        212
+      ],
+      "judge": "金像素(r>170,g>130,b<110,r-b>70)计数 → stars=round(count/555)",
+      "samples": "1★=561/3★≈1600/4★≈2300/5★≈2700"
+    },
+    "weapon.card.lockBadge": {
+      "rel": [
+        0,
+        44,
+        44,
+        88
+      ],
+      "judge": "pink>60=已锁",
+      "pink": "r>190,g100-200,b120-215,r-b>40,r-g>30"
+    },
+    "artifact.card.lockBadge": {
+      "rel": [
+        8,
+        6,
+        48,
+        46
+      ],
+      "judge": "pink>60=已锁",
+      "pink": "R>200,120<G<215,110<B<215,R-B>30"
+    },
+    "artifact.panel.lock": {
+      "rect": [
+        2811,
+        730,
+        2845,
+        758
+      ],
+      "judge": "gold>=40=已锁; gold==0 且 dark>400=未锁",
+      "note": "3200 实测中心 (2828,744)"
+    },
+    "artifact.panel.astral": {
+      "rect": [
+        2900,
+        713,
+        2947,
+        757
+      ],
+      "judge": "gold>=400=已收藏; gold==0=未收藏"
+    },
+    "artifact.panel.zhusheng": {
+      "points": [
+        [
+          2390,
+          703
+        ],
+        [
+          2400,
+          703
+        ],
+        [
+          2410,
+          703
+        ]
+      ],
+      "judge": "≥2/3点 5×5 紫占比>0.6 → crafted(yShift+63)"
+    },
+    "artifact.rarity": {
+      "banner": [
+        2680,
+        205,
+        2840,
+        285
+      ],
+      "classify": "B>R+40且B>180且R<130→3★蓝; B>180且R>130→4★紫; R>B+80→5★橙",
+      "crossCheck": "星数列投影 band y[599,640] pitch56"
+    },
+    "artifact": {
+      "panel": {
+        "lock": {
+          "rect": [
+            2811,
+            730,
+            2845,
+            758
+          ],
+          "judge": "gold>=40=已锁; gold==0 且 dark>400=未锁",
+          "note": "3200 实测中心 (2828,744)"
+        }
+      }
+    },
+    "char_popup.collapse": {
+      "rect": [
+        181,
+        48,
+        281,
+        148
+      ],
+      "note": "**0.8 逆推待实测**：2560 实测 (185,78) × 1.25。弹层收起钮（角色选择弹层左上角）。⚠️ 实测纠正：**弹层态下田钮(89,1281,167,1359)被弹层自己的底栏（漏斗/等级顺序/排序）覆盖 → 田无法收弹层**（田只在弹层关时可见）；收弹层必须点此钮，实测点 (185,78) 可收起弹层且**仍留在角色界面**（2026-09-10）。"
+    }
   },
   "assets": {
     "dictionaries": {
       "mappings": "tools/good_names.json",
-      "keys": { "weapons": 236, "characters": 121, "artifactSets": 56 },
+      "keys": {
+        "weapons": 236,
+        "characters": 121,
+        "artifactSets": 56
+      },
       "note": "1★/2★武器未收录（止扫靠稀有度判据）"
     },
-    "optional": ["tools/stopScanList.json (v1.1, enabled=false)"],
-    "solver": ["tools/rollTable.json", "tools/subStatsRolls.json", "tools/artifact_stat.json"],
-    "deprecatedTemplates": { "setname_L/R0-7": "16个套装名模板弃用（OCR 走 artifactSets 56 词典），文件留档、机核名单移除（83→67）" }
+    "optional": [
+      "tools/stopScanList.json (v1.1, enabled=false)"
+    ],
+    "solver": [
+      "tools/rollTable.json",
+      "tools/subStatsRolls.json",
+      "tools/artifact_stat.json"
+    ],
+    "deprecatedTemplates": {
+      "setname_L/R0-7": "16个套装名模板弃用（OCR 走 artifactSets 56 词典），文件留档、机核名单移除（83→67）"
+    }
   }
 }

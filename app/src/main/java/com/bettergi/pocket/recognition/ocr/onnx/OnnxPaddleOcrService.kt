@@ -55,19 +55,14 @@ class OnnxPaddleOcrService(
     /**
      * 首启 EP 基准定档 + 预热。应在后台线程调用（建会话 + 首次 det 推理为秒级）。
      * 全部档位均不可用返回 false。
+     *
+     * 真机（华为 Kirin 970）上 XNNPACK createSession 会挂起，因此当前策略直接选 CPU
+     * 并跳过多档 benchmark；待后续用超时/白名单评估 NNAPI/XNNPACK 后再恢复择优。
      */
     fun prepare(): Boolean {
-        val medians = HashMap<EpTierPicker.Tier, Long>()
-        val available = HashSet<EpTierPicker.Tier>()
-        for (tier in EpTierPicker.DEFAULT_ORDER) {
-            val median = engine.benchmarkTier(tier) ?: continue
-            medians[tier] = median
-            available += tier
-        }
-        if (available.isEmpty()) return false
-        val picked = EpTierPicker.pickByBenchmark(medians, available)
+        val picked = EpTierPicker.Tier.CPU
         val ok = engine.initialize(picked)
-        Log.i(TAG, "ONNX OCR ready=$ok tier=${engine.tier.label} medians=$medians")
+        Log.i(TAG, "ONNX OCR ready=$ok tier=${engine.tier.label}")
         return ok
     }
 
@@ -111,6 +106,31 @@ class OnnxPaddleOcrService(
             if (line == null || line.text.isBlank()) OcrResultRegion(roi, "", 0f)
             else OcrResultRegion(roi, line.text, line.score)
         }
+    }
+
+    /**
+     * 诊断基准（adb `DEBUG_OCR_BENCH` 用）：det/rec 各跑 [runs] 次取中位 ms。
+     * 零张量即测纯执行开销，不依赖图像内容；用于真机 EP 选型与瓶颈定位。
+     */
+    fun bench(runs: Int = 5): String {
+        if (!engine.ready) return "engine not ready"
+        val detIn = FloatBuffer.wrap(FloatArray(DET_SIZE * DET_SIZE * 3))
+        engine.runDet(detIn) // 预热
+        val detMs = medianMs(runs) { engine.runDet(detIn) }
+        val recW = 320
+        val recIn = FloatBuffer.wrap(FloatArray(3 * REC_H * recW))
+        engine.runRec(recIn, recW) // 预热
+        val recMs = medianMs(runs) { engine.runRec(recIn, recW) }
+        return "tier=${engine.tier.label} det=${detMs}ms rec=${recMs}ms runs=$runs"
+    }
+
+    private inline fun medianMs(runs: Int, block: () -> Unit): Long {
+        val times = LongArray(runs) {
+            val t0 = System.nanoTime()
+            block()
+            (System.nanoTime() - t0) / 1_000_000
+        }
+        return times.sorted()[times.size / 2]
     }
 
     /** 单行：rec 预处理 → 推理 → CTC 解码。返回 null 表示推理失败（调用方跳过该行）。 */

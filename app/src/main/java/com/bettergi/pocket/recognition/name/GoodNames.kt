@@ -1,6 +1,7 @@
 package com.bettergi.pocket.recognition.name
 
 import android.content.res.AssetManager
+import com.bettergi.pocket.dsl.FlowSource
 import org.json.JSONObject
 
 /**
@@ -104,7 +105,7 @@ class GoodNames private constructor(
         }
 
         fun load(assets: AssetManager): GoodNames {
-            val text = assets.open(ASSET_PATH).bufferedReader().use { it.readText() }
+            val text = FlowSource.open(assets, ASSET_PATH).bufferedReader().use { it.readText() }
             return fromJson(JSONObject(text))
         }
 

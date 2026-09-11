@@ -107,7 +107,10 @@ class InputAccessibilityService : AccessibilityService() {
         private const val THREE_SEG_DWELL_MS = 100L
 
         /** 三段总时长（passthrough 恢复延时等外部引用；唯一事实源防漂移）。 */
-        const val SWIPE_TOTAL_MS = WP_FAST_STEPS * WP_FAST_MS + WP_SLOW_STEPS * WP_SLOW_MS + WP_BACK_MS
+        // ⚠️ 2026-09-11：改为跟随 TimingOverrides（三段时长可 adb 覆盖）；
+        //    passthrough 恢复延时引用了它 ⇒ 覆盖时两者自动保持同步（原为编译期常量）。
+        val SWIPE_TOTAL_MS: Long
+            get() = com.bettergi.pocket.scan.TimingOverrides.swipeTotalMs
         private const val BIND_GRACE_MS = 2000L
         private const val BIND_POLL_MS = 250L
 
@@ -236,6 +239,30 @@ class InputAccessibilityService : AccessibilityService() {
         }
 
         /**
+         * 纯 tap（零位移 stroke ~180ms）。char_popup 弹窗卡片把 2px 微滑识别为拖拽不切卡
+         * （equip18/19 实证 9 格全停首格；adb input tap 同坐标 9/9 切换）——零位移时游戏
+         * down/up 间距 0 → 识别为标准 click。
+         */
+        fun tap(x: Int, y: Int): Boolean {
+            if (instance != null) return tapLocal(x, y)
+            return click(x, y, 180L)
+        }
+
+        private fun tapLocal(x: Int, y: Int): Boolean {
+            val service = instance ?: return false
+            val path = Path().apply {
+                moveTo(x.toFloat(), y.toFloat())
+                lineTo(x.toFloat(), y.toFloat())
+            }
+            val stroke = GestureDescription.StrokeDescription(path, 0, 180L)
+            val accepted = service.dispatchGesture(
+                GestureDescription.Builder().addStroke(stroke).build(), null, null,
+            )
+            Log.d(TAG, "tapLocal at ($x,$y) accepted=$accepted")
+            return accepted
+        }
+
+        /**
          * 系统返回键（GLOBAL_ACTION_BACK）——扫描前清游戏每日弹窗（签到/物品过期等）。
          * 游戏内返回键只关界面不退游戏，安全。
          */
@@ -328,10 +355,22 @@ class InputAccessibilityService : AccessibilityService() {
 
         private fun clickLocal(x: Int, y: Int, durationMs: Long): Boolean {
             val service = instance ?: return false
-            val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-            val stroke = GestureDescription.StrokeDescription(path, 0, durationMs.coerceAtLeast(1L))
+            // §真机标定：纯 tap（零位移 50ms）在华为 EMUI + 原神背包详情面板切换上不可靠
+            //（adb input tap 可切换，accessibility gesture 不切换）。改用 2px 微滑 + 120ms
+            // 按压，让系统与游戏都识别为一次稳定的触摸事件。
+            val path = Path().apply {
+                moveTo(x.toFloat(), y.toFloat())
+                lineTo((x + 2).toFloat(), y.toFloat())
+            }
+            val stroke = GestureDescription.StrokeDescription(
+                path,
+                0,
+                durationMs.coerceAtLeast(120L),
+            )
             val gesture = GestureDescription.Builder().addStroke(stroke).build()
-            return service.dispatchGesture(gesture, null, null)
+            val accepted = service.dispatchGesture(gesture, null, null)
+            Log.d(TAG, "clickLocal at ($x,$y) accepted=$accepted")
+            return accepted
         }
 
         /**
@@ -471,6 +510,11 @@ class InputAccessibilityService : AccessibilityService() {
                 onDone?.invoke(false)
                 return
             }
+            val fSteps = com.bettergi.pocket.scan.TimingOverrides.swipeFastSteps
+            val fMs = com.bettergi.pocket.scan.TimingOverrides.swipeFastMs
+            val sSteps = com.bettergi.pocket.scan.TimingOverrides.swipeSlowSteps
+            val sMs = com.bettergi.pocket.scan.TimingOverrides.swipeSlowMs
+            val bMs = com.bettergi.pocket.scan.TimingOverrides.swipeBackMs
             val midX = fromX + Math.round(dx * SWIPE_FAST_RATIO)
             val midY = fromY + Math.round(dy * SWIPE_FAST_RATIO)
             // 缓速段末越过终点 1px（沿运动方向），末路回退 1px = 精确落在 toX/toY 且末速≈0
@@ -480,25 +524,25 @@ class InputAccessibilityService : AccessibilityService() {
             val preY = toY + unitY
 
             val waypoints = ArrayList<IntArray>() // [x, y, ms]
-            for (i in 1..WP_FAST_STEPS) {
+            for (i in 1..fSteps) {
                 waypoints.add(
                     intArrayOf(
-                        fromX + Math.round((midX - fromX).toFloat() * i / WP_FAST_STEPS),
-                        fromY + Math.round((midY - fromY).toFloat() * i / WP_FAST_STEPS),
-                        WP_FAST_MS.toInt(),
+                        fromX + Math.round((midX - fromX).toFloat() * i / fSteps),
+                        fromY + Math.round((midY - fromY).toFloat() * i / fSteps),
+                        fMs.toInt(),
                     )
                 )
             }
-            for (i in 1..WP_SLOW_STEPS) {
+            for (i in 1..sSteps) {
                 waypoints.add(
                     intArrayOf(
-                        midX + Math.round((preX - midX).toFloat() * i / WP_SLOW_STEPS),
-                        midY + Math.round((preY - midY).toFloat() * i / WP_SLOW_STEPS),
-                        WP_SLOW_MS.toInt(),
+                        midX + Math.round((preX - midX).toFloat() * i / sSteps),
+                        midY + Math.round((preY - midY).toFloat() * i / sSteps),
+                        sMs.toInt(),
                     )
                 )
             }
-            waypoints.add(intArrayOf(toX, toY, WP_BACK_MS.toInt()))
+            waypoints.add(intArrayOf(toX, toY, bMs.toInt()))
 
             fun dispatchWaypoint(index: Int, stroke: GestureDescription.StrokeDescription) {
                 val isLast = index == waypoints.lastIndex

@@ -2,6 +2,7 @@ package com.bettergi.pocket.scan
 
 import android.content.res.AssetManager
 import android.util.Log
+import com.bettergi.pocket.dsl.FlowSource
 import org.json.JSONObject
 
 /**
@@ -30,7 +31,7 @@ object RollTable {
     fun attach(assets: AssetManager) {
         if (loaded) return
         table = try {
-            JSONObject(assets.open(ASSET_PATH).bufferedReader().use { it.readText() })
+            JSONObject(FlowSource.open(assets, ASSET_PATH).bufferedReader().use { it.readText() })
         } catch (e: Exception) {
             Log.w(TAG, "rollTable.json 读取失败，副词条档位吸附不可用：${e.message}")
             null

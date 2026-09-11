@@ -54,6 +54,14 @@ class ScanVars {
     var currentTask: JSONObject? = null
     var level: Int = 0
     var stopRequested: Boolean = false
+    /** 连续重复角色计数（止扫判据观测用；0 = 未启用或上一个不是重复）。 */
+    var charDupStreak: Int = 0
+    /**
+     * 终止原因（可观测性）。`stopRequested` 被三个不同的地方置位：`stopWhen` 命中、flow 的
+     * `exit` 步、`pagedGrid` 的 maxPages 早停 —— 原先 `onFinished` 一律报 "stopWhen"，
+     * 导致「止扫判据是否真的触发」在日志上不可辨（负向用例也会显示 stopWhen）。
+     */
+    var stopReason: String? = null
 
     fun snapshot(): Map<String, Any?> = mapOf(
         "total" to total,
@@ -64,6 +72,7 @@ class ScanVars {
         "favorited" to favorited,
         "level" to level,
         "stopRequested" to stopRequested,
+        "charDupStreak" to charDupStreak,
     )
 
     fun exprVars(): Map<String, Any?> = mapOf(
@@ -102,8 +111,11 @@ class ScanEngine(
      * stale 读由内容指纹去重兜底（irminsul producerLoop 同构：click → 短睡 → capture）。
      * 默认 250ms = 模拟器实测面板内容稳定点（+150ms 指纹已变但仍未稳，+270ms 稳定）；
      * 100ms 会截到动画中帧，OCR 乱码名会污染导出。单测注入短值。
+     *
+     * §真机标定（EML-AL00）：accessibility gesture 派发存在额外调度延迟，250ms 下
+     * 第 2 格即 stale → 提升面板切换置信度。500ms 保守值，真机 settle 后再收紧。
      */
-    private val clickDelayMs: Long = 250L,
+    private val clickDelayMs: Long = 500L,
     /** §12.1 起点规范化开关：true=用几何推导落点，false=用 profiles 写死坐标（实机 A/B 用）。 */
     private val useGeometryAdvance: Boolean = true,
     /**
@@ -123,7 +135,7 @@ class ScanEngine(
     /** 流程名（ScriptRunner 传入），仅用于 §13 识别日志的 [RecognitionLog.Tag] 归属。 */
     private val flowName: String = "artifact_scan",
 ) {
-    val vars = ScanVars().apply { this.plan = plan }
+    val vars = ScanVars().apply { this.plan = this@ScanEngine.plan }
 
     /** §13：流程 → 日志来源标签。 */
     private val logTag: RecognitionLog.Tag
@@ -148,12 +160,28 @@ class ScanEngine(
      */
     interface ActionGateway {
         fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
+        /** 纯 tap（零位移 stroke）——char_popup 弹窗卡片对 2px 微滑识别为拖拽不切换（equip18/19 实证）。 */
+        fun tap(x: Int, y: Int): Boolean
         fun swipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean
         /** 系统返回键（GLOBAL_ACTION_BACK）——enterScreen 失败重进前清游戏每日弹窗（签到/物品过期）。 */
         fun back(): Boolean
     }
 
     suspend fun run() {
+        tmStartMs = clock()
+        tmCells = 0; tmPages = 0; tmNavMs = 0; tmPanelMs = 0; tmSettleMs = 0
+        Log.i(TAG, "timing: ${TimingOverrides.summary()}")
+        // §15 流程前置归位：GOODScanner `GenshinGameController::return_to_main_ui` 同思想
+        // （循环点返回直至主界面），各流程启动前统一回到 game_home，避免残留弹窗/界面错位。
+        // 默认 false：仅 ScriptRunner 真机启动路径显式开启（干跑单测不注入 → 不产生归位点击/取帧）
+        if (flowJson.optBoolean("returnHome", false)) {
+            try {
+                returnToHome()
+            } catch (e: Exception) {
+                // 归位是尽力而为的前置，失败不应中断流程（首步 enterScreen 仍会校验）
+                Log.w(TAG, "returnToHome 异常，继续流程：${e.message}")
+            }
+        }
         val steps = flowJson.getJSONArray("steps")
         for (i in 0 until steps.length()) {
             if (vars.stopRequested) break
@@ -170,7 +198,16 @@ class ScanEngine(
             )
             listener.onProgress("total_mismatch", mapOf("total" to total, "scanned" to results.size))
         }
-        listener.onFinished(if (vars.stopRequested) "stopWhen" else "completed")
+        val reason = vars.stopReason ?: if (vars.stopRequested) "stopWhen" else "completed"
+        val elapsed = (clock() - tmStartMs).coerceAtLeast(0L)
+        val perCell = if (tmCells > 0) elapsed / tmCells else 0L
+        val perPage = if (tmPages > 0) elapsed / tmPages else 0L
+        Log.i(
+            TAG,
+            "scan finished: $reason elapsed=${elapsed}ms cells=$tmCells pages=$tmPages " +
+                "perCell=${perCell}ms perPage=${perPage}ms | waits nav=${tmNavMs} panel=${tmPanelMs} settle=${tmSettleMs}",
+        )
+        listener.onFinished(reason)
     }
 
     private suspend fun executeStep(step: JSONObject) {
@@ -179,6 +216,9 @@ class ScanEngine(
         RecognitionLog.log(logTag, RecognitionLog.Level.I, "步骤 $op")
         when (op) {
             "enterScreen" -> enterScreen(step)
+            "clicks" -> step.optJSONArray("chain")?.let { arr ->
+                for (i in 0 until arr.length()) clickChainEntry(arr.getString(i))
+            } ?: Log.w(TAG, "clicks: 缺 chain")
             "dualStateButton" -> dualStateButton(step)
             "readCount" -> readCount(step)
             "pagedGrid" -> pagedGrid(step)
@@ -186,6 +226,7 @@ class ScanEngine(
             "ocrWithRetry" -> ocrWithRetry(step)
             "navigate" -> navigate(step)
             "foreach" -> foreach(step)
+            "rosterFind" -> rosterFind(step)
             "setFilter" -> setFilter(step)
             "exit" -> exitStep(step)
             "verify" -> verify(step)
@@ -200,6 +241,62 @@ class ScanEngine(
     // ---- #1 enterScreen：入口链跳转 + anchor OCR 断言（重试 3 次）----
     private var enterScreenStep: JSONObject? = null
 
+    /**
+     * §15 归位主界面：循环点右上角「返回/关闭」钮直至主界面（背包钮 + 角色钮同时可见）。
+     * 对应 GOODScanner `return_to_main_ui(max_attempts)`：先判在 home → 直接返回；
+     * 否则点返回 → 等 900ms → 再判，最多 [RETURN_HOME_ATTEMPTS] 次。
+     * 返回钮模板未命中（部分界面样式不同）时退回右上锚点坐标（真机右锚 (x−3200)×0.75+2244）。
+     */
+    private suspend fun returnToHome(maxAttempts: Int = RETURN_HOME_ATTEMPTS) {
+        // 模板未注册（干跑单测/未下发模板）→ 无法判据，直接放弃（且不消耗帧，避免打乱帧序列）
+        if (!TemplateMatcher.hasTemplate("home.bagpack")) {
+            Log.w(TAG, "returnToHome: home.bagpack 模板未注册，跳过归位")
+            return
+        }
+        var attempt = 0
+        while (attempt++ < maxAttempts) {
+            val frame = freshFrame()
+            val (atHome, bx, by) = try {
+                // 任一命中即视为主界面（背包钮/角色钮均为 home 独有）
+                val rb = TemplateMatcher.match(frame, "home.bagpack", profile)
+                // 模板未注册/配置未加载时 match 返回 score=-1 → 无法判据，直接放弃归位
+                // （干跑单测与未下发模板的环境不应产生无意义点击）
+                if (rb.score < 0) {
+                    Log.w(TAG, "returnToHome: home.bagpack 模板不可用，跳过归位")
+                    return
+                }
+                val home = rb.matched ||
+                    TemplateMatcher.match(frame, "home.character", profile).matched
+                val r = TemplateMatcher.match(frame, "ui.return", profile)
+                // 模板与 ROI 换算同 TemplateMatcher：按高比缩放，x 右锚
+                val s = frame.rows().toDouble() / 1440.0
+                // fallback 优先 profile 机读 returnBtn（2560 返回钮右缘边距与 3200 不同，
+                // cols-248 旧推算在 2560 偏左 120px → 永点不中 → 归位失败）
+                val retObj = runCatching { profile.zone("ui.return.btn") }.getOrNull()
+                val retRect = retObj?.getJSONArray("rect")
+                val px = if (r.matched) r.x + (39 * s).toInt()
+                else if (retRect != null && retRect.length() >= 4)
+                    profile.scale((retRect.getInt(0) + retRect.getInt(2)) / 2, profile.scaleX)
+                else ((2952 - 3200) * s + frame.cols()).toInt()
+                val py = if (r.matched) r.y + (39 * s).toInt()
+                else if (retRect != null && retRect.length() >= 4)
+                    profile.scale((retRect.getInt(1) + retRect.getInt(3)) / 2, profile.scaleY)
+                else (80 * s).toInt()
+                Triple(home, px, py)
+            } finally {
+                frame.release()
+            }
+            if (atHome) {
+                Log.i(TAG, "returnToHome: 已在主界面（第 $attempt 次判定）")
+                return
+            }
+            Log.i(TAG, "returnToHome: 第 $attempt 次点返回 ($bx,$by)")
+            clickAt(bx, by)
+            delay(RETURN_HOME_SETTLE_MS)
+        }
+        Log.w(TAG, "returnToHome: $maxAttempts 次未达主界面，继续流程（首步 enterScreen 会再校验）")
+    }
+
     private suspend fun enterScreen(step: JSONObject, isRetry: Boolean = false) {
         if (enterScreenStep == null) enterScreenStep = step
         // §14 P2 preReset：到达前参数复位（auto_equip D7 定稿「排序→重置→确认」）。
@@ -209,7 +306,7 @@ class ScanEngine(
             if (preReset != null) {
                 @Suppress("UNCHECKED_CAST")
                 val prChain = preReset.optJSONArray("chain")
-                    ?: (profile.rawObject("screens.artifact_manage.resetChain") as? JSONArray)
+                    ?: (profile.rawAny("screens.artifact_manage.resetChain") as? JSONArray)
                 if (prChain != null) {
                     Log.i(TAG, "preReset: 执行复位链（${prChain.length()} 步）")
                     for (i in 0 until prChain.length()) clickChainEntry(prChain.getString(i))
@@ -226,7 +323,10 @@ class ScanEngine(
                 Log.w(TAG, "enterScreen anchor '$anchorName' has no profile mapping, skipped")
                 continue
             }
-            val rect = profile.rect(rectPath)
+            val rect = runCatching { profile.rect(rectPath) }.getOrElse {
+                Log.w(TAG, "enterScreen anchor '$anchorName' 路径 '$rectPath' 解析失败，跳过：${it.message}")
+                continue
+            }
             actions.click(rect.centerX, rect.centerY)
             delay(ENTER_SETTLE_MS)
         }
@@ -270,7 +370,12 @@ class ScanEngine(
                 Log.w(TAG, "assertAnchor: template '$ref' 未命中（$retries 次）——入口可能未到达")
                 return
             }
-            "ocr" -> Unit
+            "ocr" -> {
+                if (!anchor.has("expect")) {
+                    Log.w(TAG, "assertAnchor: ocr 锚点无 expect，跳过文本断言（到达校验）")
+                    return
+                }
+            }
             else -> {
                 Log.w(TAG, "assertAnchor: kind='$kind' 未实现（支持 ocr/template），本次跳过断言")
                 return
@@ -358,36 +463,45 @@ class ScanEngine(
         //   卸下 → 无确认弹窗，且卸下后网格不回第一行 → 按 profiles resetChain 复位。
         val ref = step.optString("ref", "")
         if (ref.startsWith("$")) {
-            val path = ref.removePrefix("$")
+            val path0 = ref.removePrefix("$")
             // readonly（如 rightBtn 强化/重塑）：只判态、**绝不点击**——误点会进强化/重塑界面
             if (step.optBoolean("readonly", false)) {
-                Log.i(TAG, "dualStateButton ref=$path: readonly，仅判态不点击")
+                Log.i(TAG, "dualStateButton ref=$path0: readonly，仅判态不点击")
                 return
             }
-            val rectArr = profile.rawObject(path)?.optJSONArray("rect")
+            val obj0 = profile.rawObject(path0)
+            val rectArr = obj0?.optJSONArray("rect")
             if (rectArr != null && rectArr.length() >= 4) {
                 val r = profile.scaleRect(
                     rectArr.getInt(0), rectArr.getInt(1), rectArr.getInt(2), rectArr.getInt(3),
                 )
-                Log.i(TAG, "dualStateButton ref=$path → 点击 (${r.centerX},${r.centerY})")
+                Log.i(TAG, "dualStateButton ref=$path0 → 点击 (${r.centerX},${r.centerY})")
                 actions.click(r.centerX, r.centerY)
                 delay(CLICK_SETTLE_MS)
                 val hasUnequip = step.optJSONObject("states")?.keys()?.asSequence()
                     ?.any { it.contains("卸下") } == true
                 if (hasUnequip && isCurrentlyEquipped()) {
                     @Suppress("UNCHECKED_CAST")
-                    val chain = profile.rawObject("screens.artifact_manage.resetChain") as? JSONArray
+                    val chain = profile.rawAny("screens.artifact_manage.resetChain") as? JSONArray
                     if (chain != null) {
                         Log.i(TAG, "dualStateButton: 卸下后网格复位（${chain.length()} 步）")
                         for (i in 0 until chain.length()) clickChainEntry(chain.getString(i))
                     }
                 }
-            } else {
-                Log.w(TAG, "dualStateButton ref='$path' 无 rect，跳过")
+                return
             }
-            return
+            // 无 rect：带 pill（如 fiveStarToggle 五星筛选）→ 落到下方 pill 判态 ensure；
+            //   两者皆无才跳过（原实现一律跳过，5★ 筛选 ensure 长期静默失效）
+            if (obj0 == null) {
+                Log.w(TAG, "dualStateButton ref '$path0' missing in profile")
+                return
+            }
+            if (obj0.opt("pill") == null) {
+                Log.w(TAG, "dualStateButton ref='$path0' 无 rect 且无 pill，跳过")
+                return
+            }
         }
-        val path = step.getString("ref").removePrefix("$")
+        val path = ref.removePrefix("$")
         val obj = profile.rawObject(path) ?: run {
             Log.w(TAG, "dualStateButton ref '$path' missing in profile")
             return
@@ -499,6 +613,9 @@ class ScanEngine(
             ?.replace("max(targets.level)", "targetMaxLevel")
         val advFrom = advance.getJSONArray("from")
         val advTo = advance.getJSONArray("to")
+        // §15 回顶（暂缓）：pagedGrid 起始回顶在真机出现 hang（settle 后无后续日志），
+        // 已回滚。列表位置跨会话残留 → 待办：weapon_scan 前手动复位列表或实现安全回顶
+        // （疑 actions.swipe 连续派发被 EMUI 无障碍节流挂起）。
         // §12.1 起点规范化：优先用几何推导的落点（末尾两卡间隙中点 + 锚行上沿+5），
         // 几何不足或显式关闭时回退到 profiles.advance.from 的写死坐标（A/B 实测用）。
         val geoStart = if (useGeometryAdvance) profile.advanceStart(gridKey) else null
@@ -524,6 +641,11 @@ class ScanEngine(
         // 测量（GridAlign 相位参考）永远用原始 profile；offset 视图只进点击/投票坐标。
         var pageProfile = profile
         // p0 基准：清上轮残留（GridAlign 单例跨扫描持久），首帧顶对齐建立（见下方 beforeFrame）
+        // §16.2 安全回顶：进背包连续上滑到顶（避 EMUI 节流：每轮单次 swipe + awaitGridStable 吸收）
+        if (step.optBoolean("scrollToTop", false)) {
+            // 背包列表跨会话残留 → 先滚到顶。此处要求「连续 2 次未动」才认定到顶（双保险）。
+            swipeGridToTop(gridKey, "scrollGridToTop", stableRounds = GRID_TOP_STABLE_ROUNDS)
+        }
         GridAlign.resetBaseline(gridKey)
         var capturedBaseline = false
         // §14 A4 pageSkip 状态：页序号 + 上一页最低等级（背包按等级降序 → 末格即本页最低）
@@ -551,7 +673,14 @@ class ScanEngine(
                 // scope=cell 止扫（3★/2★ 标识）：置 flag 后当页仍完整遍历（PC 策略「本页后停」），页尾 break。
                 for (row in 0 until traverseRows) {
                     for (col in 0 until cols) {
-                        runVisit(visit, gridKey, col, row, row * cols + col, pageProfile)
+                        val idx = row * cols + col
+                        val beforeCell = results.size + resultsWeapons.size + resultsCharacters.size
+                        if (col == 0 && row == 0) tmPages++
+                        tmCells++
+                        Log.i(TAG, "pagedGrid[$gridKey] page=$pageNo start cell($col,$row) idx=$idx")
+                        runVisit(visit, gridKey, col, row, idx, pageProfile)
+                        val addedCell = results.size + resultsWeapons.size + resultsCharacters.size - beforeCell
+                        Log.i(TAG, "pagedGrid[$gridKey] page=$pageNo done cell($col,$row) idx=$idx added=$addedCell")
                     }
                 }
                 // 背包按等级降序 → 本页末格等级即本页最低等级（作下页 pageSkip 判据）
@@ -569,8 +698,8 @@ class ScanEngine(
                 GridAlign.captureBaseline(beforeFrame, profile, gridKey)
                 capturedBaseline = true
             }
-            val before = try {
-                VoteJudges.gridFingerprint(beforeFrame, profile, gridKey)
+            val beforeThumb: ByteArray? = try {
+                VoteJudges.gridThumb(beforeFrame, profile, gridKey)
             } finally {
                 beforeFrame.release()
             }
@@ -612,12 +741,12 @@ class ScanEngine(
                 Log.i(TAG, "advance[$gridKey]: 页面相位 φ=$measured corrections=$corrections")
             } // φ 测量失败（守卫不通过）：沿用上一页偏移（相位近似延续）
 
-            val after = try {
-                VoteJudges.gridFingerprint(latest, profile, gridKey)
+            val afterThumb: ByteArray? = try {
+                VoteJudges.gridThumb(latest, profile, gridKey)
             } finally {
                 latest.release()
             }
-            if (before == after) {
+            if (reachedEnd(beforeThumb, afterThumb)) {
                 Log.i(TAG, "pagedGrid reached end (fingerprint unchanged)")
                 break
             }
@@ -626,9 +755,190 @@ class ScanEngine(
             if (pagesAdvanced >= maxPages) {
                 Log.i(TAG, "pagedGrid early stop: reached maxPages=$maxPages (debug 早停，用于翻页准确性验证)")
                 vars.stopRequested = true
+                vars.stopReason = "maxPages"
                 break
             }
         }
+    }
+
+    // §16.2 安全回顶（rosterFind 名册 / pagedGrid 背包 / setFilter 套装面板 三处共用一个实现）。
+    // 反向 advance（to→from 上滑）连续多次，每轮 awaitGridStable + 缩略图差异判「是否真滚动」。
+    // EMUI 节流规避：每轮单次 swipe 派发（不连续派发），靠 settle 轮询吸收节流。
+    //
+    // ⚠️ 两个易错点（三处重复实现时都踩过）：
+    // 1. 判据必须用**松阈值** GRID_END_DIFF：静止态下 4-bit 量化边界抖动会让 diff 在 0.065~0.22
+    //    乱跳、横跨紧阈值 GRID_SIMILAR_DIFF(0.10) → 时而判顶时而不判（曾白滑满上限）。真实翻页是
+    //    整块位移（diff 0.62~1.00），与噪声带无重叠。
+    // 2. awaitGridStable 返回的 Mat **归调用方释放**：原 rosterFind/setFilter 两处直接丢弃返回值
+    //    → 每轮泄一个 native Mat（OpenCV 堆外内存）。
+    //
+    // @param stableRounds 需「连续未动」几次才认定到顶（≥1）
+    // @return true = 判定到顶；false = 打满 maxRounds / stopRequested 中断 / 该网格无 advance
+    private suspend fun swipeGridToTop(
+        gridKey: String,
+        logTag: String,
+        stableRounds: Int = 1,
+        maxRounds: Int = MAX_SCROLL_TOP_ROUNDS,
+    ): Boolean {
+        val grid = profile.rawObject("grids.$gridKey") ?: return false
+        val adv = grid.optJSONObject("advance") ?: return false
+        if (adv.optString("type") != "swipe") return false
+        if (!adv.optBoolean("returnTop", true)) return false
+        val from = adv.getJSONArray("from")
+        val to = adv.getJSONArray("to")
+        // ⚠️ swipe 的 x 必须取 advance.from 的 x（char_popup=297 中缝 / char_strip=80 左缘）：
+        // 压在卡片上会被判成「拖卡片」而非滚页（equip12 实证回顶失效）。
+        val fx = profile.scale(to.getInt(0), profile.scaleX)
+        val fy = profile.scale(to.getInt(1), profile.scaleY)
+        val tx = profile.scale(from.getInt(0), profile.scaleX)
+        val ty = profile.scale(from.getInt(1), profile.scaleY)
+        var stable = 0
+        for (i in 1..maxRounds) {
+            if (vars.stopRequested) return false
+            val tb = gridThumbOf(gridKey)
+            actions.swipe(fx, fy, tx, ty)
+            val settled = awaitGridStable(profile, gridKey)
+            val ta = try { VoteJudges.gridThumb(settled, profile, gridKey) } finally { settled.release() }
+            val diff = VoteJudges.thumbChangedFraction(tb, ta)
+            val moved = !(tb != null && ta != null && reachedEnd(tb, ta, GRID_END_DIFF))
+            Log.i(
+                TAG,
+                "$logTag: 回顶#$i ${if (moved) "(已滚动)" else "(已到顶)"} " +
+                    "diff=${diff?.let { "%.3f".format(it) } ?: "null"} thr=$GRID_END_DIFF",
+            )
+            // D 级（RecognitionLog.verbose）探针：把「变了哪些缩略图像素」打成 ASCII 掩码，
+            // 用于区分「整块位移」与「零散量化抖动」。缩略图尺寸见 VoteJudges.gridThumb。
+            // ⚠️ 掩码刻意用**严格不等**（不带容差）：带容差会把噪声像素抹掉，就看不出噪声密度了。
+            if (RecognitionLog.verbose && tb != null && ta != null && tb.size == THUMB_COLS * THUMB_ROWS * 3) {
+                Log.i(TAG, "$logTag: 回顶#$i ${thumbMask(tb, ta)}")
+            }
+            if (moved) stable = 0 else if (++stable >= stableRounds) return true
+        }
+        Log.w(TAG, "$logTag: 回顶达上限 $maxRounds 次仍未判定到顶")
+        return false
+    }
+
+    /** 24×16 缩略图差异掩码（'.'=同 '#'=变，row0=网格上沿）；仅供 D 级诊断，故刻意不带容差。 */
+    private fun thumbMask(a: ByteArray, b: ByteArray): String {
+        val sb = StringBuilder("diffmask(24x16 . =同 # =变):\n")
+        for (y in 0 until THUMB_ROWS) {
+            for (x in 0 until THUMB_COLS) {
+                val k = (y * THUMB_COLS + x) * 3
+                val changed = a[k] != b[k] || a[k + 1] != b[k + 1] || a[k + 2] != b[k + 2]
+                sb.append(if (changed) '#' else '.')
+            }
+            sb.append('\n')
+        }
+        return sb.toString()
+    }
+
+    // §16.2 #3 rosterFind：角色名册找目标并点进（复用 char_popup 遍历 + parseCharacterPanel 取名）
+    private suspend fun rosterFind(step: JSONObject) {
+        // flow 写 "char": "$task.char"（foreach as=task 注入 currentTask）→ 解 $ 前缀引用；
+        // 字面名（如 "希诺宁"）直用。
+        val raw = step.optString("char", "").takeIf { it.isNotEmpty() }
+        val target = when {
+            raw != null && raw.startsWith("$") -> {
+                val expr = raw.removePrefix("$") // task.char
+                val ref = expr.substringAfter('.', "") // char
+                val v = vars.currentTask
+                val resolved = when {
+                    v != null && ref.isNotEmpty() -> v.optString(ref).takeIf { it.isNotEmpty() }
+                    else -> null
+                }
+                resolved ?: run { Log.w(TAG, "rosterFind: '$raw' 解析失败（currentTask.$ref 空）"); return }
+            }
+            raw != null -> raw
+            else -> vars.currentTask?.optString("char")?.takeIf { it.isNotEmpty() }
+        } ?: run { Log.w(TAG, "rosterFind: 无目标角色（step.char / currentTask.char 均空）"); return }
+        val gridKey = step.optString("grid", "char_popup")
+        val rawGrid = profile.rawObject("grids.$gridKey") ?: return
+        val cols = rawGrid.optInt("cols", 3)
+        val traverseRows = rawGrid.optInt("traverseRows", 3)
+        val advance = rawGrid.optJSONObject("advance")
+        var firstSeen: String? = null
+        var found = false
+        // ⚠️ 弹层内禁止 back：back 会关掉 char_popup → 后续点击全落详情页（equip9 实证死循环）。
+        // 弹层内直接连点网格即切换详情（2026-09-10 逐格实测：12/12 格点到 12 个不同角色，8 次独立扫描一致）。
+        // ★ 2026-09-10 用户定：**只有 auto_equip 走 char_popup**（12 卡/屏，找单个角色密度高）；
+        //   角色遍历（character_scan）改走 grids.char_strip（左列头像条 1 列网格）。
+        //   调用方负责开/收弹层（flow 里 clicks["tian"] 前后各一次），本函数只管遍历。
+        //   （旧注释「点田会劫持网格点击」已被推翻：当时失败样本实为「点到当前角色自己的卡」+ 网格点落在
+        //    无弹层态的左侧菜单上两个混杂变量，非弹层问题。）
+        // 保留 Lv 特征检测仅作诊断日志。
+        runCatching {
+            val gw = ocr
+            if (gw != null) {
+                val f = freshFrame()
+                val txt = try {
+                    gw.readLines(f, listOf(FrameRect(60, 350, 900, 1050))).joinToString(" ")
+                } finally { f.release() }
+                Log.i(TAG, "rosterFind: 网格特征${if (txt.contains("Lv")) "存在" else "缺失(跳过点田，直接扫)"}")
+            }
+        }
+        // ⚠️ 先回顶：弹层滚动位置跨 run 保留，排序靠前的角色在首页——不回顶则从尾页开始永远找不到（equip11 实证）。
+        swipeGridToTop(gridKey, "rosterFind")
+        for (page in 0 until MAX_ROSTER_PAGES) {
+            if (vars.stopRequested || found) break
+            for (row in 0 until traverseRows) for (col in 0 until cols) {
+                val idx = row * cols + col
+                val c = profile.cellCenter(gridKey, idx)
+                // 与 character_scan 一致用微滑 click（该路径实测有效；零位移 tap 反而未验证有效）
+                actions.click(c.x, c.y)
+                delay(CLICK_SETTLE_MS)
+                parseCharacterPanel(step, null)
+                var name = charName
+                if (name.isEmpty()) {
+                    // 详情切换动画未完 → 补读一次（probe 实证 1.1s 稳定）
+                    delay(600)
+                    parseCharacterPanel(step, null)
+                    name = charName
+                }
+                if (firstSeen == null && name.isNotEmpty()) firstSeen = name
+                if (name.isNotEmpty() && nameMatches(name, target)) { found = true; break }
+            }
+            if (found) break
+            if (advance != null && advance.optString("type") == "swipe") {
+                val from = advance.getJSONArray("from"); val to = advance.getJSONArray("to")
+                val fx = profile.scale(from.getInt(0), profile.scaleX); val fy = profile.scale(from.getInt(1), profile.scaleY)
+                val tx = profile.scale(to.getInt(0), profile.scaleX); val ty = profile.scale(to.getInt(1), profile.scaleY)
+                val before = try { freshFrame() } catch (_: Exception) { null }
+                val beforeThumb = before?.let { try { VoteJudges.gridThumb(it, profile, gridKey) } finally { it.release() } }
+                actions.swipe(fx, fy, tx, ty)
+                val after = awaitGridStable(profile, gridKey)
+                val afterThumb = try { VoteJudges.gridThumb(after, profile, gridKey) } finally { after.release() }
+                val looped = firstSeen != null && charName == firstSeen
+                Log.i(
+                    TAG,
+                    "rosterFind: 翻页 page=$page diff=" +
+                        (VoteJudges.thumbChangedFraction(beforeThumb, afterThumb)?.let { "%.3f".format(it) } ?: "null") +
+                        " looped=$looped",
+                )
+                if (reachedEnd(beforeThumb, afterThumb) || looped) break
+            } else break
+        }
+        if (!found) {
+            Log.w(TAG, "rosterFind: 目标 '$target' 未在名册找到 → 跳过本 task 后续步骤（防止 clicks 落在错误界面连锁误点，equip8 实证）")
+            return
+        }
+    }
+
+    private fun nameMatches(got: String, target: String): Boolean {
+        if (StatParser.clean(got) == StatParser.clean(target)) return true
+        val tk = names?.match(target, GoodNames.Kind.CHARACTER, true)?.key ?: return false
+        // got 常为「中文乱码 + 英文名 + 等级数字粘连」混合（app OCR 读中文艺术字弱，equip14/15 实证
+        // '夥得大Sandrone' / 'Xilonen90790'）→ 剥尾数字 + 逐 token 词典反查，任一 token 命中即等
+        val tokens = got.split(Regex("[\\s·・]+")) + got.trimEnd { it.isDigit() }
+        for (tok in tokens) {
+            val cleaned = StatParser.clean(tok).trimEnd { it.isDigit() }
+            if (cleaned.isEmpty()) continue
+            // GoodNames 表以中文名为键 → 面板读出的英文名（Xilonen）反查为 null；
+            // 直接与 target 解出的 GOOD id 比（target '希诺宁' → tk 'Xilonen'）
+            if (cleaned.equals(tk, ignoreCase = true)) return true
+            val gk = names?.match(cleaned, GoodNames.Kind.CHARACTER, true)?.key
+            if (gk != null && gk == tk) return true
+        }
+        return false
     }
 
     /**
@@ -668,7 +978,7 @@ class ScanEngine(
                 profile.scale(p[1], profile.scaleY),
             )
         }
-        var lastFp = -1L
+        var lastThumb: ByteArray? = null
         var round = 0
         var visited = 0
         while (round < MAX_SNAP_ROUNDS) {
@@ -684,14 +994,14 @@ class ScanEngine(
                 visited++
             }
             if (vars.stopRequested) break
-            // 终止判据：网格指纹不变 → peek 消失（不再上弹）
+            // 终止判据：网格指纹变化 ≤ 阈值 → peek 消失（不再上弹）
             val frame = freshFrame()
-            val fp = try {
-                VoteJudges.gridFingerprint(frame, profile, gridKey)
+            val thumb = try {
+                VoteJudges.gridThumb(frame, profile, gridKey)
             } finally {
                 frame.release()
             }
-            if (fp == lastFp) {
+            if (reachedEnd(thumb, lastThumb)) {
                 Log.i(TAG, "snap[$gridKey]: peek 消失（指纹不变）→ 补点遮挡槽残余卡 → 停止（已遍历 $visited）")
                 // 补点：遮挡槽残余卡（peekCols 第 2 列起）
                 for (i in 1 until peekCols.length()) {
@@ -702,38 +1012,19 @@ class ScanEngine(
                 }
                 break
             }
-            lastFp = fp
+            lastThumb = thumb
             round++
         }
         Log.i(TAG, "snap[$gridKey]: 遍历结束 rounds=$round visited=$visited")
     }
 
     /**
-     * §14 P1 **hardMatch**：面板产物与计划任务的硬匹配（artifact_lock / auto_equip 的命中判据）。
-     * 比对顺序同 flow 声明 `matchOrder: level→main→sub1-4→set_name`；
-     * 副词条按相对容差 [tol]（artifact_lock 定稿 0.100001，auto_equip 0.1）。
-     * 缺字段的任务侧不参与比对（宽松匹配，避免未标定字段误杀）。
+     * §14 P1 hardMatch 的引擎侧入口：从"最近一次解析产物"取候选，其余纯逻辑在 [TaskMatch.hardMatch]。
+     * 逻辑抽离到 TaskMatch 以便离线单测（本类构造依赖 FrameSource/OcrGateway，不宜为测而构造）。
      */
-    private fun hardMatch(task: JSONObject, tol: Double): Boolean {
-        val a = results.lastOrNull() ?: return false
-        val wantLevel = task.optInt("level", -1)
-        if (wantLevel >= 0 && a.level != wantLevel) return false
-        val wantSlot = task.optString("slotKey", task.optString("slot", ""))
-        if (wantSlot.isNotEmpty() && a.slotKey != wantSlot) return false
-        val wantSet = task.optString("setKey", task.optString("setName", ""))
-        if (wantSet.isNotEmpty() && a.setKey != wantSet) return false
-        val wantMain = task.optString("mainStatKey", "")
-        if (wantMain.isNotEmpty() && a.mainStatKey != wantMain) return false
-        val wantSubs = task.optJSONArray("substats") ?: return true
-        for (i in 0 until wantSubs.length()) {
-            val w = wantSubs.optJSONObject(i) ?: continue
-            val key = w.optString("key", "")
-            if (key.isEmpty()) continue
-            val got = a.substats.firstOrNull { it.key == key } ?: return false
-            val value = w.optDouble("value", Double.NaN)
-            if (!value.isNaN() && Math.abs(got.value - value) > tol * Math.abs(value)) return false
-        }
-        return true
+    private fun hardMatch(task: JSONObject, tol: Double, why: StringBuilder? = null): Boolean {
+        val a = results.lastOrNull() ?: run { why?.append("无已解析产物"); return false }
+        return TaskMatch.hardMatch(task, a, tol, why)
     }
 
     /**
@@ -741,6 +1032,18 @@ class ScanEngine(
      * `sortBtn(828,1320)`（括号=点）与 `重置[311,1310,483,1363]`（方括号=矩形→取中心）。
      */
     private suspend fun clickChainEntry(entry: String) {
+        // §12.4 P3：链项名（括号前的 token）若命中 CHAIN_ANCHOR_PATHS → 走 profile 机读坐标
+        // （设计意图：flow 字面 (x,y) 仅为 3200 占位，跨分辨率须由 profile 提供；字面被忽略）。
+        val name = entry.substringBefore("(").substringBefore("[").trim()
+        val rectPath = CHAIN_ANCHOR_PATHS[name]
+        if (rectPath != null) {
+            runCatching {
+                val r = profile.rect(rectPath)
+                clickAt(r.centerX, r.centerY)
+                Log.i(TAG, "clickChainEntry: $name → profile $rectPath center=(${r.centerX},${r.centerY})")
+                return
+            }.onFailure { Log.w(TAG, "clickChainEntry: profile $rectPath 解析失败，回退字面: ${it.message}") }
+        }
         val paren = Regex("\\((\\d+),(\\d+)\\)").find(entry)
         if (paren != null) {
             clickAt(paren.groupValues[1].toInt(), paren.groupValues[2].toInt())
@@ -760,7 +1063,25 @@ class ScanEngine(
     val resultsCharacters = ArrayList<GoodCharacter>()
 
     /** 单角色草稿：parsePanel(char_profile) → navigate(命座/天赋) → emit。 */
+    // ── 耗时归因（调试标定用；见 TimingOverrides）──
+    private var tmStartMs = 0L
+    private var tmCells = 0
+    private var tmPages = 0
+    private var tmNavMs = 0L          // navigate 页切换等待累计
+    private var tmPanelMs = 0L        // 点格后面板名轮询累计
+    private var tmSettleMs = 0L       // 翻页 settle 轮询累计
+
     private var charName = ""
+    /**
+     * 最近一次**成功入库**的角色名。⚠️ `charName` 在 `emitCharacter` 末尾会被清空（重置草稿），
+     * 而 flow 顺序是 `emit` → `stopWhen` ⇒ 止扫判据若读 `charName` 会**恒为空、永不触发**
+     * （2026-09-11 实测：`name == roster[0]` 从未生效，10 角色那次实为 `reachedEnd` 收尾）。
+     * 本字段不清空，专门供止扫判据求值。
+     */
+    private var lastCharName = ""
+    /** 连续「已入库过的角色」个数（回卷/遍历完判据）；由 stopWhen mode=duplicateStreak 启用。 */
+    private var charDupStreak = 0
+    private var charDupStreakLimit = 0
     private var charKey: String? = null
     private var charLevel = 0
     private var charElement: String? = null
@@ -783,6 +1104,12 @@ class ScanEngine(
                 profile.rect("panels.char_profile.header"),
             )
             val texts = gateway.readRois(frame, rects)
+            // 2026-09-10 诊断日志：name/level 在 app 内读空（离线 paddleocr 同源 ROI 能读）→ 打印原始输出与实际 ROI
+            Log.d(
+                TAG,
+                "char.raw: name='${texts.getOrElse(0) { "" }}' lv='${texts.getOrElse(1) { "" }}' " +
+                    "hdr='${texts.getOrElse(2) { "" }}' | rects=${rects.joinToString { "(${it.left},${it.top},${it.right},${it.bottom})" }}",
+            )
             val rawName = StatParser.clean(texts.getOrElse(0) { "" })
             val level = Regex("(\\d+)").find(texts.getOrElse(1) { "" })
                 ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
@@ -874,6 +1201,22 @@ class ScanEngine(
         Log.i(TAG, "char: 天赋等级 ${charTalents.toList()}")
     }
 
+    /** §15 P1-1：面板名区亮度指纹（步长 6 采样，仅用于检测面板内容变化）。 */
+    private fun panelAreaFp(frame: Mat, rect: FrameRect): Long {
+        var fp = 0L
+        var y = rect.top
+        while (y < rect.bottom && y < frame.rows()) {
+            var x = rect.left
+            while (x < rect.right && x < frame.cols()) {
+                val p = frame.get(y, x)
+                fp = fp * 31 + (((p[0] + p[1] + p[2]) / 3).toInt() / 8)
+                x += 6
+            }
+            y += 6
+        }
+        return fp
+    }
+
     /** navigate 后按 `read` 数组判读页面（char_constellation / char_talent）。 */
     private suspend fun readAfterNavigate(step: JSONObject) {
         val read = step.optJSONArray("read") ?: return
@@ -900,13 +1243,39 @@ class ScanEngine(
             constellation = charConstellation,
             talents = charTalents.toList(),
         )
+        // ── 连续重复角色判据（2026-09-11 用户定：连续 3 个重复 = 遍历完）──
+        // 「重复」= 该名字**已在本轮入库过**。列表回卷（Genshin 头像条可循环滚）或滑动失效时，
+        // 会连续读到已扫过的角色；`reachedEnd`（指纹到底）对回卷列表永不触发，故此为**主判据**。
+        // ⚠️ 按**词典 key**判重（角色身份），不按名字：名字可能读错/两名相撞 → 按名字会误杀丢件。
+        // key == null（未解析出身份）→ 判据不介入，且**照常入库**（宁可多一件也不丢）。
+        val seenKeys = resultsCharacters.mapNotNull { it.key }
+        val dup = c.key != null && seenKeys.contains(c.key)
+        lastCharName = c.name
+        val (nextStreak, hitLimit) = CharDupJudge.step(seenKeys, c.key, charDupStreak, charDupStreakLimit)
+        charDupStreak = nextStreak
+        vars.charDupStreak = charDupStreak
+        if (dup) {
+            // ⚠️ 不入库：角色侧无 dedupe（`dedupe` 只作用于圣遗物），重复件入库会污染导出。
+            Log.i(TAG, "char 重复（连续 $charDupStreak/${charDupStreakLimit}）：${c.name} key=${c.key} → 不入库")
+            if (hitLimit) {
+                vars.stopRequested = true
+                vars.stopReason = "stopWhen"
+                Log.i(TAG, "stopWhen triggered (连续 $charDupStreak 个重复角色 ≥ $charDupStreakLimit)：${c.name}")
+            }
+            resetCharDraft()
+            return
+        }
         resultsCharacters.add(c)
         Log.i(TAG, "char emit #${resultsCharacters.size}: ${c.name} lv=${c.level} c${c.constellation} t=${c.talents}")
         listener.onProgress(
             "character",
             vars.snapshot() + ("name" to c.name) + ("idx" to resultsCharacters.size),
         )
-        // 重置草稿，准备下一个角色
+        resetCharDraft()
+    }
+
+    /** 重置角色草稿（不清 `lastCharName`：它供止扫判据使用）。 */
+    private fun resetCharDraft() {
         charName = ""
         charKey = null
         charLevel = 0
@@ -927,31 +1296,49 @@ class ScanEngine(
     }
 
     /**
-     * 翻页后自适应 settle：轮询网格指纹，连续 [SETTLE_STABLE_MS] 不变即视为动画结束。
-     * 自动测出各设备真实 settle 耗时（logcat 直读，回填 profiles.advance.settle），
-     * 替代固定延时——不同设备动画时长不同，固定值要么浪费要么不足。
+     * 两帧是否"实质相同"（差异比例 ≤ [thr]），用于翻页到底/回顶判据。
+     * [thr] 默认 [GRID_SIMILAR_DIFF]（settle 用的紧阈值）；**回顶用 [GRID_END_DIFF] 松阈值**——
+     * 误判"已到顶"只多滑一次（便宜），漏判则白滑满 8 次（贵），代价不对称故放松。
+     */
+    private fun reachedEnd(a: ByteArray?, b: ByteArray?, thr: Float = GRID_SIMILAR_DIFF): Boolean {
+        val d = VoteJudges.thumbChangedFraction(a, b) ?: return false
+        return d <= thr
+    }
+
+    /**
+     * 翻页后自适应 settle：轮询网格缩略图，连续 [SETTLE_STABLE_MS] 帧间差异 ≤ [GRID_SIMILAR_DIFF]
+     * 即视为动画结束。替代固定延时——不同设备动画时长不同，固定值要么浪费要么不足。
+     *
+     * 原实现用「指纹精确相等」判稳：真机 MediaProjection 逐帧带抖动/微动画，24×16 缩略图
+     * 几乎不可能连续 300ms 逐像素一致 → 永不收敛、每次打满 [SETTLE_MAX_MS]（真机归位 48s+）。
+     * 现改「帧间差异比例阈值」：容忍抖动，仍可靠检测翻页大变化。
      * @return 稳定后的最新帧（调用方负责 release）
      */
     private suspend fun awaitGridStable(profile: ScreenProfile, gridKey: String): Mat {
         val start = clock()
-        var lastFp = -1L
+        var prevThumb: ByteArray? = null
         var stableSince = -1L
         var latest: Mat? = null
         try {
+            val sPoll = TimingOverrides.settlePollMs
+            val sStable = TimingOverrides.settleStableMs
             while (clock() - start < SETTLE_MAX_MS) {
-                delay(SETTLE_POLL_MS)
+                delay(sPoll); tmSettleMs += sPoll
                 latest?.release()
                 latest = freshFrame(SETTLE_FRAME_TIMEOUT_MS)
-                val fp = VoteJudges.gridFingerprint(latest, profile, gridKey)
-                if (fp == lastFp) {
-                    if (stableSince < 0) stableSince = clock()
-                    if (clock() - stableSince >= SETTLE_STABLE_MS) {
-                        Log.i(TAG, "page settle: ${clock() - start}ms (stable)")
-                        return latest
+                val thumb = VoteJudges.gridThumb(latest, profile, gridKey)
+                if (thumb != null) {
+                    val diff = VoteJudges.thumbChangedFraction(prevThumb, thumb)
+                    if (diff != null && diff <= GRID_SIMILAR_DIFF) {
+                        if (stableSince < 0) stableSince = clock()
+                        if (clock() - stableSince >= sStable) {
+                            Log.i(TAG, "page settle: ${clock() - start}ms (stable diff=${"%.3f".format(diff)})")
+                            return latest
+                        }
+                    } else {
+                        stableSince = -1L
                     }
-                } else {
-                    stableSince = -1L
-                    lastFp = fp
+                    prevThumb = thumb
                 }
             }
         } catch (e: Exception) {
@@ -1008,6 +1395,38 @@ class ScanEngine(
     }
 
     /**
+     * 面板锁钮自适应点击（fast.at=$zones.artifact.panel.lock 专用）。
+     * 2560 实测：同一单件名存在普通（锁徽 center 2309,744）与祝圣（+zhushengShiftPx ≈808）两种面板，
+     * 固定坐标必漏一种。策略：先双区判已锁（已锁则跳过点击）；未锁则先点普通位，回读双区 gold，
+     * 未生效再点祝圣位。返回实际点击坐标（日志用）。
+     */
+    private suspend fun lockClickAdaptive(): Pair<Int, Int> {
+        val obj = profile.zone("artifact.panel.lock")
+            ?: throw IllegalStateException("zone artifact.panel.lock missing")
+        val r = obj.getJSONArray("rect")
+        val rect = profile.scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3))
+        val sh = profile.zhushengShiftPx
+        val lockedAny: (Mat) -> Boolean = { f ->
+            VoteJudges.panelLock(f, profile, 0).matched || VoteJudges.panelLock(f, profile, sh).matched
+        }
+        var f = freshFrame()
+        val pre = try { lockedAny(f) } finally { f.release() }
+        if (pre) {
+            Log.i(TAG, "lockClickAdaptive: 双区判定已锁，跳过点击")
+            return rect.centerX to rect.centerY
+        }
+        actions.click(rect.centerX, rect.centerY)
+        delay(CLICK_SETTLE_MS)
+        f = freshFrame()
+        val now = try { lockedAny(f) } finally { f.release() }
+        if (now) return rect.centerX to rect.centerY
+        actions.click(rect.centerX, rect.centerY + sh)
+        delay(CLICK_SETTLE_MS)
+        Log.i(TAG, "lockClickAdaptive: 普通位未生效 → 祝圣位 +$sh")
+        return rect.centerX to (rect.centerY + sh)
+    }
+
+    /**
      * checkbox 是否已勾选（"未选中黑 / 选中白"）。取该点亮度均值，>150 视为已选（防误取消）。
      * 读帧失败按「未选」处理（宁可多点一次也不会漏点）。
      */
@@ -1031,42 +1450,24 @@ class ScanEngine(
     }
 
     /**
-     * §14 P1：筛选目标集合。优先 `vars.currentTask.setName`；其次 `currentTask.targets[]`（加锁多目标）；
-     * 再退 `vars.plan[].setName`。空则记 warn（P4 未注入计划）。
+     * §14 P1：筛选目标集合。取并集逻辑在 [TaskMatch.targets]（纯逻辑，可离线单测）。
      */
-    private fun filterTargets(): Set<String> {
-        val out = LinkedHashSet<String>()
-        val task = vars.currentTask
-        if (task != null) {
-            task.optString("setName").takeIf { it.isNotEmpty() }?.let(out::add)
-            val arr = task.optJSONArray("targets")
-            if (arr != null) {
-                for (i in 0 until arr.length()) {
-                    val s = arr.optString(i, "")
-                    if (s.isNotEmpty()) out.add(s)
-                    else arr.optJSONObject(i)?.optString("setName")?.takeIf { it.isNotEmpty() }?.let(out::add)
-                }
-            }
-        }
-        vars.plan?.forEach { t ->
-            t.optString("setName").takeIf { it.isNotEmpty() }?.let(out::add)
-        }
-        return out
-    }
+    private fun filterTargets(): Set<String> = TaskMatch.targets(vars.currentTask, vars.plan)
 
     private suspend fun setFilter(step: JSONObject) {
         val ocrGateway = ocr
         val chain = step.getJSONArray("chain")
-        for (i in 0 until chain.length()) {
-            val m = Regex("\\((\\d+),(\\d+)\\)").find(chain.getString(i)) ?: continue
-            val pt = profile.scalePoint(m.groupValues[1].toInt(), m.groupValues[2].toInt())
-            actions.click(pt.x, pt.y)
-            delay(CLICK_SETTLE_MS)
-        }
-        // §12.4-① 开始筛选前先清空已选条件（filterPanel.reset）
+        // §16.4 链项解析统一走 clickChainEntry（命中 CHAIN_ANCHOR_PATHS → profile 机读坐标，
+        // 跨分辨率正确；字面仅 fallback）。旧实现直接 scalePoint 字面 → 2560 错位。
+        for (i in 0 until chain.length()) clickChainEntry(chain.getString(i))
+        // §12.4-① 开始筛选前先清空已选条件（filterPanel.reset）。
+        // 2560 实测：setPlus 打开子面板有动画，紧接的 reset 点击落在过渡态被吞 → 游戏残留勾选
+        // （天之美赐）清不掉 → 筛的是错套装。补 delay 待动画完成；reset 幂等，双击保险。
         val resetPt = filterPanelCenter("reset")
         if (resetPt != null) {
+            delay(800)
             Log.i(TAG, "setFilter: 清空已选条件 reset=(${resetPt[0]},${resetPt[1]})")
+            clickAt(resetPt[0], resetPt[1])
             clickAt(resetPt[0], resetPt[1])
         } else {
             Log.w(TAG, "setFilter: filterPanel.reset 未标定，跳过清空（可能残留上次条件）")
@@ -1101,26 +1502,46 @@ class ScanEngine(
         val rightBox = cols.getJSONObject("right").getJSONArray("nameBox")
         if (ocrGateway == null) return
         val rowHeight = grid.optInt("rowHeight", 120)
-        val pending = LinkedHashSet(targets)
+        // §12.4-② 目标名空间归一：plan 注入的是中文显示名，matchFilterRow 比对的是词典 key
+        // （如 绝缘之旗印→EmblemOfSeveredFate），必须先经词典 lookup 归一，否则恒 miss。
+        val pending = LinkedHashSet<String>()
+        targets.forEach { t -> pending.add(lookup(t) ?: t) }
+        // 契约可观测性：把「plan 报的原始名 → 词典归一 key」打出来，便于确认 P4 注入是否生效
+        // （归一失败会回落到原文 → 与 OCR 侧 key 空间不一致 → 恒 miss，此日志一眼可辨）。
+        Log.i(
+            TAG,
+            "setFilter: 目标 $targets → 归一 ${pending.toList()}（dict=$dictKey match=$match 面板=$gridKey）",
+        )
         val advance = grid.optJSONObject("advance")
-        var lastFp = -1L
+        // §12.4-⓪ 打开弹窗先回顶：弹窗滚动位置跨会话保留，上次停在末页则首页即末页。
+        swipeGridToTop(gridKey, "setFilter")
+        var lastThumb: ByteArray? = null
         var guard = 0
+        var rescanUsed = false
         while (pending.isNotEmpty() && guard++ < MAX_FILTER_PAGES) {
             if (vars.stopRequested) break
+            var hits = 0
             for (i in 0 until rowYTop.length()) {
                 if (pending.isEmpty()) break
                 val y = rowYTop.getInt(i)
                 val rowCenterY = y + rowHeight / 2
-                matchFilterRow(ocrGateway, lookup, leftBox, y, rowHeight, leftX, rowCenterY, pending, "left")
+                if (matchFilterRow(ocrGateway, lookup, leftBox, y, rowHeight, leftX, rowCenterY, pending, "left")) hits++
                 if (pending.isEmpty()) break
-                matchFilterRow(ocrGateway, lookup, rightBox, y, rowHeight, rightX, rowCenterY, pending, "right")
+                if (matchFilterRow(ocrGateway, lookup, rightBox, y, rowHeight, rightX, rowCenterY, pending, "right")) hits++
             }
             if (pending.isEmpty() || vars.stopRequested) break
+            // §15 P1-2：本页零命中多为翻页残差致行 OCR 劣化 → 重扫本页一次再翻页
+            if (hits == 0 && !rescanUsed) {
+                rescanUsed = true
+                Log.i(TAG, "setFilter: 本页零命中，重扫一次")
+                continue
+            }
+            rescanUsed = false
             // §12.4-⑤ 本页未点完 → 翻页继续
             if (advance == null) break
             val advFrom = advance.getJSONArray("from")
             val advTo = advance.getJSONArray("to")
-            val fpBefore = fingerprint(gridKey)
+            val thumbBefore = gridThumbOf(gridKey)
             actions.swipe(
                 profile.scale(advFrom.getInt(0), profile.scaleX),
                 profile.scale(advFrom.getInt(1), profile.scaleY),
@@ -1128,30 +1549,30 @@ class ScanEngine(
                 profile.scale(advTo.getInt(1), profile.scaleY),
             )
             val stable = awaitGridStable(profile, gridKey)
-            val fpAfter = try {
-                VoteJudges.gridFingerprint(stable, profile, gridKey)
+            val thumbAfter = try {
+                VoteJudges.gridThumb(stable, profile, gridKey)
             } finally {
                 stable.release()
             }
-            if (fpAfter == lastFp || fpAfter == fpBefore) {
+            if (reachedEnd(thumbAfter, lastThumb) || reachedEnd(thumbAfter, thumbBefore)) {
                 Log.i(TAG, "setFilter: 筛选列表到底（指纹不变），停止翻页；未点完=$pending")
                 break
             }
-            lastFp = fpAfter
+            lastThumb = thumbAfter
         }
         if (pending.isNotEmpty()) Log.w(TAG, "setFilter: 目标未全部点选，剩余=$pending")
         confirmFilter(step)
     }
 
-    /** 取当前帧网格指纹（失败返回 -1）。 */
-    private suspend fun fingerprint(gridKey: String): Long {
+    /** 取当前帧网格缩略图（失败返回 null），用于到底判据（差异比例阈值）。 */
+    private suspend fun gridThumbOf(gridKey: String): ByteArray? {
         val frame = try {
             freshFrame()
         } catch (_: Exception) {
-            return -1L
+            return null
         }
         return try {
-            VoteJudges.gridFingerprint(frame, profile, gridKey)
+            VoteJudges.gridThumb(frame, profile, gridKey)
         } finally {
             frame.release()
         }
@@ -1170,35 +1591,59 @@ class ScanEngine(
         rowCenterY: Int,
         pending: MutableSet<String>,
         side: String,
-    ) {
-        val rect = FrameRect(box.getInt(0), y, box.getInt(2), y + rowHeight)
-        val frame = freshFrame()
-        val text = try {
-            gateway.readLines(frame, listOf(rect)).joinToString(" ")
-        } finally {
-            frame.release()
+    ): Boolean {
+        // nameBox 两种写法：[x0,x1]（canonical 2 元 x 区间）或 [x0,y0,x1,y1]（4 元 rect，y 取 index 2）
+        val rect = if (box.length() >= 4) FrameRect(box.getInt(0), y, box.getInt(2), y + rowHeight)
+        else FrameRect(box.getInt(0), y, box.getInt(1), y + rowHeight)
+        // 行 OCR 失败重试一次：翻页残差使文字在 ROI 内错位时首读常烂，缓 250ms 后重取帧显著提升命中
+        var key: String? = null
+        var text: String
+        for (attempt in 0 until 2) {
+            val frame = freshFrame()
+            text = try {
+                gateway.readLines(frame, listOf(rect)).joinToString(" ")
+            } finally {
+                frame.release()
+            }
+            key = lookup(StatParser.clean(text))
+            Log.d(TAG, "filterRow[$side] y=$y a$attempt text='$text' key=$key")
+            if (key != null || text.isBlank()) break
+            delay(250)
         }
-        val key = lookup(StatParser.clean(text)) ?: return
-        if (key !in pending) return
+        if (key == null || key !in pending) return false
         if (checkboxChecked(checkboxX, rowCenterY)) {
             Log.i(TAG, "setFilter: $key ($side) 已勾选，跳过（防误取消）")
             pending.remove(key)
-            return
+            return true
         }
         clickAt(checkboxX, rowCenterY)
         pending.remove(key)
         Log.i(TAG, "setFilter matched: $key ($side)")
+        return true
     }
 
-    /** §12.4-⑥ 确认筛选并关闭；tailGuard：锚点仍在则再点一次 ok。 */
+    /**
+     * §12.4-⑥ 确认筛选并关闭。两层结构（OCR 实测 2560）：
+     *   ① 先点 filterPanel.ok（套装子面板「确认筛选」）→ 仅收起子面板，回到主面板「圣遗物筛选」，主面板仍开；
+     *   ② 再点 filterPanel.confirm（主面板「确认」）→ 应用筛选并关闭主面板，回到背包网格。
+     * 若 profile 未定义 confirm（旧分辨率/配置），回退 tailGuard 旧逻辑：锚点仍在则再点一次 ok。
+     */
     private suspend fun confirmFilter(step: JSONObject) {
         val okPt = filterPanelCenter("ok")
         if (okPt == null) {
             Log.w(TAG, "setFilter: filterPanel.ok 未标定，无法确认")
             return
         }
+        Log.i(TAG, "confirmFilter: ok=(${okPt[0]},${okPt[1]}) 点击（收起套装子面板）")
         clickAt(okPt[0], okPt[1])
-        // tailGuard：filterPanel 锚点仍显示 → 再点一次 ok（artifact_lock 双层关闭）
+        val confirmPt = filterPanelCenter("confirm")
+        if (confirmPt != null) {
+            delay(1200) // 等子面板收起动画完成，否则「确认」点击落在过渡态被吞
+            Log.i(TAG, "confirmFilter: confirm=(${confirmPt[0]},${confirmPt[1]}) 点击（关闭主面板）")
+            clickAt(confirmPt[0], confirmPt[1])
+            return
+        }
+        // 兼容旧配置（无 confirm 键）：tailGuard 锚点仍在 → 再点一次 ok（双层关闭）
         if (step.optString("tailGuard").contains("ok")) {
             val anchorPt = filterPanelCenter("anchorTitle")
             if (anchorPt != null) {
@@ -1244,13 +1689,22 @@ class ScanEngine(
         for (i in 0 until menu.length()) {
             val name = menu.getString(i)
             val rect = try {
-                profile.rect("char_interface.leftMenu.$name")
+                profile.rect("screens.char_interface.leftMenu.$name")
             } catch (e: Exception) {
                 Log.w(TAG, "navigate: menu '$name' missing in profiles.char_interface.leftMenu (${e.message})")
                 continue
             }
             actions.click(rect.centerX, rect.centerY)
-            delay(CLICK_SETTLE_MS)
+            // 页面切换动画较点击 settle 更长 → 先等页面稳定再读，否则读到上一页
+            // ⚠️ 时延可被 TimingOverrides 覆盖（默认 = 原常量，逐位一致）
+            val navWait = TimingOverrides.navSettleMs
+            tmNavMs += navWait
+            delay(navWait)
+            // §15 P0-1：点一个菜单即读对应页（旧实现点完全部菜单再统一读 → 读命座时已停在天赋页，恒 0）
+            when {
+                name.contains("命之座") -> readConstellation()
+                name.contains("天赋") -> readTalent()
+            }
         }
     }
 
@@ -1356,6 +1810,7 @@ class ScanEngine(
         }
         Log.i(TAG, "exit step reached")
         vars.stopRequested = true // 终止扫描（run() 与 pagedGrid 均检查）
+        vars.stopReason = "exit" // flow 正常走完（≠ stopWhen 命中）
     }
 
     /**
@@ -1380,7 +1835,8 @@ class ScanEngine(
         val actual = try {
             when (zone) {
                 "artifact.panel.astral" -> VoteJudges.panelAstral(frame, profile, 0).matched
-                "artifact.panel.lock" -> VoteJudges.panelLock(frame, profile, 0).matched
+                "artifact.panel.lock" -> VoteJudges.panelLock(frame, profile, 0).matched ||
+                    VoteJudges.panelLock(frame, profile, profile.zhushengShiftPx).matched
                 else -> {
                     Log.w(TAG, "verify: zone '$zone' not supported in top-level context")
                     return
@@ -1434,6 +1890,17 @@ class ScanEngine(
         }
     }
 
+    /** §15 P2：ifMatch when 表达式变量表（Boolean→0/1，与 [Expr] 求值约定一致；null 视为 false/0）。 */
+    private fun exprVars(): Map<String, Any?> = mapOf(
+        "curLock" to (vars.curLock ?: false),
+        "gridLocked" to (vars.gridLocked ?: false),
+        "locked" to (vars.locked ?: false),
+        "favorited" to (vars.favorited ?: false),
+        "crafted" to vars.crafted,
+        "rarity" to vars.rarity,
+        "level" to vars.level,
+    )
+
     private suspend fun executeVisitStep(
         step: JSONObject,
         gridKey: String,
@@ -1453,10 +1920,21 @@ class ScanEngine(
                     if (vars.currentTask == null) {
                         Log.i(TAG, "ifMatch: no plan injected (vars.currentTask null), then skipped")
                     } else {
-                        val thenSteps = step.getJSONArray("then")
-                        for (i in 0 until thenSteps.length()) {
-                            executeVisitStep(thenSteps.getJSONObject(i), gridKey, col, row, index, ctx, prof, snapMode)
-                            if (vars.stopRequested) break
+                        // §15 P2：可选 when 布尔表达式（[Expr] 引擎，标识符查 exprVars）→ 不满足则跳过 then。
+                        // 例：when:"curLock == false" 仅对已解锁件执行加锁，避免盲 toggle 误解锁已锁件（数据腐蚀）。
+                        val whenExpr = step.optString("when", "")
+                        val pass = if (whenExpr.isNotEmpty()) {
+                            runCatching { Expr.eval(whenExpr, exprVars()) }.getOrElse { e ->
+                                Log.w(TAG, "ifMatch when eval failed: '$whenExpr' ${e.message}")
+                                false
+                            }.also { if (!it) Log.d(TAG, "ifMatch when='$whenExpr' false, then skipped") }
+                        } else true
+                        if (pass) {
+                            val thenSteps = step.getJSONArray("then")
+                            for (i in 0 until thenSteps.length()) {
+                                executeVisitStep(thenSteps.getJSONObject(i), gridKey, col, row, index, ctx, prof, snapMode)
+                                if (vars.stopRequested) break
+                            }
                         }
                     }
                 }
@@ -1469,20 +1947,79 @@ class ScanEngine(
                         ctx.release()
                         ctx.frame = freshFrame()
                     } else {
-                    // fast.at=$cell.center + 两级（fallback ocrAnchor 验证详情面板）
+                    // fast.at=$cell.center（缺省）/ 字面 [x,y] / profile 引用 $zones.*.*
                     // prof = 页面网格偏移视图（§12.5）：点击坐标随相位平移，panel 类坐标不受影响
-                    val center = prof.cellCenter(gridKey, index)
-                    actions.click(center.x, center.y)
-                    if (gridKey == "artifact_backpack") {
-                        // yas clickDelay 同构：固定短睡 → 抓一帧管到底（vote/parsePanel 复用），
-                        // **不做切换确认**——stale 读由内容指纹去重兜底（浪费周期 ~clickDelay 而非 1.5s）。
-                        // 实测面板内容稳定点 ~250ms（+150ms 指纹已变但未稳，+270ms 稳定）
-                        delay(clickDelayMs)
-                        ctx.release() // 面板切换，上一格共享帧作废
-                        ctx.frame = freshFrame()
+                    val cellCenter = prof.cellCenter(gridKey, index)
+                    val (cx, cy) = runCatching {
+                        val fast = step.optJSONObject("fast")
+                        when (val at = fast?.opt("at")) {
+                            is String -> when {
+                                at == "\$cell.center" || at.isEmpty() -> cellCenter.x to cellCenter.y
+                                at == "\$zones.artifact.panel.lock" -> lockClickAdaptive()
+                                at.startsWith("$") -> {
+                                    val r = profile.rect(at.removePrefix("$"))
+                                    r.centerX to r.centerY
+                                }
+                                else -> cellCenter.x to cellCenter.y
+                            }
+                            is JSONArray -> {
+                                val p = profile.scalePoint(at.getInt(0), at.getInt(1))
+                                p.x to p.y
+                            }
+                            else -> cellCenter.x to cellCenter.y
+                        }
+                    }.getOrElse { e ->
+                        Log.w(TAG, "click fast.at 解析失败: ${e.message}，回退 cell center")
+                        cellCenter.x to cellCenter.y
+                    }
+                    Log.i(TAG, "click cell($col,$row) fast.at -> ($cx,$cy)")
+                    // §15 P1-1：点击前记录面板名区指纹，点击后轮询至变化（固定延时治不了
+                    // 武器面板切换时长波动，恒滞后一格 → 内容指纹去重误杀）
+                    // ⚠️ 2026-09-10 修：角色遍历网格 key 是 `char_strip`，但角色面板字段挂在该 key 下
+                    // 并不存在（`panels.char_strip.*` 无），旧代码 → nameRect=null → 落到固定 `delay(PANEL_REFRESH_MS)`
+                    // 兜底 → 抓帧时右面板「名字/等级」淡入未完成 → parsePanel 读到空（header 在左上瞬时变故正常）。
+                    // 回退候选：角色线一律用 `panels.char_profile.name`。
+                    val nameRect = listOf("panels.$gridKey.name", "panels.char_profile.name")
+                        .firstNotNullOfOrNull { p -> runCatching { profile.rect(p) }.getOrNull() }
+                    // §15 P1-1：点击前记录面板名文本，点击后轮询 OCR 至文本变化（亮度指纹会被
+                    // 面板动画误触发提前退出 → 读到上一件 → 内容指纹去重误杀）
+                    val beforeName = nameRect?.let { r -> ctx.frame?.let { f -> ocr?.readLines(f, listOf(r))?.firstOrNull() } }
+                    val clickOk = actions.click(cx, cy)
+                    Log.i(TAG, "visit cell($col,$row) idx=$index click=($cx,$cy) ok=$clickOk")
+                    if (nameRect != null && beforeName != null && ocr != null) {
+                        var waited = 0L
+                        // ⚠️ 2026-09-10 修：原判据「名字一变就 break」→ 面板淡入**早期**名字文本就已变化，
+                        // 立刻抓帧时「等级/属性」尚未渲染 → parsePanel 读到空（首格无切换故正常，后续格全空）。
+                        // 改为「已变 AND 连续两次读数一致」= 面板已稳定。
+                        var prev: String? = null
+                        var stableSame = 0
+                        val pStep = TimingOverrides.panelPollMs
+                        while (waited < PANEL_CHANGE_WAIT_MAX_MS) {
+                            delay(pStep); waited += pStep; tmPanelMs += pStep
+                            val f = freshFrame()
+                            val now = try { ocr.readLines(f, listOf(nameRect)).firstOrNull() } finally { f.release() }
+                            val c = now?.let { StatParser.clean(it) }?.takeIf { it.isNotEmpty() }
+                            if (c != null && c != StatParser.clean(beforeName) && c == prev) break
+                            // ★ 2026-09-11 效率修：相邻两件**同名**时上面的「已变」条件永不成立 →
+                            //   每格白等满 PANEL_CHANGE_WAIT_MAX_MS(6s)。实测 weapon_scan 63 格里有 9 格打满
+                            //   （P90=6.50s，占全流程 ~54s/100s）。加兜底：名字**未变但已连续稳定**累计
+                            //   PANEL_STABLE_FALLBACK_MS → 判定「面板本来就是这个件」（相邻同名/同件），提前退出。
+                            //   稳妥性：淡入过程中读数不稳定（不会连续相等），故稳定即视为已渲染完。
+                            stableSame = if (c != null && c == prev) stableSame + 1 else 0
+                            val needSame = (TimingOverrides.panelStableFallbackMs / pStep).coerceAtLeast(1L)
+                            if (stableSame.toLong() >= needSame) break
+                            prev = c
+                        }
                     } else {
-                        // weapon 等其余 grid：保留固定 settle + fallback 面板打开校验（旧路径）
-                        delay(CLICK_SETTLE_MS)
+                        val pWait = TimingOverrides.panelPollMs.coerceAtMost(PANEL_REFRESH_MS)
+                        tmPanelMs += pWait
+                        delay(pWait)
+                    }
+                    ctx.release() // 面板切换，上一格共享帧作废
+                    ctx.frame = freshFrame()
+                    if (gridKey == "artifact_backpack") {
+                        Log.i(TAG, "visit cell($col,$row) idx=$index freshFrame acquired")
+                    } else {
                         val ocrGateway = ocr
                         val fallback = step.optJSONObject("fallback")
                         if (fallback != null && ocrGateway != null) {
@@ -1499,7 +2036,7 @@ class ScanEngine(
                                     }.getOrDefault(true)
                                     if (!ok) {
                                         Log.w(TAG, "fallback: panel not detected at $region, retry click")
-                                        actions.click(center.x, center.y)
+                                        actions.click(cx, cy)
                                         delay(CLICK_SETTLE_MS)
                                     }
                                 }
@@ -1511,15 +2048,19 @@ class ScanEngine(
                 "parsePanel" -> {
                     // §14 P3：角色概览面板走独立解析分支（字段与圣遗物面板不同构）
                     if (step.optString("panel") == "char_profile") {
-                        parseCharacterPanel(step, ctx)
+                        // ⚠️ 2026-09-10 修：角色 visit 在 click 与 parsePanel 之间有 navigate(属性) 复位步骤，
+                        // 而 ctx 缓存的是 **navigate 之前**的帧 → 复用会读到旧页（天赋页 → name ROI 读到天赋名）。
+                        // 故角色面板一律取新帧（每次多 1 次抓帧，代价可忽略）。
+                        parseCharacterPanel(step, null)
                     } else {
                         parsePanel(step, ctx)
                     }
                 }
                 "navigate" -> {
                     navigate(step)
-                    // §14 P3：navigate 后判读命座/天赋（character_scan.read 数组）
-                    readAfterNavigate(step)
+                    // §15 P0-1：有 leftMenu 时已在 navigate 内逐页读；无 leftMenu 才走 read 数组兜底
+                    val menuLen = step.optJSONArray("leftMenu")?.length() ?: 0
+                    if (menuLen == 0) readAfterNavigate(step)
                 }
                 "dialog" -> dialog(step)
                 "verify" -> verify(step)
@@ -1562,6 +2103,7 @@ class ScanEngine(
                 "weapon.card.starStrip" -> {
                     val r = VoteJudges.weaponStarStrip(frame, prof, requireNotNull(gridKey), col, row)
                     vars.rarity = r.count
+                    Log.d(TAG, "vote starStrip c$r.count col=$col row=$row (D 诊断)")
                 }
                 "weapon.card.lockBadge" -> {
                     val r = VoteJudges.cardLockBadgeByZone(frame, prof, requireNotNull(gridKey), "weapon.card.lockBadge", col, row)
@@ -1572,7 +2114,10 @@ class ScanEngine(
                     vars.crafted = VoteJudges.panelZhusheng(frame, profile).matched
                 }
                 "artifact.panel.lock" -> {
-                    vars.locked = VoteJudges.panelLock(frame, profile, yShift).matched
+                    // 双区判定：同一单件名可普通(锁徽 y)/祝圣(锁徽 y+shift)两种面板（2560 实测 744 vs 808），
+                    // 任一区 gold 达阈即已锁；artifact_lock flow 不投 zhusheng，故弃 vars.crafted 改自动。
+                    vars.locked = VoteJudges.panelLock(frame, profile, 0).matched ||
+                        VoteJudges.panelLock(frame, profile, profile.zhushengShiftPx).matched
                     if (step.optString("as") == "curLock") vars.curLock = vars.locked
                 }
                 "artifact.panel.astral" -> {
@@ -1580,6 +2125,13 @@ class ScanEngine(
                 }
                 "artifact.rarity" -> {
                     vars.rarity = VoteJudges.rarityFromBanner(frame, profile)
+                }
+                // ★ 2026-09-11：武器星级改由**详情面板星行**逐格判定（对齐圣遗物 starBand），
+                //   取代卡片 starStrip —— 后者在 3★/4★ 边界抖动（同件两次读出 3★/4★，36 件中 10 件）。
+                //   面板星行是固定坐标、大而清晰；5★ 大星带辉光会连成一片，故必须逐格采样（countStars 已是逐格）。
+                "weapon.panel.starBand" -> {
+                    vars.rarity = countStars(frame, "weapon_backpack")
+                    Log.i(TAG, "weapon panel stars = ${vars.rarity}")
                 }
                 else -> Log.w(TAG, "vote zone '$zoneKey' not implemented, skipped")
             }
@@ -1868,7 +2420,18 @@ class ScanEngine(
 
     // ---- #10 stopWhen：表达式谓词（D3）----
     private fun stopWhen(step: JSONObject) {
-        val expr = step.getString("expr")
+        // 显式模式优先（不再靠 expr 正则猜分支）：mode=duplicateStreak 的判据在 emitCharacter 求值
+        // （那里才拿得到刚解析出的角色名与已入库集合；flow 顺序 emit→stopWhen 时 charName 已被清空）。
+        if (step.optString("mode") == "duplicateStreak") {
+            charDupStreakLimit = step.optInt("streak", 3)
+            Log.i(TAG, "stopWhen 登记 mode=duplicateStreak streak=$charDupStreakLimit（判据在 emitCharacter 求值）")
+            return
+        }
+        val expr = step.optString("expr")
+        if (expr.isEmpty()) {
+            Log.w(TAG, "stopWhen: 既无 mode 也无 expr，忽略")
+            return
+        }
         // §14 P1：panelMatch(target, tol=0.1) —— Expr 不支持函数调用，此处直接求值 [hardMatch]
         if (expr.contains("panelMatch(")) {
             val task = vars.currentTask
@@ -1878,9 +2441,14 @@ class ScanEngine(
             }
             val tol = Regex("tol\\s*=\\s*([0-9.]+)").find(expr)?.groupValues?.getOrNull(1)
                 ?.toDoubleOrNull() ?: 0.1
-            if (hardMatch(task, tol)) {
+            val why = StringBuilder()
+            if (hardMatch(task, tol, why)) {
                 vars.stopRequested = true
-                Log.i(TAG, "stopWhen triggered (panelMatch tol=$tol): $expr")
+                vars.stopReason = "stopWhen"
+                Log.i(TAG, "stopWhen triggered (panelMatch tol=$tol): $expr | $why")
+            } else {
+                // 未命中也要留痕：否则「判据不生效」与「确实不匹配」在日志上不可区分。
+                Log.i(TAG, "panelMatch 未命中 (tol=$tol): $why")
             }
             return
         }
@@ -1893,11 +2461,15 @@ class ScanEngine(
         // §14 复核：character_scan 的 `name == roster[0]`（首名重现=遍历完）。
         // Expr 仅支持数值、不支持下标/字符串比较，且 tokenize 遇 '[' 会抛 EvalException → 特判。
         // 语义：当前角色草稿名 == 首个已入库角色名（且已入库 ≥1 条）→ 绕回起点，停止。
-        if (expr.contains("roster[0]") || (expr.contains("name") && expr.contains("=="))) {
+        if (expr.contains("roster[0]")) {
             val first = resultsCharacters.firstOrNull()?.name
-            if (!first.isNullOrEmpty() && charName == first) {
+            // ⚠️ 取 charName.ifEmpty{lastCharName}：`emitCharacter` 末尾清空草稿，
+            //    而本步在 emit 之后 ⇒ 只看 charName 会恒为空、判据静默失效（2026-09-11 修）。
+            val cur = charName.ifEmpty { lastCharName }
+            if (!first.isNullOrEmpty() && cur == first) {
                 vars.stopRequested = true
-                Log.i(TAG, "stopWhen triggered (首名重现): 当前=$charName 首名=$first 已入库=${resultsCharacters.size}")
+                vars.stopReason = "stopWhen"
+                Log.i(TAG, "stopWhen triggered (首名重现): 当前=$cur 首名=$first 已入库=${resultsCharacters.size}")
             }
             return
         }
@@ -1909,6 +2481,7 @@ class ScanEngine(
         if (hit) {
             // scope=cell（本页后停）：置 flag，页遍历结束后停止；scope=page 立即停
             vars.stopRequested = true
+            vars.stopReason = "stopWhen"
             Log.i(TAG, "stopWhen triggered ($scope): $expr")
         }
     }
@@ -1933,15 +2506,41 @@ class ScanEngine(
         const val STAR_GOLD_THRESHOLD = 100 // starBand.judge: 格内金像素>100 → 星亮
         const val ANCHOR_RETRIES = 3
         const val ANCHOR_RETRY_DELAY_MS = 1500L
+        // §15 归位主界面（GOODScanner return_to_main_ui 同参数）
+        const val RETURN_HOME_ATTEMPTS = 8
+        const val RETURN_HOME_SETTLE_MS = 900L
+        // §15 P0-1：左侧菜单切页后的稳定等待（长于普通点击，动画约 600~800ms）
+        const val NAVIGATE_PAGE_SETTLE_MS = 900L
+        // §15 P1-1：点格后详情面板刷新等待（武器面板实测切换 >300ms 恒滞后一格 → 取 550 留余量）
+        const val PANEL_REFRESH_MS = 550L
+        /** 面板名「未变但已稳定」的兜底等待：相邻同名时不至于打满 6s 上限（实测省 ~54s/100s）。 */
+        const val PANEL_STABLE_FALLBACK_MS = 600L
+        // §15 P1-1：点格后面板变化轮询上限（武器详情 3D 加载慢，实测切换可 >2s）
+        const val PANEL_CHANGE_WAIT_MAX_MS = 6000L
         // 自适应 settle（替代固定 PAGE_SETTLE）：轮询指纹至连续稳定，自动标定各设备翻页动画时长
         const val SETTLE_POLL_MS = 120L
         const val SETTLE_STABLE_MS = 300L
-        const val SETTLE_MAX_MS = 3000L
+        const val SETTLE_MAX_MS = 6000L
         const val SETTLE_FRAME_TIMEOUT_MS = 800L
+        // 帧间差异比例阈值：相邻帧/翻页前后帧 RGB 四比特差异占比 ≤ 此值即视为"同帧/已到顶"。
+        // 真机逐帧抖动/微动画使精确哈希相等几乎不成立 → 改用比例阈值（GRID_SIMILAR_DIFF）。
+        const val GRID_SIMILAR_DIFF = 0.10f
+        /**
+         * 「回顶到顶」判据阈值（松）。误判到顶只多滑一次（便宜），漏判则白滑满
+         * [MAX_SCROLL_TOP_ROUNDS] 次（贵）→ 代价不对称故放松。实测噪声带 ≤0.22、真实位移 ≥0.72，
+         * 0.35 落在两者之间的安全带内（含 4-bit 量化容差 [VoteJudges.THUMB_DIFF_TOL] 后噪声更低）。
+         */
+        const val GRID_END_DIFF = 0.35f
+        /** 诊断用：VoteJudges.gridThumb 的缩略图尺寸（24×16），仅用于掩码日志与长度校验。 */
+        const val THUMB_COLS = 24
+        const val THUMB_ROWS = 16
         // §12.5 相位校正（2026-09-05）：|φ| 超过卡片半高（pagedGrid 内按 geometry 计算）才补滑，最多 2 次
         const val MAX_FINISH_SWIPES = 2
         /** §14 A3：snap 遍历最大轮数兜底（防指纹判据失效时死循环；正常由 peek 消失终止）。 */
         const val MAX_SNAP_ROUNDS = 400
+        const val MAX_SCROLL_TOP_ROUNDS = 12
+        const val GRID_TOP_STABLE_ROUNDS = 2
+        const val MAX_ROSTER_PAGES = 50
         /** §14 P1：筛选面板翻页上限（防指纹判据失效时死循环）。 */
         const val MAX_FILTER_PAGES = 60
         /**
@@ -1958,8 +2557,26 @@ class ScanEngine(
         val CHAIN_ANCHOR_PATHS = mapOf(
             "bagpack" to "screens.game_home.anchors.bagpack",
             "character" to "screens.game_home.anchors.character",
+            // auto_equip enterScreen 链（flow 字面 (x,y) 为 3200 占位，name 命中即走 profile 机读）
+            "game_home→character" to "screens.game_home.anchors.character",
+            "圣遗物菜单→tihuan" to "screens.char_interface.artifactTab.tihuan",
             "artifact_tab" to "screens.artifact_backpack.tab",
             "weapon_tab" to "screens.weapon_backpack.tab",
+            "tian" to "screens.char_interface.tianBtn",
+            // 角色选择弹层收起钮：⚠️ 田在弹层态被弹层底栏覆盖，不能当开关用 → 必须点这个
+            "弹层收起" to "zones.char_popup.collapse.rect",
+            "filterRoundBtn" to "screens.artifact_backpack.filterRoundBtn",
+            "filterSetPlus" to "screens.dialogs.filterPanel.setPlus.rect",
+            "filterPanel.setPlus" to "screens.dialogs.filterPanel.setPlus.rect",
+            "fiveStarPill" to "screens.artifact_backpack.fiveStarToggle.pill",
+            // auto_equip setFilter entry=PILL：套装筛选 pill 直达（整条）
+            "pill 直达：整条" to "screens.artifact_manage.pill.whole",
+            // preReset 方案B 排序复位：排序圆钮 + 排序弹窗确认（2560 confirm center 692,1320）
+            "sortBtn" to "screens.artifact_manage.sortBtn",
+            "sortPopupConfirm" to "screens.dialogs.sortPopup.confirm",
+            // 详情页「替换」快捷钮（char_interface→artifact_manage 的入口）；非管理界面内的 leftBtn
+            "tihuan" to "screens.char_interface.artifactTab.tihuan",
+            "圣遗物菜单" to "screens.char_interface.leftMenu.圣遗物",
         )
     }
 }

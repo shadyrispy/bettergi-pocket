@@ -36,7 +36,6 @@ class ScreenCaptureController(
     private var imageReader: ImageReader? = null
     private var callback: MediaProjection.Callback? = null
     private var densityDpi: Int = DisplayMetrics.DENSITY_DEVICE_STABLE
-    private var rgbaScratch = ByteArray(0)
     private var hasCachedFrame = false
     private var cachedWidth = 0
     private var cachedHeight = 0
@@ -44,6 +43,90 @@ class ScreenCaptureController(
     private var lastFrameElapsedMs = 0L
     private var lastRecoverElapsedMs = 0L
     private var displayCreatedElapsedMs = 0L
+    private var firstFrameLogged = false
+
+    private var cachedRgba = ByteArray(0)
+    @Volatile
+    private var frameThreadRunning = false
+    private var frameThread: Thread? = null
+
+    /**
+     * 独立消费线程：循环 acquireLatestImage()，始终把最新帧拷进缓存。
+     *
+     * 不依赖 OnImageAvailableListener —— 华为 EMUI 上该回调经常不触发，导致
+     * 永远收不到首帧。poll 循环（scrcpy 同款范式）在所有 ROM 上都能稳定出帧：
+     * 内容变化时系统持续产帧，我们持续消费；内容静态时不再产帧，缓存保留上一帧，
+     * OCR 服务到的正是当前屏幕，符合预期。
+     */
+    private fun startFramePollerLocked() {
+        if (frameThreadRunning) return
+        frameThreadRunning = true
+        val thread = Thread({
+            var nullCount = 0
+            while (frameThreadRunning) {
+                val reader = synchronized(lock) { imageReader } ?: break
+                val image = try {
+                    reader.acquireLatestImage()
+                } catch (_: Throwable) {
+                    null
+                }
+                if (image != null) {
+                    try {
+                        val w = image.width
+                        val h = image.height
+                        val plane = image.planes.firstOrNull()
+                        if (plane != null) {
+                            val rowBytes = w * plane.pixelStride
+                            val size = h * rowBytes
+                            synchronized(lock) {
+                                if (cachedRgba.size != size) cachedRgba = ByteArray(size)
+                                MatOps.copyRgbaImage(image, cachedRgba)
+                                cachedWidth = w
+                                cachedHeight = h
+                                cachedTimestampNs = image.timestamp
+                                hasCachedFrame = true
+                                lastFrameElapsedMs = SystemClock.elapsedRealtime()
+                            }
+                            if (!firstFrameLogged) {
+                                firstFrameLogged = true
+                                Log.i(TAG, "first frame acquired ${w}x$h ts=${image.timestamp}")
+                            } else if (nullCount > 0) {
+                                Log.d(TAG, "frame acquired ${w}x$h after $nullCount nulls")
+                                nullCount = 0
+                            }
+                        }
+                    } finally {
+                        image.close()
+                    }
+                } else {
+                    nullCount++
+                    if (nullCount == 1 || nullCount % 100 == 0) {
+                        Log.d(TAG, "frame poll null (count=$nullCount)")
+                    }
+                    try {
+                        Thread.sleep(FRAME_POLL_MS)
+                    } catch (_: InterruptedException) {
+                        break
+                    }
+                }
+            }
+            Log.d(TAG, "frame poller exited")
+        }, "BetterGICaptureFrames")
+        thread.start()
+        frameThread = thread
+    }
+
+    private fun stopFramePollerLocked() {
+        frameThreadRunning = false
+        val t = frameThread
+        frameThread = null
+        if (t != null) {
+            try {
+                t.join(1000)
+            } catch (_: Throwable) {
+            }
+        }
+    }
 
     fun isRunning(): Boolean = synchronized(lock) {
         mediaProjection != null && virtualDisplay != null && imageReader != null
@@ -90,8 +173,8 @@ class ScreenCaptureController(
     }
 
     /**
-     * 丢掉积压帧，不拷像素、不转 Mat。
-     * VirtualDisplay 仍会按 vsync 产出，但 ImageReader 最多缓存 2 张，多的由系统丢弃。
+     * 丢掉积压帧（保留缓存）。VirtualDisplay 仍按 vsync 产出，ImageReader 缓存上限内
+     * 多余的由系统丢弃。poll 循环会立即补回最新一帧。
      */
     fun discardLatestImages() {
         synchronized(lock) {
@@ -103,49 +186,22 @@ class ScreenCaptureController(
     }
 
     /**
-     * 只在识别需要时调用：拷一帧最新图并转 BGR。中间帧已被 [android.media.ImageReader.acquireLatestImage] 丢掉。
+     * 返回后台 poll 线程已缓存的最新帧（RGBA → BGR）。
      *
-     * 单应用共享在画面几乎静止时可能暂时不再出帧；换 ImageReader 时也会空一拍。
-     * 这两种情况都复用上一帧 RGBA，避免识别直接停掉。拷像素期间持锁，防止
-     * [MediaProjection.Callback.onCapturedContentResize] 关掉仍在使用的 ImageReader。
+     * 静态界面不再产帧 → 缓存保留上一帧，这里持续服务（不按年龄拒帧）：
+     * 扫描背包/武器界面本来就是静态的，缓存帧即当前屏幕，正是 OCR 需要的。
      */
     fun acquireLatestBgr(): CapturedBgrFrame? = synchronized(lock) {
-        val image = try {
-            imageReader?.acquireLatestImage()
-        } catch (_: Throwable) {
-            null
-        }
-        if (image != null) {
-            try {
-                val width = image.width
-                val height = image.height
-                val packed = rgbaScratch(width * height * 4)
-                MatOps.copyRgbaImage(image, packed)
-                cachedWidth = width
-                cachedHeight = height
-                cachedTimestampNs = image.timestamp
-                hasCachedFrame = true
-                lastFrameElapsedMs = SystemClock.elapsedRealtime()
-                return CapturedBgrFrame(
-                    width = width,
-                    height = height,
-                    bgr = MatOps.rgbaToBgr(width, height, packed),
-                    timestampNs = image.timestamp,
-                )
-            } finally {
-                image.close()
-            }
-        }
-
-        val now = SystemClock.elapsedRealtime()
-        maybeRecoverStalledReaderLocked(now)
-        if (!hasCachedFrame || now - lastFrameElapsedMs > CACHE_MAX_AGE_MS) {
+        maybeRecoverStalledReaderLocked()
+        if (!hasCachedFrame) {
+            Log.d(TAG, "acquireLatestBgr no cache yet")
             return null
         }
+        Log.v(TAG, "acquireLatestBgr ${cachedWidth}x$cachedHeight age=${SystemClock.elapsedRealtime() - lastFrameElapsedMs}ms")
         return CapturedBgrFrame(
             width = cachedWidth,
             height = cachedHeight,
-            bgr = MatOps.rgbaToBgr(cachedWidth, cachedHeight, rgbaScratch),
+            bgr = MatOps.rgbaToBgr(cachedWidth, cachedHeight, cachedRgba),
             timestampNs = cachedTimestampNs,
         )
     }
@@ -181,6 +237,9 @@ class ScreenCaptureController(
         val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, IMAGE_READER_MAX_IMAGES)
         imageReader = reader
         displayCreatedElapsedMs = SystemClock.elapsedRealtime()
+        hasCachedFrame = false
+        firstFrameLogged = false
+
         virtualDisplay = projection.createVirtualDisplay(
             "BetterGIPocketShare",
             width,
@@ -191,6 +250,8 @@ class ScreenCaptureController(
             null,
             null,
         )
+        Log.i(TAG, "ImageReader+VirtualDisplay ready ${width}x$height")
+        startFramePollerLocked()
     }
 
     /**
@@ -209,6 +270,8 @@ class ScreenCaptureController(
         display.resize(width, height, densityDpi)
         imageReader = newReader
         lastRecoverElapsedMs = SystemClock.elapsedRealtime()
+        hasCachedFrame = false
+        firstFrameLogged = false
         try {
             current?.close()
         } catch (_: Throwable) {
@@ -216,17 +279,20 @@ class ScreenCaptureController(
     }
 
     /**
-     * ImageReader 不再出帧时，用同一 VirtualDisplay 换一块 surface。
-     * 每个 MediaProjection 只能 createVirtualDisplay 一次，不能整段重建。
+     * 始终未收到首帧时（如 ImageReader 在某 ROM 下死掉），用同一 VirtualDisplay 换一块
+     * surface。每个 MediaProjection 只能 createVirtualDisplay 一次，不能整段重建。
+     * 注意：静态界面本就不产帧，hasCachedFrame 一旦为 true 绝不触发此处，避免无谓抖动。
      */
-    private fun maybeRecoverStalledReaderLocked(now: Long) {
+    private fun maybeRecoverStalledReaderLocked() {
         if (virtualDisplay == null || imageReader == null) return
-        val stalledSince = if (lastFrameElapsedMs > 0) lastFrameElapsedMs else displayCreatedElapsedMs
+        if (hasCachedFrame) return
+        val stalledSince = if (displayCreatedElapsedMs > 0) displayCreatedElapsedMs else lastFrameElapsedMs
         if (stalledSince <= 0) return
+        val now = SystemClock.elapsedRealtime()
         if (now - stalledSince < RECOVER_AFTER_MS) return
         if (now - lastRecoverElapsedMs < RECOVER_COOLDOWN_MS) return
         lastRecoverElapsedMs = now
-        Log.w(TAG, "screen capture produced no frames for ${now - stalledSince}ms, recreating ImageReader")
+        Log.w(TAG, "no first frame for ${now - stalledSince}ms, recreating ImageReader")
         val current = imageReader ?: return
         val width = current.width
         val height = current.height
@@ -235,6 +301,9 @@ class ScreenCaptureController(
         val newReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, IMAGE_READER_MAX_IMAGES)
         display.setSurface(newReader.surface)
         imageReader = newReader
+        displayCreatedElapsedMs = now
+        hasCachedFrame = false
+        firstFrameLogged = false
         try {
             current.close()
         } catch (_: Throwable) {
@@ -260,6 +329,8 @@ class ScreenCaptureController(
     }
 
     private fun releaseDisplayLocked() {
+        stopFramePollerLocked()
+
         try {
             virtualDisplay?.release()
         } catch (_: Throwable) {
@@ -273,6 +344,7 @@ class ScreenCaptureController(
         } finally {
             imageReader = null
         }
+
         hasCachedFrame = false
         cachedWidth = 0
         cachedHeight = 0
@@ -280,13 +352,8 @@ class ScreenCaptureController(
         lastFrameElapsedMs = 0L
         lastRecoverElapsedMs = 0L
         displayCreatedElapsedMs = 0L
-    }
-
-    private fun rgbaScratch(size: Int): ByteArray {
-        if (rgbaScratch.size != size) {
-            rgbaScratch = ByteArray(size)
-        }
-        return rgbaScratch
+        firstFrameLogged = false
+        cachedRgba = ByteArray(0)
     }
 
     private fun defaultDisplaySpec(): DisplaySpec {
@@ -312,7 +379,7 @@ class ScreenCaptureController(
     private companion object {
         const val TAG = "BetterGI.Capture"
         const val IMAGE_READER_MAX_IMAGES = 2
-        const val CACHE_MAX_AGE_MS = 2500L
+        const val FRAME_POLL_MS = 8L
         const val RECOVER_AFTER_MS = 800L
         const val RECOVER_COOLDOWN_MS = 2500L
     }

@@ -1,6 +1,9 @@
 package com.bettergi.pocket.scan
 
+import android.util.Log
 import org.opencv.core.Mat
+import org.opencv.core.Size
+import org.opencv.imgproc.Imgproc
 
 /**
  * 像素投票判据（业务原语 #4 vote 的执行体）。
@@ -82,14 +85,23 @@ object VoteJudges {
     }
 
     /**
-     * 武器金条 vote：zone rel 读自 profiles（[30,170,170,212]），金条命中数 → 星级 = round(count/555)。
+     * 武器金条 vote：zone rel/divisor 优先读 profiles，缺省回退 3200x1440 base（[30,170,170,212], 555）。
+     * 2244x1080 等 native profile 必须提供 device-native rel，否则硬编码 rel 会落出卡外。
      * counts 1/3/5★ 样本 ~561/1600/2700 像素（profiles.sample.samples 字段，未在代码内固化）。
      */
     fun weaponStarStrip(frame: Mat, profile: ScreenProfile, gridKey: String, col: Int, row: Int): Result {
-        val rel = intArrayOf(30, 170, 170, 212)
+        val zone = profile.zone("weapon.card.starStrip")
+        val rel = if (zone != null && zone.has("rel")) {
+            val arr = zone.getJSONArray("rel")
+            intArrayOf(arr.getInt(0), arr.getInt(1), arr.getInt(2), arr.getInt(3))
+        } else {
+            intArrayOf(30, 170, 170, 212)
+        }
+        val divisor = zone?.optDouble("divisor", 555.0) ?: 555.0
         val rect = profile.cardRelRect(gridKey, rel, col, row)
         val count = countMatches(frame, rect, GOLD_STRIP)
-        val stars = Math.round(count / 555.0f).coerceIn(0, 5).toInt()
+        val stars = Math.round(count / divisor).coerceIn(0, 5).toInt()
+        Log.d("BetterGI.Vote", "weaponStarStrip[$gridKey]($col,$row): count=$count divisor=$divisor stars=$stars")
         return Result(stars > 0, stars)
     }
 
@@ -180,10 +192,11 @@ object VoteJudges {
         }
     }
 
-    /** 网格区指纹（翻页位移校验）：对网格可见区做稀疏采样哈希。 */
-    fun gridFingerprint(frame: Mat, profile: ScreenProfile, gridKey: String): Long {
-        // 两种几何写法统一（cardOrigin+pitch 与 colX/rowY）——原实现只认前者，
-        // char_popup 取指纹会抛 JSONException。
+    /**
+     * 网格区 ROI（裁剪到帧内）。两种几何写法统一（cardOrigin+pitch 与 colX/rowY）。
+     * 非法（缺字段/越界）返回 null。
+     */
+    private fun gridRoiBounds(frame: Mat, profile: ScreenProfile, gridKey: String): IntArray? {
         val bounds = profile.gridBounds(gridKey)
         val x0: Int
         val y0: Int
@@ -195,7 +208,7 @@ object VoteJudges {
             x1 = bounds.right
             y1 = bounds.bottom
         } else {
-            val grid = profile.rawObject("grids.$gridKey") ?: return 0L
+            val grid = profile.rawObject("grids.$gridKey") ?: return null
             val origin = grid.getJSONArray("cardOrigin")
             val pitch = grid.getJSONArray("pitch")
             val cols = grid.getInt("cols")
@@ -212,23 +225,82 @@ object VoteJudges {
                 profile.scaleY,
             )
         }
-        var hash = 1469598103934665603L
-        val stepX = ((x1 - x0) / 24).coerceAtLeast(1)
-        val stepY = ((y1 - y0) / 16).coerceAtLeast(1)
+        val fx0 = x0.coerceIn(0, frame.cols())
+        val fy0 = y0.coerceIn(0, frame.rows())
+        val fx1 = x1.coerceIn(fx0, frame.cols())
+        val fy1 = y1.coerceIn(fy0, frame.rows())
+        if (fx1 <= fx0 || fy1 <= fy0) return null
+        return intArrayOf(fx0, fy0, fx1, fy1)
+    }
+
+    /**
+     * 网格区缩略图（24×16，每像素 RGB 各 4-bit 量化存一字节，拷贝返回）。
+     * 用于帧间差异判稳/到底——比精确哈希相等更容忍真机逐帧抖动与微动画。
+     * 缩略图经 INTER_AREA 均值，抑制角色 portrait idle 等高频噪声，保留翻页 layout 变化。
+     * 非法返回 null。
+     */
+    fun gridThumb(frame: Mat, profile: ScreenProfile, gridKey: String): ByteArray? {
+        val roi = gridRoiBounds(frame, profile, gridKey) ?: return null
+        val sub = frame.submat(roi[1], roi[3], roi[0], roi[2])
+        val thumb = Mat()
+        Imgproc.resize(sub, thumb, Size(24.0, 16.0), 0.0, 0.0, Imgproc.INTER_AREA)
+        sub.release()
+        val out = ByteArray(thumb.rows() * thumb.cols() * 3)
         val buf = ByteArray(3)
-        var y = y0
-        while (y < y1.coerceAtMost(frame.rows())) {
-            var x = x0
-            while (x < x1.coerceAtMost(frame.cols())) {
-                frame.get(y.coerceIn(0, frame.rows() - 1), x.coerceIn(0, frame.cols() - 1), buf)
-                val v = (buf[0].toInt() and 0xFF) or
-                    ((buf[1].toInt() and 0xFF) shl 8) or
-                    ((buf[2].toInt() and 0xFF) shl 16)
-                hash = (hash xor v.toLong()) * 1099511628211L
-                x += stepX
+        var i = 0
+        for (y in 0 until thumb.rows()) {
+            for (x in 0 until thumb.cols()) {
+                thumb.get(y, x, buf)
+                out[i++] = ((buf[2].toInt() and 0xFF) shr 4).toByte() // R
+                out[i++] = ((buf[1].toInt() and 0xFF) shr 4).toByte() // G
+                out[i++] = ((buf[0].toInt() and 0xFF) shr 4).toByte() // B
             }
-            y += stepY
         }
+        thumb.release()
+        return out
+    }
+
+    /**
+     * 网格区指纹（翻页/到底判据）：gridThumb 的 FNV-1a 哈希。
+     * ⚠️ 仅作快速相等判据；真机逐帧抖动致精确相等几乎不成立，稳定/到底判定请改用
+     * [thumbChangedFraction]（差异比例阈值）。
+     */
+    fun gridFingerprint(frame: Mat, profile: ScreenProfile, gridKey: String): Long {
+        val t = gridThumb(frame, profile, gridKey) ?: return 0L
+        var hash = 1469598103934665603L
+        for (b in t) hash = (hash xor (b.toLong() and 0xFF)) * 1099511628211L
         return hash
     }
+
+    /**
+     * 两帧缩略图差异比例（0..1）：RGB 四比特通道 **差值 > [tol]** 才计为变化像素 / 总像素。
+     * 任一为 null 返回 null（调用方按"未知"处理）。
+     * 用于自适应 settle 与翻页到底/回顶判据，容忍真机逐帧抖动/微动画——原精确哈希相等在真机
+     * 几乎不成立，导致 awaitGridStable 永不收敛（每次打满 SETTLE_MAX_MS）。
+     *
+     * ⚠️ [tol] 不可为 0（严格不等）。缩略图每像素是 ~28×68 原始块的均值再 4-bit 量化，
+     * MediaProjection 的编解码噪声会让块均值在量化边界附近来回跳 **1 个 4-bit 档位**；
+     * 严格不等把这些抖动全记成"变化像素"。2026-09-10 掩码实测（char_popup 回顶）：到顶后
+     * 掩码是**全图零散单像素**（非整块位移），diff 在 0.065~0.22 之间乱跳，横跨 0.10 阈值 →
+     * 同一静止状态时而判顶时而不判（PHASE3 8 次全不判顶的真因）。
+     * 取 tol=2（4-bit 档位允许 ±2，即单通道 ±32/255）滤掉量化边界抖动；真实翻页是整块位移，
+     * 块均值移动远超 2 档（实测 diff 0.72~1.00），不受影响。
+     */
+    fun thumbChangedFraction(a: ByteArray?, b: ByteArray?, tol: Int = THUMB_DIFF_TOL): Float? {
+        if (a == null || b == null) return null
+        if (a.size != b.size) return 1f
+        val n = a.size / 3
+        var diff = 0
+        for (k in 0 until n) {
+            val i = k * 3
+            if (kotlin.math.abs((a[i].toInt() and 0xFF) - (b[i].toInt() and 0xFF)) > tol ||
+                kotlin.math.abs((a[i + 1].toInt() and 0xFF) - (b[i + 1].toInt() and 0xFF)) > tol ||
+                kotlin.math.abs((a[i + 2].toInt() and 0xFF) - (b[i + 2].toInt() and 0xFF)) > tol
+            ) diff++
+        }
+        return diff.toFloat() / n
+    }
+
+    /** 缩略图差异的 4-bit 量化容差（见 [thumbChangedFraction]）：±2 档内视为同，滤量化边界抖动。 */
+    const val THUMB_DIFF_TOL = 2
 }

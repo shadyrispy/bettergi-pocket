@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- M3：主 CTA 按压反馈（金色 ripples）。 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#59C9A36A">
+    <item android:drawable="@drawable/bg_overlay_launch" />
+</ripple>
