@@ -50,6 +50,21 @@
           "note": "★ 2026-09-10 修：上一格的 navigate 把页面留在「天赋」→ 本格 parsePanel 的 name ROI（y208-288）会读到天赋名（实测乱码形如「西风剑术.」「外域剑术.」）→ 必须先复位到属性页再解析。"
         },
         {
+          "do": "assertScreen",
+          "rect": "$panels.char_profile.bottomBar",
+          "expect": "提升指南",
+          "retries": 3,
+          "onFail": "continue",
+          "note": "2026-09-13：**页签级确认**。三个页签（属性/命座/天赋）**左上标题完全相同**（都是 `<元素>/<角色名>`）⇒ 界面级判据区分不了页签，必须用**页内独有文本**。实测（三张 curated 截图全帧 OCR 取差集）：属性页独有 `提升指南`（底部按钮 x[359,485] y[970,1005]，置信 1.00）。"
+        },
+        {
+          "do": "assertScreen",
+          "expect": "元素",
+          "retries": 2,
+          "onFail": "continue",
+          "note": "2026-09-13：页签切换后确认**仍在角色界面**（标题条 `<元素>/<角色名>` 含「元素」，实测 5 张角色相关图全部命中）。⚠️ 已知局限：**页签级（属性/命座/天赋）不改变该标题** ⇒ 这里只能确认「没被弹窗或别的界面顶掉」；页签级判据（左栏选中项高亮/页内独有文本）待补 —— 见 dsl/docs/screen-confirm.md §6。"
+        },
+        {
           "do": "parsePanel",
           "panel": "char_profile",
           "fields": [
@@ -67,9 +82,9 @@
         {
           "do": "navigate",
           "leftMenu": [
-            "命之座",
-            "天赋"
+            "命之座"
           ],
+          "note_tabfix20260913": "2026-09-13 拆步：原为一次性 [命之座, 天赋]。拆开是为了**在两击之间插命座页确认**（readConstellation）—— 三页签左上标题相同、命座页底部为空（无文本正判据），只能靠节点环判据。",
           "read": [
             {
               "page": "char_constellation",
@@ -86,11 +101,39 @@
           ]
         },
         {
+          "do": "readConstellation",
+          "verifyPage": true,
+          "onFail": "continue",
+          "note": "2026-09-13：**命座页确认**（补上三页签里唯一缺的正判据）。判据 = GOODScanner 移植的**节点环亮度**：6 个节点各取环带 ring 与中心 center，锁定态 ring−center 大、激活态小；lockedCount ≥ screens.char_constellation.pageMinLocked(=3) ⇒ 在命座页。实测（2244 / 5 角色）命座页命中 4~6 个，属性页/天赋页同坐标 0 个。⚠️ onFail=continue（先观察、不阻塞）；⚠️ 本步**只读不写 vars** —— 等级（激活数）目前**仍差 1**（阿罗夏 C4 读成 C1-C3，节点中心待逐节点精修），**先不要接进 emit/GOOD**。详见 topics/09-reference-goodscanner.md 与 dsl/docs/screen-confirm.md §11。"
+        },
+        {
+          "do": "navigate",
+          "leftMenu": [
+            "天赋"
+          ],
+          "note": "2026-09-13 拆步的第二击：从命座页点到天赋页（原来与命之座同一 navigate 里连点）。"
+        },
+        {
+          "do": "assertScreen",
+          "rect": "$panels.char_talent.bottomBar",
+          "expect": "天赋演示|战斗天赋",
+          "alts": [
+            {
+              "rect": "$panels.char_talent.lvArea",
+              "expect": "Lv\\."
+            }
+          ],
+          "retries": 3,
+          "onFail": "continue",
+          "note": "2026-09-13：`navigate(命之座→天赋)` 的落点确认。实测天赋页有两态：常态底部 = `天赋演示`；**有可升级天赋时**底部变成 `选中战斗天赋以升级`（此时「天赋演示」按钮不可见、右侧等级区也读空，实测 3/3 未命中）⇒ 判据取 **`天赋演示|战斗天赋`** 覆盖两态（底部按钮 x[1792,1919] y[970,1006]，置信 1.00）。⚠️ **命之座页没有可用的稳定文本**（独有文本只有随角色变化的命座名），左菜单高亮也不可用（实测亮度受背景立绘影响：属性页最亮的竟是「资料」169 vs 属性 159）⇒ 命之座页暂**无页签级判据**，只能用「`元素` 界面级 + 无 `提升指南`/`天赋演示`」间接推断。"
+        },
+        {
           "do": "stopWhen",
           "mode": "duplicateStreak",
           "streak": 3,
+          "dupPageConfirm": 2,
           "action": "Stop",
-          "note": "★ 2026-09-11 用户定：停止条件 = **连续 3 个重复角色**（替代原 expr `name == roster[0]`）。① 原判据**从未生效**：`emitCharacter` 末尾清空 charName，而本步排在 emit 之后 ⇒ 判据读到的名字恒为空。② 「重复」= 该角色名**已在本轮入库过**；列表回卷（头像条可循环滚）或滑动失效时会连续读到已扫过的角色，而 `reachedEnd`（指纹到底）对回卷列表永不触发 ⇒ 本判据是**主收尾条件**。③ 判据在引擎 emitCharacter 内求值（那里才拿得到刚解析的名字与已入库集合），本步只负责**登记阈值**，故必须排在 emit **之前**。④ 重复件不入库（角色侧无 dedupe，入库会污染导出）。"
+          "note": "阈值不再承担「回卷」判据：pagedGrid 内引擎按**该网格一页的卡片数**（cols×traverseRows）自动覆盖（见 ScanEngine.dupLimitEffective）；此处的 3 仅作 snap/rosterFind 等非翻页路径的兜底。"
         },
         {
           "do": "emit",

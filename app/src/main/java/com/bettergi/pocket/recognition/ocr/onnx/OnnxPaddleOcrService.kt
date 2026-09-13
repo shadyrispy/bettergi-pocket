@@ -100,12 +100,57 @@ class OnnxPaddleOcrService(
      */
     override fun recognizeRois(mat: Mat, rois: List<IntRect>): List<OcrResultRegion> {
         if (!engine.ready || mat.empty()) return rois.map { OcrResultRegion(it, "", 0f) }
+        // ★ 2026-09-12 实测结论：**padding 打 batch（原 B2 方案）已回退 —— 收益为负**。
+        //   实测（BlueStacks 2244；两侧各 3 次取中位；只比非等待的「其它」分量＝点击+OCR+导出）：
+        //     武器   42 格：逐槽 206ms/格  →  批量 221ms/格  （+7%，但武器侧样本 7529~9530 方差大 ⇒ 不显著）
+        //     圣遗物 21 格：逐槽 374ms/格  →  批量 437ms/格  （+17%，两侧区间不重叠 ⇒ 确定负优化）
+        //   根因两条：① 计算量按 `n × Wmax` 计，而各槽宽度**异质**（圣遗物 subStats 4 槽
+        //   scaledW=684，其余 5 槽仅 145~389）⇒ n·Wmax / Σw = **1.59×**，窄槽被白白 pad 宽；
+        //   ② 每次调用需分配 `n*3*Wmax*REC_H` 个 float（圣遗物峰值 **3.5MB/格**）再逐行 arraycopy
+        //   ⇒ GC 与内存带宽开销可观。
+        //   精度结论：批量与逐槽**逐字段完全等价**（武器 36 件 vs 改动前 golden、圣遗物 20 件
+        //   批量 vs 逐槽，均 100% 一致）⇒ 纯性能取舍，故回退。
+        //   （若再试：仅当各槽 scaledW 彼此接近时才可能有收益，必须单独实测，勿凭直觉重上。）
         return rois.map { roi ->
             if (roi.isEmpty()) return@map OcrResultRegion(roi, "", 0f)
             val line = recognizeLine(mat, roi)
             if (line == null || line.text.isBlank()) OcrResultRegion(roi, "", 0f)
             else OcrResultRegion(roi, line.text, line.score)
         }
+    }
+
+    /**
+     * rec 宽度基准（**只读探针**）：按真实 ROI 宽度测单次 rec 耗时，并回报**输出时间步 T**
+     * （`logits.size / MODEL_CLASS_COUNT`）⇒ 可算出 logits 物化的真实字节数。
+     *
+     * 零张量输入（与 [bench] 同口径）⇒ 只测纯执行开销，不依赖图像内容。
+     */
+    /**
+     * OCR 并行度探针（只读）：按 `spec="1:1,1:2,2:1,3:1"` 逐档建 N 个会话跑真实槽宽，
+     * 报每轮 wall ms。见 [OcrParallelProbe] 的判读说明。
+     */
+    fun parallelProbe(spec: String, widths: IntArray, runs: Int = 5): String {
+        if (!engine.ready) return "engine not ready"
+        return OcrParallelProbe.run(engine.recModelPath, spec, widths, runs)
+    }
+
+    fun recProbe(widths: IntArray, runs: Int = 5): String {
+        if (!engine.ready) return "engine not ready"
+        val sb = StringBuilder("tier=${engine.tier.label} runs=$runs")
+        for (w in widths) {
+            val wi = w.coerceIn(1, REC_W_MAX)
+            val input = FloatBuffer.wrap(FloatArray(3 * REC_H * wi))
+            engine.runRec(input, wi) // 预热
+            val ms = medianMs(runs) { engine.runRec(input, wi) }
+            val logits = engine.runRec(input, wi)
+            val steps = if (logits.isEmpty()) -1 else logits.size / MODEL_CLASS_COUNT
+            val bytes = logits.size.toLong() * 4
+            sb.append(
+                "\n  rec w=$wi ${ms}ms steps=$steps logits=${bytes}B " +
+                    "(${"%.2f".format(bytes / 1048576.0)}MB)",
+            )
+        }
+        return sb.toString()
     }
 
     /**

@@ -92,6 +92,10 @@ class ScriptRunner(
             return onActionDispatched(result != null && result.first)
         }
 
+        override fun resetPassthrough() {
+            dispatchOnMain { overlayController.restoreClickPassthrough() }
+        }
+
         override fun back(): Boolean {
             // 系统返回键清弹窗：无 overlay 交互（返回键目标由系统路由），直接桥调
             val result = dispatchOnMain { InputAccessibilityService.back() to false }
@@ -132,6 +136,50 @@ class ScriptRunner(
     }
 
     /**
+     * 只读计时装饰器（2026-09-12 探针）：在 [actions] 外面包一层，把 click/swipe 的**真实注入耗时**
+     * 累进 [PerfProbe]，供 `scan finished` 后打印一行「分量实测值」。
+     *
+     * ⚠️ 纯委托：不改变任何行为、不新增任何点击（早期方案曾想"额外点一次测耗时"，会污染游戏状态，已否）。
+     * `markActionAt` 的回调链在 [actions] 内部，不受本层影响 ⇒ 帧阈值语义不变。
+     */
+    private val timedActions = object : ScanEngine.ActionGateway {
+        override fun resetPassthrough() = actions.resetPassthrough()
+
+        override fun click(x: Int, y: Int, durationMs: Long): Boolean {
+            val t0 = System.nanoTime()
+            var ok = false
+            try {
+                ok = actions.click(x, y, durationMs)
+                return ok
+            } finally {
+                PerfProbe.addClick(System.nanoTime() - t0, ok)
+            }
+        }
+
+        override fun tap(x: Int, y: Int): Boolean {
+            val t0 = System.nanoTime()
+            var ok = false
+            try {
+                ok = actions.tap(x, y)
+                return ok
+            } finally {
+                PerfProbe.addClick(System.nanoTime() - t0, ok)
+            }
+        }
+
+        override fun swipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean {
+            val t0 = System.nanoTime()
+            try {
+                return actions.swipe(fromX, fromY, toX, toY)
+            } finally {
+                PerfProbe.addSwipe(System.nanoTime() - t0)
+            }
+        }
+
+        override fun back(): Boolean = actions.back()
+    }
+
+    /**
      * 启动扫描流程。flowName 决定 assets/dsl/flows/<flowName>.json（"artifact_scan" | "weapon_scan"）。
      * 名称词典统一加载（dsl/tools/good_names.json → GoodNames），各原语经 NameMatcher 反查。
      */
@@ -143,8 +191,15 @@ class ScriptRunner(
         useAdaptiveDistance: Boolean = false,
         /** 外部任务计划（P4 规则层注入）：artifact_lock 的 targets / auto_equip 的 plan。 */
         plan: List<JSONObject>? = null,
+        /**
+         * 时序覆盖串（调试标定用，形如 `nav=700,poll=120`）。**null = 复位为默认**。
+         * ⚠️ 必须在这里统一 apply：扫描入口有 5 处，若只在 DEBUG_SCAN_FLOW 里 apply，
+         *    其余入口（普通扫描/自动拾取）会**沿用上一轮的覆盖值**。
+         */
+        timingSpec: String? = null,
     ) {
         FlowSource.install(appContext)
+        Log.i(TAG, "timing: ${TimingOverrides.apply(timingSpec)}")
         if (running) {
             Log.w(TAG, "scan already running")
             return
@@ -219,7 +274,7 @@ class ScriptRunner(
                     flowJson = flow,
                     profile = profile,
                     frameSource = frameSource,
-                    actions = actions,
+                    actions = timedActions, // 只读计时装饰器（委托 actions，行为不变）
                     ocr = OcrGatewayImpl(),
                     names = names,
                     listener = listener,

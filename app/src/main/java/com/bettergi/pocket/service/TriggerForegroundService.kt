@@ -28,6 +28,7 @@ import com.bettergi.pocket.genshin.GenshinLaunchMonitor
 import com.bettergi.pocket.genshin.GenshinLauncher
 import com.bettergi.pocket.input.AccessibilityAutomationController
 import com.bettergi.pocket.input.InputAccessibilityService
+import com.bettergi.pocket.input.SwipeMethod
 import com.bettergi.pocket.overlay.OverlayWindowController
 import com.bettergi.pocket.recognition.RecognitionAssets
 import com.bettergi.pocket.recognition.ocr.OcrFactory
@@ -183,7 +184,15 @@ class TriggerForegroundService : Service() {
                 settingsRepository.setScanEnabled(true)
             }
             ACTION_SCAN_STOP -> {
+                // 关设置：UI/悬浮窗入口靠 applySettings 的 `!scanEnabled && isRunning` 分支取消本轮
                 settingsRepository.setScanEnabled(false)
+                // ⚠️ 兜底直停：adb 调试路径（DEBUG_SCAN_FLOW）**不经 scanEnabled 启动**，
+                //   此时 setScanEnabled(false) 是 **no-op**（值未变 ⇒ settingsListener 不触发）
+                //   ⇒ 上面那句停不掉在跑的扫描，以前只能 `am force-stop`（连带丢掉 MediaProjection 授权）。
+                if (scriptRunner.isRunning()) {
+                    scriptRunner.stop()
+                    Log.i(TAG, "scan stop requested (direct abort)")
+                }
             }
             ACTION_DEBUG_SET_SCREEN_SHARE -> {
                 // adb 调试入口：必须用本服务的 repo 实例（否则 settingsListener 不触发）
@@ -226,19 +235,74 @@ class TriggerForegroundService : Service() {
                 com.bettergi.pocket.log.RecognitionLog.verbose = on
                 Log.i(TAG, "recognition log verbose=$on")
             }
+            ACTION_DEBUG_PERF_PROBE -> {
+                // ★ 只读性能探针（2026-09-12）：帧路径拆段 + ROI 口径 + rec 宽度基准。
+                //   目的：为「就绪信号廉价化 / ROI 级 BGR 转换」提供分量实测值
+                //   （见 dsl/verify/_audit/IMAGE-PATH-COST.md §8）。**不改任何行为**。
+                val runs = intent.getIntExtra(EXTRA_RUNS, 30)
+                val roisB64 = intent.getStringExtra(EXTRA_ROIS_B64).orEmpty()
+                val roisCsv = intent.getStringExtra(EXTRA_ROIS).orEmpty()
+                val widthsCsv = intent.getStringExtra(EXTRA_WIDTHS).orEmpty()
+                val stabilityB64 = intent.getStringExtra(EXTRA_STABILITY_B64).orEmpty()
+                if (scriptRunner.isRunning()) {
+                    Log.w(PERF_TAG, "perf probe: 扫描进行中，测量结果会被干扰（建议空闲时跑）")
+                }
+                val rois = if (roisB64.isNotEmpty()) parseRoiCsv(decodeB64(roisB64)) else parseRoiCsv(roisCsv)
+                // ★ ROI 稳定性探针（只读）：`stabilityB64` = base64("name:x,y,w,h;name:…")
+                val stability = if (stabilityB64.isNotEmpty()) parseNamedRois(decodeB64(stabilityB64)) else emptyList()
+                val stabilityFrames = intent.getIntExtra(EXTRA_FRAMES, 60)
+                // ★ OCR 并行度探针（只读）：`ocrpar="1:1,1:2,2:1,3:1"`（k:intra 列表）
+                val ocrPar = intent.getStringExtra(EXTRA_OCR_PAR).orEmpty()
+                // ★ 帧率探针（只读）：`--ei frate 1200`
+                val frateMs = intent.getIntExtra(EXTRA_FRAME_RATE, 0)
+                val widths = if (widthsCsv.isBlank()) {
+                    intArrayOf(145, 220, 405, 684)
+                } else {
+                    widthsCsv.split(',').mapNotNull { it.trim().toIntOrNull() }.toIntArray()
+                }
+                val capturing = captureController.isRunning()
+                scriptRunner.scope.launch {
+                    if (!capturing) {
+                        Log.i(PERF_TAG, "perf probe frame: 投影未运行（frame 段跳过）")
+                    } else {
+                        Log.i(PERF_TAG, "perf probe frame: ${captureController.benchFramePath(runs, rois)}")
+                        // ROI 稳定性探针（只读）：为「自适应就绪锚」挑选真正静止的 ROI
+                        if (stability.isNotEmpty()) {
+                            Log.i(PERF_TAG, captureController.probeRoiStability(stability, stabilityFrames))
+                        }
+                    }
+                    Log.i(PERF_TAG, "perf probe rec:\n${OcrFactory.recProbe(widths, runs.coerceAtLeast(5))}")
+                    if (frateMs > 0) {
+                        Log.i(PERF_TAG, "perf probe " + captureController.probeFrameRate(frateMs.toLong()))
+                    }
+                    if (ocrPar.isNotEmpty()) {
+                        Log.i(PERF_TAG, "perf probe ocrPar:\n" + OcrFactory.ocrParallelProbe(ocrPar, widths, runs.coerceAtLeast(3)))
+                    }
+                    Log.i(PERF_TAG, "perf probe done")
+                }
+            }
             ACTION_DEBUG_SWIPE_TEST -> {
                 val startY = intent.getIntExtra(EXTRA_START_Y, 1150)
                 val dist = intent.getIntExtra(EXTRA_DIST, 876)
                 val measure = intent.getBooleanExtra(EXTRA_MEASURE, false)
                 // 可测任意网格（weapon_backpack/char_popup/...）；缺省 artifact_backpack
                 val gridKey = intent.getStringExtra(EXTRA_GRID) ?: "artifact_backpack"
+                // ★ 2026-09-13 补参数（默认值 = 原硬编码值，行为不变）：
+                //   fromX：2244 上 1614 落在**详情面板**（面板 x≥1450）⇒ 测网格必须显式传（网格 x≈275..1435）
+                //   durMs/segments：1 = **单段匀速**（一条直线段、指定时长，无 90/10 分段、无回退）
+                val fromX = intent.getIntExtra(EXTRA_FROM_X, 1614)
+                val durMs = intent.getLongExtra(EXTRA_DUR_MS, 400L)
+                val segs = intent.getIntExtra(EXTRA_SEGS, 3)
+                // method：0=路标链(默认,多次dispatch) 1=三段式(单次dispatch的continueStroke链)
+                val mtd = if (intent.getIntExtra(EXTRA_METHOD, 0) == 1)
+                    SwipeMethod.THREE_SEGMENT
+                else SwipeMethod.WAYPOINT_CHAIN
                 if (startY != null && dist != 0) {
-                    val fromX = 1614
                     val toY = startY - dist
                     // 派发滑动到主线程（InputAccessibilityService.swipe 通过桥即可：主进程调起即用 :a11y 实例）
                     // dist>0 上滑翻页；dist<0 下滑回顶（网格在顶端钳制，用于逐点标定前复位到首页）
                     mainHandler.post {
-                        val ok = InputAccessibilityService.swipe(fromX, startY, fromX, toY, durationMs = 400, segments = 3)
+                        val ok = InputAccessibilityService.swipe(fromX, startY, fromX, toY, durationMs = durMs, segments = segs, method = mtd)
                         Log.i(TAG, "debug swipe ($fromX,$startY)->($fromX,$toY) dist=$dist ok=$ok")
                         // §12.2 标定：滑动结束 + 动画 settle 后抓帧测上沿相位误差，供距离自适应算法对标真值
                         if (measure && ok) {
@@ -284,20 +348,16 @@ class TriggerForegroundService : Service() {
                         null
                     }
                 }
-                // 时序覆盖：每轮扫描前应用（空 → 恢复默认，避免跨轮残留）
+                // 时序覆盖：交给 startScan 单入口 apply（其余入口传 null ⇒ 复位，防跨轮残留）
                 val timingSpec = intent.getStringExtra(EXTRA_TIMING)
-                com.bettergi.pocket.scan.TimingOverrides.apply(timingSpec)
-                Log.i(
-                    TAG,
-                    "debug scan flow: flow=$flow maxPages=$maxPages timing=" +
-                        com.bettergi.pocket.scan.TimingOverrides.summary(),
-                )
+                Log.i(TAG, "debug scan flow: flow=$flow maxPages=$maxPages timing='${timingSpec ?: ""}'")
                 if (captureController.isRunning()) {
                     scriptRunner.startScan(
                         flow, maxPages,
                         useGeometryAdvance = geoAdvance,
                         useAdaptiveDistance = adaptive,
                         plan = plan,
+                        timingSpec = timingSpec,
                     )
                 } else {
                     Log.w(TAG, "scan flow request ignored: projection not running")
@@ -516,6 +576,47 @@ class TriggerForegroundService : Service() {
         manager.createNotificationChannel(channel)
     }
 
+    /**
+     * 解析探针的 ROI 串：`"x,y,w,h;x,y,w,h;…"` → `List<IntRect>`（帧坐标）。
+     * 非法片段静默跳过（探针不该因输入错误而失败）。
+     *
+     * ⚠️ **不要用 `--es` 直接传含 `;` 的串**：`adb shell` 会把 `;` 当**命令分隔符**，
+     * 只有第一个 ROI 能到达（实测踩过）。故新增 [EXTRA_ROIS_B64]（base64）作为主通道。
+     */
+    private fun parseRoiCsv(csv: String): List<com.bettergi.pocket.recognition.IntRect> {
+        if (csv.isBlank()) return emptyList()
+        return csv.split(';').mapNotNull { seg ->
+            val p = seg.trim().split(',').mapNotNull { it.trim().toIntOrNull() }
+            if (p.size >= 4) com.bettergi.pocket.recognition.IntRect(p[0], p[1], p[2], p[3]) else null
+        }
+    }
+
+    /** base64 解码（探针参数通道；非法输入返回空串，绝不抛）。 */
+    private fun decodeB64(s: String): String = try {
+        String(android.util.Base64.decode(s, android.util.Base64.DEFAULT), Charsets.UTF_8)
+    } catch (_: Exception) {
+        ""
+    }
+
+    /**
+     * 解析带名字的 ROI 串：`"name:x,y,w,h;name:x,y,w,h;…"` → `List<Pair<String,IntRect>>`。
+     * 供 **ROI 稳定性探针** 用（要报出每个候选的名字）。非法片段跳过。
+     */
+    private fun parseNamedRois(s: String): List<Pair<String, com.bettergi.pocket.recognition.IntRect>> {
+        if (s.isBlank()) return emptyList()
+        return s.split(';').mapNotNull { seg ->
+            val i = seg.indexOf(':')
+            if (i <= 0) return@mapNotNull null
+            val name = seg.substring(0, i).trim()
+            val p = seg.substring(i + 1).trim().split(',').mapNotNull { it.trim().toIntOrNull() }
+            if (name.isEmpty() || p.size < 4) {
+                null
+            } else {
+                name to com.bettergi.pocket.recognition.IntRect(p[0], p[1], p[2], p[3])
+            }
+        }
+    }
+
     companion object {
         const val TAG = "BetterGI.Service"
         const val ACTION_START = "com.bettergi.pocket.action.START"
@@ -542,11 +643,47 @@ class TriggerForegroundService : Service() {
         const val ACTION_DEBUG_OCR_BENCH = "com.bettergi.pocket.action.DEBUG_OCR_BENCH"
         const val ACTION_DEBUG_OCR_DET = "com.bettergi.pocket.action.DEBUG_OCR_DET"
 
+        /**
+         * ★ 只读性能探针（2026-09-12）：帧路径拆段（alloc/put/cvtColor/全帧 vs ROI 口径）
+         * + rec 宽度基准（含输出时间步 T）。**不改任何行为**，为
+         * `dsl/verify/_audit/IMAGE-PATH-COST.md` §8 的决策提供分量实测值。
+         * 用法：`-a <本 action> --ei runs 30 --es rois "x,y,w,h;…" --es widths "145,220,405,684"`
+         */
+        const val ACTION_DEBUG_PERF_PROBE = "com.bettergi.pocket.action.DEBUG_PERF_PROBE"
+        const val EXTRA_RUNS = "runs"
+        /** ROI 列表（帧坐标）：`"x,y,w,h;x,y,w,h"`；空 = 跳过 ROI 段。⚠️ adb shell 会吞 `;` ⇒ 优先用 B64。 */
+        const val EXTRA_ROIS = "rois"
+        /** ★ 首选通道：`base64("x,y,w,h;…")`。避开 device shell 对 `;` 的命令分隔解析。 */
+        const val EXTRA_ROIS_B64 = "roisB64"
+        /** rec 宽度列表（逗号分隔）；空 = 默认 `145,220,405,684`。 */
+        const val EXTRA_WIDTHS = "widths"
+        /**
+         * ★ ROI **稳定性**探针输入：`base64("name:x,y,w,h;name:…")`。
+         * 用于挑选"渲染完成后跨帧像素恒等"的 ROI 作自适应就绪锚（见 PIPELINE-FEASIBILITY.md §11.3）。
+         */
+        const val EXTRA_STABILITY_B64 = "stabilityB64"
+        /** 稳定性探针的采样帧数（默认 60 ≈ 2s @30fps）。 */
+        const val EXTRA_FRAMES = "frames"
+        /**
+         * ★ OCR 并行度探针输入：`"k:intra,k:intra,…"`（如 `"1:1,1:2,2:1,3:1"`）。
+         * 用于判断"该调 intra 还是该做多会话并行池"，见 `OcrParallelProbe` 的 KDoc。
+         */
+        const val EXTRA_OCR_PAR = "ocrpar"
+        /** ★ 帧率探针窗口（ms）：`--ei frate 1200`；0 = 跳过。 */
+        const val EXTRA_FRAME_RATE = "frate"
+
+        /** 探针日志独立 tag，便于 `logcat -s BetterGI.Perf` 直取。 */
+        const val PERF_TAG = "BetterGI.Perf"
+
         const val EXTRA_ENABLED = "enabled"
         const val EXTRA_START_Y = "startY"
         const val EXTRA_DIST = "dist"
         const val EXTRA_MEASURE = "measure"
         const val EXTRA_GRID = "grid"
+        const val EXTRA_FROM_X = "fromX"
+        const val EXTRA_DUR_MS = "durMs"
+        const val EXTRA_SEGS = "segments"
+        const val EXTRA_METHOD = "method"
         const val EXTRA_FLOW = "flow"
         const val EXTRA_MAX_PAGES = "maxPages"
         /** §14 P4：外部任务计划 JSON 数组（明文，adb shell 会吞双引号，标定用请走 planB64）。 */

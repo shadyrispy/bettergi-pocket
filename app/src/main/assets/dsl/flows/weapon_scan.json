@@ -13,15 +13,29 @@
       "do": "enterScreen",
       "target": "weapon_backpack",
       "chain": [
-        "game_home→bagpack(2786,36)",
+        "game_home→bagpack(2786,36)"
+      ],
+      "anchor": {
+        "kind": "ocr",
+        "rect": "$screens._common.titleBar",
+        "expect": "背包",
+        "retries": 3
+      },
+      "note_split1": "2026-09-13：入口链拆两段（对齐 artifact_scan）。第一段只开背包并**确认标题条含「背包」**——否则第 2 击（weapon_tab）会落到还在加载或别的界面上，误触后整条流程带错跑。标题条 ROI `screens._common.titleBar` 为 2244 实测定标（51 张截图标题块包络 x[120,643] y[19,97]），背包页读作 `背包/圣遗物` 或 `背包／武器`。"
+    },
+    {
+      "do": "enterScreen",
+      "target": "weapon_backpack",
+      "chain": [
         "weapon_tab(210,196,290,321)"
       ],
       "anchor": {
         "kind": "ocr",
-        "rect": "$screens.weapon_backpack.count",
-        "expect": "武器 \\d+/\\d+",
-        "prefixStrict": true
-      }
+        "rect": "$screens._common.titleBar",
+        "expect": "武器",
+        "retries": 3
+      },
+      "note_split2": "第二段：切武器页签后**确认标题条含「武器」**。⚠️ 不能只匹配 `背包` —— 背包页与武器页都含「背包」无法区分；「武器」才是武器页独有判据（实测 `背包／武器` 置信 0.93）。"
     },
     {
       "do": "readCount",
@@ -35,6 +49,14 @@
       "scrollToTop": true,
       "fingerprintSkip": true,
       "visit": [
+        {
+          "do": "stopWhen",
+          "mode": "duplicateStreak",
+          "streak": 3,
+          "dupPageConfirm": 2,
+          "action": "Stop",
+          "note": "阈值不再承担「回卷」判据：pagedGrid 内引擎按**该网格一页的卡片数**（cols×traverseRows）自动覆盖（见 ScanEngine.dupLimitEffective）；此处的 3 仅作 snap/rosterFind 等非翻页路径的兜底。"
+        },
         {
           "do": "stopWhen",
           "expr": "rarity <= 2",

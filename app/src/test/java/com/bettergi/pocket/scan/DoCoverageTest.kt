@@ -24,7 +24,7 @@ class DoCoverageTest {
 
     /** 顶层（executeStep）支持集。 */
     private fun topLevelDoes() = setOf(
-        "enterScreen", "clicks", "dualStateButton", "readCount", "pagedGrid",
+        "enterScreen", "clicks", "dualStateButton", "filterReset", "assertScreen", "readConstellation", "readCount", "pagedGrid",
         "dialog", "ocrWithRetry", "navigate", "foreach", "setFilter",
         "rosterFind", "exit", "verify", "emit",
     )
@@ -32,7 +32,7 @@ class DoCoverageTest {
     /** visit 内（executeVisitStep）支持集。 */
     private fun visitDoes() = setOf(
         "ifMatch", "vote", "click", "parsePanel", "navigate",
-        "dialog", "verify", "emit", "stopWhen",
+        "dialog", "verify", "assertScreen", "readConstellation", "emit", "stopWhen",
     )
 
     private fun implementedDoes() = topLevelDoes() + visitDoes()

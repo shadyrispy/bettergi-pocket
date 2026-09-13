@@ -49,6 +49,20 @@ class ProfileFlowConsistencyTest {
         }
     }
 
+    // ---- assertScreen 的通用标题条（2026-09-13）----
+    @Test
+    fun `screen confirm ROIs resolve to rects`() {
+        val p = profile()
+        for (path in listOf("screens._common.titleBar", "screens._common.topRightHint")) {
+            val r = p.rect(path)
+            assertTrue("$path has non-positive size", r.width > 0 && r.height > 0)
+        }
+        // 标题条必须够宽以覆盖实测包络（2244 实测 x[120,643] y[19,97] → 3200 基坐标换算约 x[171,917] y[25,129]）
+        val tb = p.rect("screens._common.titleBar")
+        assertTrue("titleBar 太窄: ${tb.width}", tb.width >= 800)
+        assertTrue("titleBar 太矮: ${tb.height}", tb.height >= 100)
+    }
+
     // ---- dualStateButton ref（五星开关）----
     @Test
     fun `fiveStarToggle pill exists`() {

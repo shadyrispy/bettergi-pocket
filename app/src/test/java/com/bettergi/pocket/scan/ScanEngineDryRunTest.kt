@@ -23,6 +23,24 @@ import java.io.File
  */
 class ScanEngineDryRunTest {
 
+    /**
+     * 进入背包页的前置点击数（2026-09-13 起为 **5**）：
+     * `enterScreen` #1 **1 击**（背包钮）+ `enterScreen` #2 **1 击**（圣遗物页签）
+     * + `filterReset` **3 击**（漏斗 → 面板⟲重置 → 确认）。
+     * ⚠️ 第 2 击（页签）是 2026-09-13 新增：实测**背包会记住上次打开的类别**（上一跑 weapon_scan 切到「武器」后，
+     *    artifact_scan 点开背包直接落在武器页 ⇒ 原 `count` 锚点不成立、入口中止）。故固定补一击页签
+     *    （选中态下重复点是 no-op）+ 用标题条确认「圣遗物」。
+     */
+    private val ENTER_CHAIN_CLICKS = 5
+
+    /**
+     * `readCount.onZero=reopenAndRetry` 重进时的点击数 = **1**（只重跑 `enterScreen` 的背包一击）。
+     * ⚠️ 重进**刻意不重跑 `filterReset`**：筛选是游戏侧持久状态，进入本页时已复位过；
+     *    重进再开合面板既多余，又多一次「点到页面按钮 ⇒ 弹出全屏模态面板」的风险敞口。
+     */
+    private val ENTER_CHAIN_REENTRY_CLICKS = 1
+
+
     companion object {
         /** engine.run() 单次 dry-run 上限（正常 <30s；超出即视为卡死，防整任务挂起）。 */
         private const val ENGINE_RUN_TIMEOUT_MS = 180_000L
@@ -64,7 +82,12 @@ class ScanEngineDryRunTest {
      *  page>0 时网格区内内容变化（模拟翻页后列表前进）且不画锁徽。 */
     private fun syntheticFrame(rarity: Int, page: Int = 0): Mat {
         val m = Mat(1440, 3200, CvType.CV_8UC3, WHITE)
-        // ① 五星开关 pill [2009,199,2126,260]：默认白底（非金）→ 判 off ✓（flow ensure=off，直接通过）
+        // ① 五星开关 pill（profiles.json 3200 基坐标 [2009,199,2126,260]，calibrate(3200,1440) 后不变）：
+        //    pillState 取**中心 1/4 区**的金像素占比判态 ⇒ 画成金底 ⇒ 判 "on"，与 flow 的
+        //    `dualStateButton ensure:"on"` 一致（直接通过、不点击 ⇒ 点击数断言不受影响）。
+        //    ⚠️ 2026-09-12 实测：圣遗物背包该开关 **off/深藏青** 态 = 「只显示 5★」视图（列表仅 ~110 件），
+        //    **on/金底** 态才是「全部圣遗物」⇒ 全量扫描必须 ensure=on（原写 off ⇒ 只扫到 110/933）。
+        rect(m, 2009, 199, 2126, 260, Scalar(60.0, 180.0, 230.0))
         // ② cell(0,0) 卡内锁徽 rel [8,6,48,46]：origin(416,297) → (424,303)——仅页 1
         if (page == 0) rect(m, 424, 303, 472, 349, PINK)
         // ③ 祝圣三采样点 5x5 紫（zone artifact.panel.zhusheng points y703）
@@ -85,6 +108,10 @@ class ScanEngineDryRunTest {
         //    ⚠️ 必须整行（x 到 2080）：翻页到底判据是「24×16 缩略图差异比例 ≤ GRID_SIMILAR_DIFF(0.10)」，
         //    只画单卡（200×253）差异仅 ~3% 会被误判到底（真实翻页位移 3/4 行 ≈ 75%）。
         if (page > 0) rect(m, 416, 297, 2080, 550, Scalar(128.0, 128.0, 128.0))
+        // ⑨ page>=2：同一条灰带换成**更亮的灰**（几何完全不变 ⇒ 不影响相位测量/卡顶台阶），
+        //    只为让「翻页到底」的指纹判据**不命中** ⇒ 才能测到「连续 2 个整页零新增才断言回卷」这条新路径
+        //    （OCR 内容全同 ⇒ 第 3 页仍是重复件）。若两页像素全同，会被 reachedEnd 先收尾成 completed。
+        if (page >= 2) rect(m, 416, 297, 2080, 550, Scalar(200.0, 200.0, 200.0))
         return m
     }
 
@@ -194,6 +221,15 @@ class ScanEngineDryRunTest {
             FrameRect(2230, 1049, 2990, 1103) to "元素精通+23",          // sub3
         )
         if (withCountLine) base[FrameRect(2674, 63, 2874, 95)] = "圣遗物 1026/2400"
+        // filterReset 的面板开合判据：标题「圣遗物筛选」位于 profiles.json 的
+        // `dialogs.filterPanel.anchorTitle = [179,50,419,104]`（3200 基坐标；calibrate(3200,1440) 后不变）。
+        // 不给这条 ⇒ `panelOpen()` 恒 false ⇒ 复位链走「BACK → 重试 → 放弃」，重置/确认都不会点。
+        base[FrameRect(179, 50, 419, 104)] = "圣遗物筛选"
+        // assertScreen 的标题条（profiles.json 3200 基坐标 `screens._common.titleBar` = [157,21,1084,136]）：
+        // 供「背包/圣遗物」⇒ artifact_scan 的标题锚点 / `assertScreen(expect="圣遗物")` 走通过路径。
+        // ⚠️ **与 count 一起受 `withCountLine` 控制**：「anchor 失败应中止」那条用例靠"锚点必失败"验证
+        //    abort 路径，而 artifact_scan 的**第一段锚点已改为标题条**（原为 count）⇒ 不喂它才会失败。
+        if (withCountLine) base[FrameRect(157, 21, 1084, 136)] = "背包/圣遗物"
         return base
     }
 
@@ -204,6 +240,14 @@ class ScanEngineDryRunTest {
 
     // ---- dry-run ----
     private fun runEngine(pages: List<Page>, dedupe: Boolean = false, numberScript: List<Int?> = emptyList()): RunResult {
+        // ⚠️ 干跑**关闭翻页落地位移闭环**（`advloop=0`）：闭环靠 `VoteJudges.profileShift` 实测"这次滑动实际
+        //    滚了多少 px"再补滑，而合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ 互相关测出的
+        //    位移没有物理意义 ⇒ 会凭空多出 1~3 次补滑，把"点击数/滑动数"这类**编排层断言**搅乱。
+        //    闭环本身由 `VoteJudgesProfileShiftTest` 用**纯函数**（构造已知平移的剖面）覆盖。
+        //    另：此处直接调 `engine.run()`，不经过 `ScriptRunner.startScan` 的 `TimingOverrides.apply`，
+        //    故手动置位不会被复位；finally 里还原，避免污染其它用例。
+        TimingOverrides.advanceLoop = 0
+        try {
         val profile = ScreenProfile(JSONObject(File(assetsDir(), "profiles.json").readText()))
         profile.calibrate(3200, 1440)
         val flow = JSONObject(File(assetsDir(), "flows/artifact_scan.json").readText())
@@ -237,6 +281,9 @@ class ScanEngineDryRunTest {
         //    加 withTimeout：卡死从「永久挂起」变成「失败 + 协程栈」，既防呆又能直接定位卡点。
         runBlocking { withTimeout(ENGINE_RUN_TIMEOUT_MS) { engine.run() } }
         return RunResult(engine, h)
+        } finally {
+            TimingOverrides.advanceLoop = 1
+        }
     }
 
     // ---- 入库去重（Q2 决策）：两页同件 → 第二次出现跳过 ----
@@ -246,12 +293,18 @@ class ScanEngineDryRunTest {
             listOf(
                 Page(syntheticFrame(5), pageLines("Lv.90"), 1026),
                 Page(syntheticFrame(5, page = 1), pageLines("Lv.90"), 1030),
+                Page(syntheticFrame(5, page = 2), pageLines("Lv.90"), 1034),
             ),
             dedupe = true,
         )
-        // 页 1 入 21 件；页 2 同内容 → 全部判重跳过；页 3（无帧变化）指纹判到底
+        // 页 1 入 21 件；页 2 同内容 → **整页零新增（第 1 次）⇒ 按 dupPageConfirm=2 不停止**，再翻一页；
+        // 页 3 仍同内容（mock 页索引钳在末页）→ 连续第 2 个整页零新增 ⇒ 断言回卷 → stopWhen 停止。
+        // （2026-09-12 语义变更：单次整页重复视为「滑空/半页重叠」，不再直接终止扫描
+        //   —— 实测短推进会让重复计数跨页凑满阈值，导致 933 件的全量扫描在第 8 页误停；
+        //   见 ScanEngine.dupRollbackConfirmed 的 KDoc 与 _audit/PIPELINE-FEASIBILITY.md §14.20）
         assertEquals(21, engine.results.size)
         assertEquals(2, h.swipes.size)
+        assertEquals("stopWhen", h.finished)
     }
 
     @Test
@@ -259,9 +312,14 @@ class ScanEngineDryRunTest {
         val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)))
         assertEquals(21, engine.results.size)
         assertEquals("completed", h.finished)
-        // 点击数：enterScreen 2（bagpack + artifact_tab）+ 21 格 = 23；翻页 1 次（首页后指纹不变判到底）
-        assertEquals(23, h.clicks.size)
-        assertEquals(1, h.swipes.size)
+        // 点击数：enterScreen 链 4 击（bagpack + filterRoundBtn + filterPanel.reset + filterPanel.ok）+ 21 格 = 25
+        // （2026-09-12：旧链的 artifact_tab 已失效，改为进背包后复位筛选）
+        assertEquals(ENTER_CHAIN_CLICKS + 21, h.clicks.size)
+        // ⚠️ 单页 + 翻页后指纹不变 ⇒ 触发「翻页未生效」重发守卫：
+        //    1 次正式翻页 + 3 次确认（GRID_END_RETRIES）= 4 次滑动。
+        //    为什么需要（2026-09-12 实测）：约 1/17 页的翻页滑动**完全没落地**，而「指纹不变」无法区分
+        //    「没落地」与「真的到底」⇒ 先用重发排除前者，连续 3 次不动才认定到底（否则整轮被提前收掉）。
+        assertEquals(4, h.swipes.size)
     }
 
     @Test
@@ -295,11 +353,19 @@ class ScanEngineDryRunTest {
     fun `readCount and enterScreen wiring`() {
         val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)))
         assertEquals(1026, engine.vars.total)
-        // 首两次点击 = enterScreen 链（bagpack 中心 2824,80 → artifact_tab 中心 250,415）
-        assertEquals(2824 to 80, h.clicks[0])
+        // 首击 = 背包锚点（2026-09-13 由 (2824,80) 改为交集中心 (2830,93)，兼容刘海机）；其后 3 击 = 筛选复位链（filterRoundBtn → filterPanel.reset → filterPanel.ok）
+        assertEquals(2830 to 93, h.clicks[0])
+        assertEquals(ENTER_CHAIN_CLICKS, h.clicks.size - 21)
+        // 前置点击序列（profile 3200 基坐标中心）：
+        //   0=背包(2830,93)（2026-09-13 跨设备修正：取两机图标交集中心） → 1=**圣遗物页签**(250,415) → 2=漏斗(399,1336) → 3=面板⟲重置(401,1337) → 4=面板确认(852,1337)
+        // ⚠️ 第 1 击（页签）是 2026-09-13 新增：背包会**记住上次打开的类别**，不主动切页签就会落在「武器」页
+        //    （实测 artifact_scan 入口因此中止）。顺序错了就会点到页面按钮（实测踩过「锁定辅助」全屏面板）。
         assertEquals(250 to 415, h.clicks[1])
-        // 第一次格点击 = cell(0,0) 中心 (416+100, 297+126)=(516,423)
-        assertEquals(516 to 423, h.clicks[2])
+        assertEquals(399 to 1336, h.clicks[2])
+        assertEquals(401 to 1337, h.clicks[3])
+        assertEquals(852 to 1337, h.clicks[4])
+        // 第一次格点击 = cell(0,0) 中心 (416+100, 297+126)=(516,423)（索引 = 链长）
+        assertEquals(516 to 423, h.clicks[ENTER_CHAIN_CLICKS])
         // 翻页滑动 = §12.1 几何起点 (1858,1178) 上滑 dist=876 → (1858,302)
         // （旧写死坐标 (1614,1150)→(1614,274) 已由几何公式取代：落点从第 5 列卡中间移到末尾两卡间隙）
         assertEquals((1858 to 1178) to (1858 to 302), h.swipes[0])
@@ -327,8 +393,8 @@ class ScanEngineDryRunTest {
         assertEquals("stopWhen", h.finished)
         // 页 1 翻页 1 次 + 页 2 遍历完后停止（不再 swipe）= 共 1 次
         assertEquals(1, h.swipes.size)
-        // 页 2 仍完整遍历 21 格（scope=cell 本页后停）
-        assertEquals(2 + 21 + 21, h.clicks.size)
+        // 页 2 仍完整遍历 21 格（scope=cell 本页后停；⚠️ 回卷止扫才是立即停，见 ScanEngine 注释）
+        assertEquals(ENTER_CHAIN_CLICKS + 21 + 21, h.clicks.size)
         // 止扫页不入库：最后入库件仍是页 1 的 5★
         val lastArtifactProgress = h.progress.last { it.first == "artifact" }
         assertEquals(5, lastArtifactProgress.second["rarity"])
@@ -344,8 +410,8 @@ class ScanEngineDryRunTest {
             numberScript = listOf(0, 1026),
         )
         assertEquals(1026, engine.vars.total)
-        // 重进后 clicks 应多出 enterScreen 链 2 次
-        assertEquals(2 + 2 + 21, h.clicks.size)
+        // 重进后 clicks 应多出 enterScreen 链一轮（1 击；filterReset 不重跑，见 ENTER_CHAIN_REENTRY_CLICKS）
+        assertEquals(ENTER_CHAIN_CLICKS + ENTER_CHAIN_REENTRY_CLICKS + 21, h.clicks.size)
     }
 
     /** anchor 断言 3 次重试仍失败 → ScanAbortedException 终止（不继续扫描）。 */

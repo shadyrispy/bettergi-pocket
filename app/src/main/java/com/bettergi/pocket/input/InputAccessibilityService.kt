@@ -228,6 +228,20 @@ class InputAccessibilityService : AccessibilityService() {
             recoverCheck = null
         }
 
+        /**
+         * 派发一次点击。
+         *
+         * ⚠️ 返回 `false` 有**两种完全不同的含义**（2026-09-12 实测定性，勿混淆）：
+         *  ① 无障碍未启用 / 未连接 —— 正常的拒绝；
+         *  ② **僵尸实例**：APK `install -r` 覆盖安装后 `:a11y` 进程**没有换代**，静态 `instance`
+         *     仍然非空（`isConnected()` 返回 true，**假阳性**），但框架侧的
+         *     AccessibilityServiceConnection 仍指向**已被替换掉的旧 APK 路径**
+         *     （旁证：`logcat | grep "Failed to open APK"` 有 I/O error）⇒ `dispatchGesture` 恒 false。
+         *     症状极易误判：所有 click `ok=false`，流程表现为「returnToHome 8 次未达主界面」
+         *     +「anchor mismatch: ''」（OCR 读到空）+「chainEntry click ok=false」。
+         *     解药 = **让进程换代**：`am force-stop` 后重启（⚠️ **toggle a11y 开关无效**，
+         *     实测进程 PID 不变）。一键脚本：`dsl/scripts/bs_reauth.sh`。
+         */
         fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean {
             if (instance != null) return clickLocal(x, y, durationMs)
             val extras = Bundle().apply {

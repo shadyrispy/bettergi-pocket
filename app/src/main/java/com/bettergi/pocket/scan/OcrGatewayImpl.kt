@@ -22,33 +22,47 @@ import org.opencv.core.Mat
  */
 class OcrGatewayImpl : OcrGateway {
 
-    override suspend fun readNumber(frame: Mat, rect: FrameRect): Int? {
-        val text = recognizeText(frame, rect) ?: return null
+    /**
+     * 只读计时包装（2026-09-12 探针）：把一次网关调用的耗时累计进 [PerfProbe]。
+     * ⚠️ 不做任何行为改变；`inline` + 非局部返回保持原实现的控制流不变。
+     */
+    private inline fun <T> timedOcr(block: () -> T): T {
+        val t0 = System.nanoTime()
+        try {
+            return block()
+        } finally {
+            PerfProbe.addOcr(System.nanoTime() - t0)
+        }
+    }
+
+    override suspend fun readNumber(frame: Mat, rect: FrameRect): Int? = timedOcr {
+        val text = recognizeText(frame, rect) ?: return@timedOcr null
         // "圣遗物 1026/2400" → 斜杠前数字；无斜杠取最后一个数字
         val cleaned = StatParser.clean(text)
         val slash = Regex("(\\d+)\\s*/\\s*\\d+").find(cleaned)
             ?: Regex("\\d+").findAll(cleaned).lastOrNull()
-            ?: return null
-        return slash.value.split("/").first().filter { it.isDigit() }.toIntOrNull()
+            ?: return@timedOcr null
+        slash.value.split("/").first().filter { it.isDigit() }.toIntOrNull()
     }
 
-    override suspend fun readLines(frame: Mat, rects: List<FrameRect>): List<String> {
-        return rects.mapNotNull { rect -> recognizeText(frame, rect)?.takeIf { it.isNotBlank() } }
+    override suspend fun readLines(frame: Mat, rects: List<FrameRect>): List<String> = timedOcr {
+        rects.mapNotNull { rect -> recognizeText(frame, rect)?.takeIf { it.isNotBlank() } }
     }
 
     /**
      * 批量槽位读取：rec-only 引擎（ONNX）走一次 recognizeRois（N 个 rec 推理，~2ms/槽）；
      * ML Kit 逐槽原路径（含 <80px 2x 放大）。返回与 rects 一一对应，blank 保留为空串。
      */
-    override suspend fun readRois(frame: Mat, rects: List<FrameRect>): List<String> {
+    override suspend fun readRois(frame: Mat, rects: List<FrameRect>): List<String> = timedOcr {
         val service = OcrFactory.default
-        if (service is UnavailableOcrService) return rects.map { "" }
-        if (frame.cols() <= 0 || frame.rows() <= 0) return rects.map { "" }
+        if (service is UnavailableOcrService) return@timedOcr rects.map { "" }
+        if (frame.cols() <= 0 || frame.rows() <= 0) return@timedOcr rects.map { "" }
         if (service.hasFastRecOnlyBatch) {
-            return service.recognizeRois(frame, rects.map { it.toIntRect() })
+            service.recognizeRois(frame, rects.map { it.toIntRect() })
                 .map { OcrText.removeAllSpace(it.text) }
+        } else {
+            rects.map { rect -> recognizeRoiWithUpscale(frame, rect, service).orEmpty() }
         }
-        return rects.map { rect -> recognizeRoiWithUpscale(frame, rect, service).orEmpty() }
     }
 
     /**

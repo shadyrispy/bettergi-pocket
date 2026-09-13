@@ -111,6 +111,21 @@ object OcrFactory {
     }
 
     /**
+     * rec 宽度基准（只读探针）：按真实 ROI 宽度测单次 rec 耗时 + 输出时间步 T。
+     * 见 `dsl/verify/_audit/IMAGE-PATH-COST.md` §8 探针 2。
+     */
+    /** OCR 并行度探针（只读）：见 `OcrParallelProbe`。 */
+    fun ocrParallelProbe(spec: String, widths: IntArray, runs: Int = 5): String {
+        val s = onnxService
+        return if (s != null) s.parallelProbe(spec, widths, runs) else "engine=$engineLabel (onnx inactive)"
+    }
+
+    fun recProbe(widths: IntArray, runs: Int = 5): String {
+        val s = onnxService
+        return if (s != null) s.recProbe(widths, runs) else "engine=$engineLabel (onnx inactive)"
+    }
+
+    /**
      * 初始化 OCR。
      *
      * **两段式**（方案 §6.1 规则 2「init 在后台执行」）：

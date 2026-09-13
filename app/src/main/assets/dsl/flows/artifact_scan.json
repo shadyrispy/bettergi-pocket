@@ -1,36 +1,169 @@
 {
   "flow": "artifact_scan",
   "version": "1.0.0",
-  "info": { "name": "artifact_scan", "version": 2, "min_host_version": "0.0.0", "type": "pocket-script" },
+  "info": {
+    "name": "artifact_scan",
+    "version": 2,
+    "min_host_version": "0.0.0",
+    "type": "pocket-script"
+  },
   "profile": "android_3200x1440",
   "description": "流程二：圣遗物背包全量扫描 → GoodArtifact",
-  "vars": { "total": "int", "results": "list<GoodArtifact>" },
+  "vars": {
+    "total": "int",
+    "results": "list<GoodArtifact>"
+  },
   "steps": [
-    { "do": "enterScreen", "target": "artifact_backpack",
-      "chain": ["game_home→bagpack(2786,36)", "artifact_tab(213,359,287,472)"],
-      "anchor": { "kind": "ocr", "rect": "$screens.artifact_backpack.count", "expect": "圣遗物 \\d+/\\d+", "prefixStrict": true } },
-    { "do": "dualStateButton", "ref": "$screens.artifact_backpack.fiveStarToggle",
-      "ensure": "off", "judge": "bgColor(底色判态)", "note": "五星筛选关闭态保持" },
-    { "do": "readCount", "rect": "$screens.artifact_backpack.count", "as": "total", "onZero": "reopenAndRetry" },
-    { "do": "pagedGrid", "grid": "artifact_backpack",
+    {
+      "do": "enterScreen",
+      "target": "artifact_backpack",
+      "chain": [
+        "game_home→bagpack(2786,36)"
+      ],
+      "anchor": {
+        "kind": "ocr",
+        "rect": "$screens._common.titleBar",
+        "expect": "背包",
+        "retries": 3
+      },
+      "note_entry20260912": "2026-09-12：圣遗物页签入口失效 ⇒ 改为：点「背包」(打开上次记住的类别，通常就是圣遗物) → 左下「筛选(漏斗)」filterRoundBtn(300,1002) 打开「圣遗物筛选」面板 → filterPanel.reset(300,1002) → filterPanel.ok(638,1002)。锚点 screens.artifact_backpack.count 校验确在圣遗物页。⚠️ 底部同排按钮极易点错：排序≡≈(377,983)、锁定辅助≈(605,999)、分解≈(929,1000)、摧毁≈(185,1000)；面板未打开时点到这些会进摧毁/锁定辅助界面 ⇒ 全格读到同一内容 + 翻页失败。",
+      "note_split1": "2026-09-12：链拆两段。第一段只开背包并用锚点（count）确认**已到位**——否则第 2 击可能落在还在加载的界面上丢失，后续 2 击就会打到页面上的「快捷放入/锁定辅助」并弹出面板盖住全屏 ⇒ 之后所有点击/翻页全失效（实测：panel 等待涨到 548ms/格、首页即 reached end）。"
+    },
+    {
+      "do": "enterScreen",
+      "target": "artifact_backpack",
+      "chain": [
+        "artifact_tab"
+      ],
+      "anchor": {
+        "kind": "ocr",
+        "rect": "$screens._common.titleBar",
+        "expect": "圣遗物",
+        "retries": 3
+      },
+      "note_tabfix20260913": "★ 2026-09-13 新增：**主动切到圣遗物页签再确认**。起因：背包会**记住上次打开的类别** —— 上一跑 weapon_scan 切到「武器」后，本次点开背包直接落在武器页 ⇒ 原 `count` 锚点（`圣遗物 \\d+/\\d+`）不成立、流程在入口就中止（实测两次 `enterScreen anchor not found`）。修法：固定补一击 `artifact_tab`（选中态下重复点是 no-op，安全）+ 用标题条确认「圣遗物」。⚠️ 同时**更正**：`artifact_tab=[160,269,215,354]`（中心 187.5,311.5）**并未失效** —— 实测圣遗物页选中图标中心 (185,312)、武器页 (185,190)，与 profile 的 `weapon_backpack.tab`(188,194) 一致；旧「压在材料上」的结论是在非正常状态下截图所致。判据：**左栏图标选中时会放大**（115×86/area≈7200 vs 未选中 ~50×60/area≈1700）。"
+    },
+    {
+      "do": "filterReset",
+      "open": "$screens.artifact_backpack.filterRoundBtn",
+      "title": "$screens.dialogs.filterPanel.anchorTitle",
+      "titleExpect": "圣遗物筛选|圣遗物",
+      "reset": "$screens.dialogs.filterPanel.reset",
+      "ok": "$screens.dialogs.filterPanel.ok",
+      "retries": 2,
+      "note_entry20260912": "2026-09-12：圣遗物页签入口失效 ⇒ 改为：点「背包」(打开上次记住的类别，通常就是圣遗物) → 左下「筛选(漏斗)」filterRoundBtn 中心(300,1002) 打开「圣遗物筛选」面板 → filterPanel.reset(300,1002) → filterPanel.ok(638,1002)。到达校验由上一段 enterScreen 的 screens.artifact_backpack.count 锚点负责。⚠️ 底部同排按钮极易点错：排序≡≈(377,983)、锁定辅助≈(605,999)、分解≈(929,1000)、摧毁≈(185,1000)；面板未打开时点到这些会进摧毁/锁定辅助界面 ⇒ 全格读到同一内容 + 翻页失败。",
+      "note_split2": "2026-09-12：改用**带校验**的 filterReset 原语（不再是盲点 3 连击）。点完漏斗必须 OCR 确认「圣遗物筛选」面板真的打开了才点重置/确认；未确认则按一次 BACK 清掉可能卡住的模态面板后重试（retries=2）；仍不确认 ⇒ 放弃复位并继续扫描（宁可带着筛选扫，也绝不盲点：filterPanel.ok 中心 (638,1002) 落在「锁定辅助」=[544,981,666,1017] 内，误点会弹出全屏模态面板让之后所有点击/翻页失效）。titleExpect 用 | 分隔备选，因 profile.anchorTitle 只覆盖实测标题 [179,50,419,104]@2560 的左半，OCR 可能丢掉末字「选」；备选「圣遗物」对右缘裁切免疫。"
+    },
+    {
+      "do": "assertScreen",
+      "expect": "圣遗物",
+      "retries": 3,
+      "onFail": "back",
+      "note": "2026-09-13：**筛选复位后确认已回到圣遗物背包**（标题条含「圣遗物」）。起因：底部同排按钮几乎重叠，历史上误触「锁定辅助」会弹出全屏面板 ⇒ 之后所有点击/翻页全废。这里 OCR 不中即按一次 BACK 清掉误开的界面再继续。"
+    },
+    {
+      "do": "dualStateButton",
+      "ref": "$screens.artifact_backpack.fiveStarToggle",
+      "ensure": "on",
+      "judge": "bgColor(底色判态)",
+      "note": "⚠️ 必须是 on（金底）！2026-09-12 实测：该开关 **off/深藏青底+金圈在左** = 「只显示 5★」视图（列表仅 ~110 件，导出 110/933）；**on/金底+✓在右** 才是「全部圣遗物」。原写 off ⇒ 全量扫描只覆盖 5★。判态实现：pill 中心 1/4 区金像素占比 >50% ⇒ on（VoteJudges.GOLD: R171-255 G120-220 B0-149）。⚠️ 重开背包会把该开关复位成 off ⇒ 每轮必须由本步把它切到 on。"
+    },
+    {
+      "do": "readCount",
+      "rect": "$screens.artifact_backpack.count",
+      "as": "total",
+      "onZero": "reopenAndRetry"
+    },
+    {
+      "do": "pagedGrid",
+      "grid": "artifact_backpack",
       "visit": [
-        { "do": "vote", "zone": "artifact.card.lockBadge", "passes": 3, "as": "gridLocked" },
-        { "do": "click", "fast": { "at": "$cell.center" },
-          "fallback": [ { "kind": "ocrAnchor", "region": "$panel.artifact_backpack.name" } ] },
-        { "do": "vote", "zone": "artifact.panel.zhusheng", "as": "crafted", "apply": "yShift+63" },
-        { "do": "vote", "zone": "artifact.rarity", "as": "rarity" },
-        { "do": "vote", "zone": "artifact.panel.lock", "as": "locked" },
-        { "do": "vote", "zone": "artifact.panel.astral", "as": "favorited" },
-        { "do": "parsePanel", "panel": "artifact_backpack",
-          "fields": ["name", "slot", "mainName", "mainValue", "level", "subStats(动态行数)"],
-          "derive": { "setName": "由 name 反推（背包面板 set_name 被遮挡 OCR 不可读，用户定稿 2026-09-01）", "dict": "tools/good_names.json artifactPieces（276 件/56 套）" },
+        {
+          "do": "stopWhen",
+          "mode": "duplicateStreak",
+          "streak": 3,
+          "dupPageConfirm": 2,
+          "action": "Stop",
+          "note": "阈值不再承担「回卷」判据：pagedGrid 内引擎按**该网格一页的卡片数**（cols×traverseRows）自动覆盖（见 ScanEngine.dupLimitEffective）；此处的 3 仅作 snap/rosterFind 等非翻页路径的兜底。"
+        },
+        {
+          "do": "vote",
+          "zone": "artifact.card.lockBadge",
+          "passes": 3,
+          "as": "gridLocked"
+        },
+        {
+          "do": "click",
+          "fast": {
+            "at": "$cell.center"
+          },
+          "fallback": [
+            {
+              "kind": "ocrAnchor",
+              "region": "$panel.artifact_backpack.name"
+            }
+          ]
+        },
+        {
+          "do": "vote",
+          "zone": "artifact.panel.zhusheng",
+          "as": "crafted",
+          "apply": "yShift+63"
+        },
+        {
+          "do": "vote",
+          "zone": "artifact.rarity",
+          "as": "rarity"
+        },
+        {
+          "do": "vote",
+          "zone": "artifact.panel.lock",
+          "as": "locked"
+        },
+        {
+          "do": "vote",
+          "zone": "artifact.panel.astral",
+          "as": "favorited"
+        },
+        {
+          "do": "parsePanel",
+          "panel": "artifact_backpack",
+          "fields": [
+            "name",
+            "slot",
+            "mainName",
+            "mainValue",
+            "level",
+            "subStats(动态行数)"
+          ],
+          "derive": {
+            "setName": "由 name 反推（背包面板 set_name 被遮挡 OCR 不可读，用户定稿 2026-09-01）",
+            "dict": "tools/good_names.json artifactPieces（276 件/56 套）"
+          },
           "raritySubRule": "5★恒4词条 / 4★初始2最高3(行数>3=解析异常) / 3★2★止扫不解析（用户定稿 2026-09-02）",
-          "dict": { "name": "mappings.artifactPieces", "subStats": "rollTable" } },
-        { "do": "emit", "as": "GoodArtifact" },
-        { "do": "stopWhen", "expr": "rarity < 4 && level == 0", "action": "Stop", "scope": "cell",
-          "note": "3★/2★=扫描停止标识（用户定稿 2026-09-02）——低稀有度且未强化 → 本页后停（PC 异常策略）" }
-      ] }
+          "dict": {
+            "name": "mappings.artifactPieces",
+            "subStats": "rollTable"
+          }
+        },
+        {
+          "do": "emit",
+          "as": "GoodArtifact"
+        },
+        {
+          "do": "stopWhen",
+          "expr": "rarity < 4 && level == 0",
+          "action": "Stop",
+          "scope": "cell"
+        }
+      ]
+    }
   ],
-  "endConditions": ["stopWhen 触发", "pagedGrid 遍历完 + total 核对"],
-  "pending": ["swipe settle 真机"]
+  "endConditions": [
+    "stopWhen 触发",
+    "pagedGrid 遍历完 + total 核对"
+  ],
+  "pending": [
+    "swipe settle 真机"
+  ]
 }

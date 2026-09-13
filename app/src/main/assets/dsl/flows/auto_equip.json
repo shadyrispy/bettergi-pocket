@@ -63,12 +63,33 @@
           "note": "canonical #3：详情页圣遗物菜单→替换 → 圣遗物管理界面。字面 (x,y) 为 3200 占位，链项名命中 CHAIN_ANCHOR_PATHS 走 profile 机读"
         },
         {
+          "do": "assertScreen",
+          "title": "$screens._common.topRightHint",
+          "expect": "圣遗物推荐",
+          "retries": 3,
+          "onFail": "back",
+          "note": "2026-09-13：**确认已到「圣遗物管理界面」**（替换后）。⚠️ 该界面**左上角显示的是角色名**（实测 `豆豆`）而非界面名 ⇒ 标题条判据无效，必须用同条带右侧的 `圣遗物推荐`（实测 x[1610,1751] y[43,73]，置信 1.00）；备选 `套装筛选`（底部 x[303,428] y[970,1005]）。原写法两击连发无确认，若「圣遗物菜单」没点开就点「替换」会落到底层页面。"
+        },
+        {
           "do": "clicks",
           "chain": [
-            "sortBtn(828,1320)",
+            "sortBtn(828,1320)"
+          ],
+          "note": "preReset 方案B（用户拍板）：排序圆钮→（确认弹窗已开）→排序弹窗确认 → 网格回第一行"
+        },
+        {
+          "do": "assertScreen",
+          "expect": "排序方式",
+          "retries": 3,
+          "onFail": "back",
+          "note": "2026-09-13：**排序钮点开后先确认「排序方式」弹窗真的开了**再点确认（实测标题 `排序方式` bbox 120-273,35-81、置信 1.00）。原写法两击连发：第一击若没弹窗，第二击就会落到页面上（误触排序/筛选等）。"
+        },
+        {
+          "do": "clicks",
+          "chain": [
             "sortPopupConfirm(655,1335)"
           ],
-          "note": "preReset 方案B（用户拍板）：排序圆钮→排序弹窗确认 → 网格回第一行"
+          "note": "弹窗已由上一步 assertScreen 确认打开 ⇒ 这里点确认是安全的"
         },
         {
           "do": "setFilter",
@@ -89,6 +110,14 @@
           "grid": "select_3col",
           "mode": "snap",
           "visit": [
+            {
+              "do": "stopWhen",
+              "mode": "duplicateStreak",
+              "streak": 3,
+              "dupPageConfirm": 2,
+              "action": "Stop",
+              "note": "阈值不再承担「回卷」判据：pagedGrid 内引擎按**该网格一页的卡片数**（cols×traverseRows）自动覆盖（见 ScanEngine.dupLimitEffective）；此处的 3 仅作 snap/rosterFind 等非翻页路径的兜底。"
+            },
             {
               "do": "click",
               "fast": {
@@ -140,16 +169,9 @@
           "do": "dialog",
           "ref": "$dialogs.equipConfirm",
           "onShow": "click confirm(1915,1082)",
-          "trigger": "仅跨角色替换"
-        },
-        {
-          "do": "dualStateButton",
-          "ref": "$screens.artifact_manage.rightBtn",
-          "readonly": true,
-          "states": {
-            "强化": "未满级",
-            "重塑": "+20"
-          }
+          "trigger": "仅跨角色替换",
+          "expect": "是否更换",
+          "note_20260913": "2026-09-13：**换装确认弹窗是条件出现的** —— 目标圣遗物**无人装备**则直接替换（不弹窗，本步不点任何东西）；**有人装备**才弹「…已被<角色>装备，是否更换？」。故检测必须是**正判据**：实测 51 张无弹窗截图里 6 张 `text` ROI 非空（`Lv.90…`/`纺月的夜歌 70`/`LV`），只看非空会盲点确认钮 ⇒ 改用 `expect=\"是否更换\"`（同时登记在 profile 的 `dialogs.equipConfirm.expect`）。"
         }
       ]
     },

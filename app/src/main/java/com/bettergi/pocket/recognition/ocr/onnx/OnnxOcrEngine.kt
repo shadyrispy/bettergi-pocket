@@ -68,6 +68,9 @@ class OnnxOcrEngine(
     var ready: Boolean = false
         private set
 
+    /** rec 模型文件路径（仅并行度探针 [OcrParallelProbe] 用来另建 N 个会话）。 */
+    val recModelPath: String get() = recModel.absolutePath
+
     /** 初始化（装载模型 + 按目标档创建双会话）。失败返回 false 并保持未就绪。 */
     fun initialize(targetTier: EpTierPicker.Tier): Boolean {
         val result = runCatching {
@@ -121,7 +124,9 @@ class OnnxOcrEngine(
 
     /**
      * rec 推理：输入 float32[1,3,48,width]（width 随文本宽高比动态）→ logits float32[1,T,C]。
-     * irminsul 现状为逐行推理（N=1），批量 N>1 优化留待精度/速度实测后再上。
+     * ⚠️ 2026-09-12：曾尝试 batch N>1（各 ROI 右侧 pad 到同宽拼一个 batch）→ 实测**负优化**
+     *   （武器 +7%、圣遗物 +17%：槽宽异质致计算量 `n·Wmax/Σw = 1.59×`，且每次需分配最大 3.5MB）
+     *   ⇒ 已回退为逐行（N=1）。详见 OnnxPaddleOcrService.recognizeRois 的实测记录。
      */
     fun runRec(input: FloatBuffer, width: Int): FloatArray {
         val out = sessionLock.read {

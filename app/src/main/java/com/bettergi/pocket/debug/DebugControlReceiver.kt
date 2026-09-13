@@ -48,6 +48,11 @@ class DebugControlReceiver : BroadcastReceiver() {
                         intent.getStringExtra(EXTRA_FLOW) ?: "artifact_scan",
                     )
                     putExtra(TriggerForegroundService.EXTRA_MAX_PAGES, intent.getIntExtra(EXTRA_MAX_PAGES, Int.MAX_VALUE))
+                    // ★ 2026-09-13 修：`timing` 规格此前**没有转发** ⇒ 所有 `--es timing "..."` 的 A/B 都静默跑了默认值
+                    //   （实测每一档"对比档"的 `timing:` 日志都带 `(default)`）。转发后配置类 A/B 才成立。
+                    intent.getStringExtra(TriggerForegroundService.EXTRA_TIMING)?.let {
+                        putExtra(TriggerForegroundService.EXTRA_TIMING, it)
+                    }
                     // §12.1 A/B：false = 用 profiles 写死翻页坐标，true = 用几何推导落点
                     putExtra(
                         TriggerForegroundService.EXTRA_GEO_ADVANCE,

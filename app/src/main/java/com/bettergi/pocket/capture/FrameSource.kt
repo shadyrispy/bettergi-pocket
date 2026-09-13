@@ -1,5 +1,6 @@
 package com.bettergi.pocket.capture
 
+import com.bettergi.pocket.recognition.IntRect
 import kotlinx.coroutines.delay
 import org.opencv.core.Mat
 
@@ -29,6 +30,27 @@ interface FrameSource {
 
     /** 动作原语执行完成后调用，标记后续 [grabFresh] 应取此时刻之后的新帧。 */
     fun markActionAt(timestampMs: Long)
+
+    /**
+     * ★ 就绪信号直采（2026-09-12）：采样 [rect] 的**分块 RGB 均值签名**，写入 [out]
+     * （长度 ≥ `blocksX*blocksY*3`；格式与 `VoteJudges.thumbChangedFraction` 对齐）。
+     * **零 Mat、零分配**，成本约 1µs，用来取代「抓帧 + OCR」的就绪轮询。
+     *
+     * ⚠️ **默认实现返回 false = 不支持**（与 `ActionGateway.resetPassthrough` 同策略：
+     * 默认不破坏既有实现/单测 mock）⇒ 调用方必须**回退旧路径**。
+     */
+    fun sampleSignature(
+        rect: IntRect,
+        out: ByteArray,
+        blocksX: Int = 8,
+        blocksY: Int = 4,
+    ): Boolean = false
+
+    /**
+     * 帧代数（缓存帧时间戳 ns）。**同一帧的两次采样必然相同** ⇒ 用它排除
+     * 「拿同一帧自己比自己」造成的**假稳定**（轮询步长 < 帧间隔时必现）。默认 0 = 不支持。
+     */
+    fun frameGeneration(): Long = 0L
 
     // ---- TriggerEngine 实时触发语义（保持既有行为，零变化）----
     fun acquireLatestBgr(): CapturedBgrFrame?
@@ -95,6 +117,11 @@ class ProjectionFrameSource(
     }
 
     override fun discardLatestImages() = controller.discardLatestImages()
+
+    override fun sampleSignature(rect: IntRect, out: ByteArray, blocksX: Int, blocksY: Int): Boolean =
+        controller.sampleSignature(rect, out, blocksX, blocksY)
+
+    override fun frameGeneration(): Long = controller.frameGeneration()
 
     override fun capturedSize(): Pair<Int, Int>? = controller.capturedSize()
 
