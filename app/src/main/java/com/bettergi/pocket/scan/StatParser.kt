@@ -9,6 +9,39 @@ import com.bettergi.pocket.recognition.name.NameMatcher
  */
 object StatParser {
 
+    /** 副词条**全局上限**（游戏硬上限 4）。 */
+    const val MAX_SUBS = 4
+
+    /**
+     * 读**连续块**副词条（唯一实现点，可单测）。
+     *
+     * 规则：跳过空行；**非空但解析不出 stat 的行 ⇒ 块结束**。面板里紧随词条块的是
+     * 「套装名: 2件套：攻击力提高18%」这类行 —— 逐行 `mapNotNull` 会把它的数字读成**幻影词条**
+     * （2026-09-16 GT 实测：5★+0 读成 4 条的 205 件 vs 真值 77 件）；
+     * 而按稀有度猜条数（5★恒 4）同样错（真值 67% 的 5★+0 只有 3 条）。
+     */
+    fun parseBlock(subLines: List<String>, names: GoodNames? = null): List<ParsedStat> {
+        val out = ArrayList<ParsedStat>(MAX_SUBS)
+        // 守卫用的"已知套装名"集合（zh）。GoodNames.sets 的键/值都收，取长的（中文名 ≥2 字，ASCII id 不会误命中）
+        val setNames = names?.sets?.let { m -> (m.keys + m.values) }.orEmpty()
+            .filter { it.length >= 2 }
+        for (raw in subLines) {
+            val ln = raw.trim()
+            if (ln.isEmpty()) continue
+            // ★ 守卫①（移植 GOODScanner「2件套 stop marker」）：套装效果行 = 词条块结束。
+            //   真机事故：3 条词条的 +0 件，第 4 行 ROI 压到「套装名: 2件套：攻击力提高18%」上，
+            //   `StatParser.parse` 会从"攻击力提高18%"里读出 atk_ 18.0 ⇒ **幻影词条**（205 件 vs GT 77）。
+            if (ln.contains("件套")) break
+            // ★ 守卫②（移植 GOODScanner「Set Name Bleeding」）：套装名上移占了词条槽位 ⇒ 块结束。
+            if (setNames.any { ln.contains(it) }) break
+            // ★ 守卫③：非空但解析不出 stat ⇒ 块结束（不是词条行）。
+            val st = parse(ln, names) ?: break
+            out.add(st)
+            if (out.size >= MAX_SUBS) break
+        }
+        return out
+    }
+
     sealed interface KeyEntry {
         val key: String
         data class Simple(override val key: String) : KeyEntry

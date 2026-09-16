@@ -218,6 +218,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         Log.i(
             TAG,
             "scan finished: $reason elapsed=${elapsed}ms cells=$tmCells pages=$tmPages " +
+                "| 行级闭环 判跳行=$rowCheckSkips 判滑空=$rowCheckStalls 回补=$skipRepairs/$ROW_CHECK_MAX_REPAIRS " +
                 "perCell=${perCell}ms perPage=${perPage}ms | waits nav=${tmNavMs} panel=${tmPanelMs} settle=${tmSettleMs}",
         )
         // 只读性能探针：click/swipe 真实注入耗时 + OCR 网关耗时（分量实测，供
@@ -961,6 +962,14 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         // §14 A4 pageSkip 状态：页序号 + 上一页最低等级（背包按等级降序 → 末格即本页最低）
         var pageNo = 0
         var pageMinLevel: Int? = null
+        // ★ 2026-09-16（审计 P0-2 修）：**跨页**主滑记账 —— 必须声明在页循环**外**，否则每页重建，
+        //   写入在迭代结束即丢（旧版即踩此坑：日志写"记账 X 进下一次主滑"而实际从未生效）。
+        //   单一规则（实现在 GridAlign.planMainSwipe / driftAfterPage）：
+        //     · 发滑前 cmd = clamp(round(target/gain) + pageDrift, minCmd, maxCmd)；
+        //     · 钳制余量（cmdRaw−cmd）先落进 pageDrift 作**兜底值**；
+        //     · 相位有可信读数时**以相位为准覆盖**——落地测量已反映真实结果，再叠余额会重复补偿；
+        //     · fpband 不可测 / 未送达 ⇒ 保留兜底值，下一页按它补偿。
+        var pageDrift = 0
         // 回卷止扫阈值 = **本网格一页的卡片数**（各流程/网格自动不同；见 dupLimitEffective 的 KDoc）
         dupLimitEffective = cols * traverseRows
         dupPageStreak = 0
@@ -985,6 +994,20 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             }.getOrDefault(false)
             // §13：产物入库按页聚合（逐件会 21 行/页刷屏；逐件明细归 D 级，verbose 时才有）
             val beforeCount = results.size + resultsWeapons.size + resultsCharacters.size
+            // ★★ 2026-09-16（用户定稿）：**卡格指纹每页只抓一帧** ★★
+            //   同一页里 21 张卡**都在同一帧上** ⇒ 逐格 `freshFrame()`（1300+ 次 × ~60ms ≈ 80s/轮）纯属浪费；
+            //   页首抓一帧，之后逐格只是从这一帧里切 72×72 小片（纯内存 copy，微秒级）。
+            //   ⚠️ Mat 必须释放（页末 finally）—— 否则每页泄漏一张 3200×1440 BGR（约 13.8MB）⇒ OOM。
+            val pageCellFrame = runCatching { freshFrame() }.getOrNull()
+            // ★ 页级看门狗起点（挂死时中止并保留已入库结果）
+            val pageWall0 = clock()
+            if (pageNo == 0) {
+                rowCheckGlobalStart = 0
+                panelFpSnapshot = null // 新一轮扫描：清指纹（避免与上一轮残留面板误判同块）
+            }
+            // ★ 行级闭环（方案 C）：本页键序列必须在**页级作用域**（skip 页也要留序列占位）
+            val pageKeys = ArrayList<String>(cols * traverseRows)
+            if (pageNo == 0) rowCheckPrevKeys = emptyList()
             if (skip) {
                 Log.i(TAG, "pagedGrid[$gridKey]: pageSkip 命中（pageMinLevel=$pageMinLevel）第 $pageNo 页整页跳过")
             } else {
@@ -1005,6 +1028,13 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                         "pagedGrid[$gridKey]: page=$pageNo 开页清零连续重复计数（原 ${vars.charDupStreak}，防跨页累计误判回卷）",
                     )
                 }
+                // ⚠️ 2026-09-16 修（真机副作用）：这里原来**只清 `vars.charDupStreak`（对外变量）**，
+                //   而判据内部状态字段 `charDupStreak` 没清 ⇒ `CharDupJudge.step` 的连击**跨页累计**
+                //   ⇒ 上一页攒到 20 + 本页第 1 个重复 = 21 即"命中"，把页级确认提前触发。
+                //   实测 run8/run10：page6（1 新 + 20 重复）把字段留成 20，page7 第 1 格重复就命中 ⇒
+                //   `连续 2 个整页零新增` 成立 ⇒ **误判列表回卷、提前终止扫描**（只跑 8/12 页、101 件 vs 213 件）。
+                //   KDoc 明确写的是「每页开头清零」⇒ 必须把内部状态一起清。
+                charDupStreak = 0
                 vars.charDupStreak = 0
                 dupPageDecided = false
                 var dupWrapped = false
@@ -1034,14 +1064,58 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                             )
                             break
                         }
+                        // ★ 卡格指纹（点击前）：抓卡片中心一小块像素，判断"这一格是不是又点了同一张卡"
+                        //   —— 仅用于决定面板闸门要不要等（见字段 KDoc；**不跳过点击**）。
+                        if (PANEL_FP_GATE_ENABLED && pageCellFrame != null) {
+                            val cr = cellFingerprintRect(gridKey, pageProfile, col, row, pageProfile)
+                            if (cr != null) {
+                                val cf = PanelFingerprint.capture(pageCellFrame, listOf(cr))
+                                gridCellChanged = !PanelFingerprint.same(cf, lastCellFp)
+                                lastCellFp = cf
+                            }
+                        }
+                        // ★ 页级看门狗：单页耗时超阈值 ⇒ 判挂死，中止扫描（已入库仍导出）
+                        if (clock() - pageWall0 > PAGE_WATCHDOG_MS) {
+                            Log.w(
+                                TAG,
+                                "pagedGrid[$gridKey]: page=$pageNo 单页已耗时 ${clock() - pageWall0}ms " +
+                                    "> ${PAGE_WATCHDOG_MS}ms ⇒ 判挂死，中止扫描（已入库 " +
+                                    "${results.size + resultsWeapons.size + resultsCharacters.size} 件仍正常导出）",
+                            )
+                            vars.stopRequested = true
+                            vars.stopReason = "watchdog"
+                            dupWrapped = true // 复用一个"跳出本页"的开关（语义：本页提前收尾）
+                            break
+                        }
                         val idx = row * cols + col
                         val beforeCell = results.size + resultsWeapons.size + resultsCharacters.size
                         if (col == 0 && row == 0) tmPages++
                         tmCells++
                         Log.i(TAG, "pagedGrid[$gridKey] page=$pageNo start cell($col,$row) idx=$idx")
                         runVisit(visit, gridKey, col, row, idx, pageProfile)
+                        pageKeys += (lastCellKey ?: "")
+                        lastCellKey = null
                         val addedCell = results.size + resultsWeapons.size + resultsCharacters.size - beforeCell
                         Log.i(TAG, "pagedGrid[$gridKey] page=$pageNo done cell($col,$row) idx=$idx added=$addedCell")
+                        // ★★ 格级日志（2026-09-16，用户要求"查出漏的 8 件在哪"）★★
+                        //   每格记：页/格序(idx)/**全局列表序号估计 G**/本格内容键是否为空/键哈希。
+                        //   G 的推导：本页首格全局序号 rowCheckGlobalStart + idx（页内行主序）——行级闭环
+                        //   已把每页实际前进量测出来并累加过 ⇒ G 是**实测累计**，不是理想值。
+                        //   用途：跑完把日志里连续 G 序列一看 ⇒ **哪一段 G 缺号 = 哪几格没被点到/没读到**，
+                        //   与 GT 无关即可定位（GT 没有列表顺序，无法反查位置）。
+                        run {
+                            val g = rowCheckGlobalStart + idx
+                            // ⚠️ 顺序坑（2026-09-16 自查）：`lastCellKey` 在本格**收集后已被置空**
+                            //   （`pageKeys += (lastCellKey ?: ""); lastCellKey = null` 就在上面）⇒
+                            //   必须读 `pageKeys.lastOrNull()`，否则恒打出"空(未入库)"（实测 1365/1365 全空 ✗）。
+                            val k = pageKeys.lastOrNull()
+                            Log.i(
+                                TAG,
+                                "格级: page=$pageNo idx=$idx global=$g key=" +
+                                    (if (k.isNullOrEmpty()) "**空(未入库)**" else "h${k.hashCode() and 0xFFFF}") +
+                                    " gridChanged=$gridCellChanged",
+                            )
+                        }
                     }
                 }
                 // 背包按等级降序 → 本页末格等级即本页最低等级（作下页 pageSkip 判据）
@@ -1049,10 +1123,17 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             }
             val added = results.size + resultsWeapons.size + resultsCharacters.size - beforeCount
             RecognitionLog.log(logTag, RecognitionLog.Level.I, "第 $pageNo 页 入库 $added 件")
+            // ★ 2026-09-16：页级回卷连击必须**真正连续**（KDoc 写的是"连续 N 个整页零新增"）——
+            //   中间出现任何"有新增"的正常页即清零；否则两次相隔很远的坏页也会凑成 2 连击 ⇒ 误判回卷。
+            if (added > 0) {
+                dupPageStreak = 0
+                dupPageStopConfirmed = false
+            }
+            runCatching { pageCellFrame?.release() } // 页级卡格帧用完即释放（防 Mat 泄漏）
             pageNo++
             if (vars.stopRequested) break
 
-            // 翻页：路标链滑动 → 自适应 settle（轮询指纹至稳定）→ 相位测量（超限补滑）→ 指纹比对判到底
+            // 翻页：单次主滑 → settle → fpband 落地测量（相位平移 / 超限记账）→ 指纹比对判到底（未生效则重发）
             val beforeFrame = freshFrame()
             // §12.5 p0 基准：首帧（进背包顶对齐、尚未翻页）建立，phaseOffset 自此以它为参考
             if (!capturedBaseline) {
@@ -1060,25 +1141,26 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 capturedBaseline = true
             }
             val beforeThumb: ByteArray?
-            val beforeProf: DoubleArray?
-            var prevGray: Mat? = null   // ★ 2D 位移测量的"上一帧"灰度图（2026-09-13 周期歧义修复）
+            var landingBand: Mat? = null // ★ 翻页落地模板：翻页前第4行可见条（design-docs/swipe-landing-measure.md）
+            val landingGeom = profile.landingBandFor(gridKey)
             try {
                 beforeThumb = VoteJudges.gridThumb(beforeFrame, profile, gridKey)
-                beforeProf = VoteJudges.gridRowProfile(beforeFrame, profile, gridKey)
                 runCatching {
-                    val g = Mat()
-                    if (beforeFrame.channels() == 1) beforeFrame.copyTo(g)
-                    else org.opencv.imgproc.Imgproc.cvtColor(beforeFrame, g, org.opencv.imgproc.Imgproc.COLOR_BGR2GRAY)
-                    prevGray = g
+                    // 翻页前帧提取落地条带模板（帧释放前拷贝；profile 未登记则该 grid 跳过本测量）
+                    if (landingGeom != null) landingBand = VoteJudges.landingBandMat(beforeFrame, landingGeom)
                 }
             } finally {
                 beforeFrame.release()
             }
             // 翻页距离（帧坐标）：默认 = 几何推导 3 行；`advdist` 可绝对覆盖、`advextra` 可加偏置
             // —— 用于标定"游戏实际滚动量 < 手指行程"造成的页面重叠（2026-09-12 实测每页只覆盖 ~17/21 件）。
+            // ★ 行级闭环（方案 C，2026-09-16）：`advance.extra` = profile 里的**常量负偏置**，
+            //   把目标前进量压到「一页卡片数」以下 ⇒ 相邻页**必重叠**（内容键可测前进量）
+            //   且覆盖带（2×行距+卡片高 = 837px）> 目标+最大过冲 ⇒ **结构性不可能跳行**。
+            val advExtraProfile = advance.optInt("extra", 0)
             val advDist = when {
                 TimingOverrides.advanceDistPx > 0 -> TimingOverrides.advanceDistPx
-                dist != null -> dist + TimingOverrides.advanceExtraPx
+                dist != null -> dist + TimingOverrides.advanceExtraPx + advExtraProfile
                 else -> null
             }
             // 期望推进量（帧 px，统一 Int）：几何路径 = advDist；profile 字面路径 = |to.y − from.y|
@@ -1089,119 +1171,116 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             if (advDist != null && geoStart != null && advDist != dist) {
                 Log.i(TAG, "advance[$gridKey]: 翻页距离覆盖 dist=${dist} → $advDist")
             }
-            // ── ★ 落地位移**闭环**（2026-09-12）────────────────────────────────────────────
-            // 开环的根本问题：单次手势的**落地距离 ≠ 指令距离**（且每页都在变），而自适应点击位置只能
-            // 吸收 ±半卡高（≈126px）。这里改为：每次滑动后用 `VoteJudges.profileShift`（行亮度剖面纵向
-            // 互相关，**只读**）实测落地像素 ⇒ 不足则按**实测增益**补滑，直到累计落地贴近目标。
-            //   · 首滑命令 = 目标 / 增益记忆（跨页 EMA）⇒ 第 2 页起通常一次就够；
-            //   · 容差默认 = 行距 × 0.4（≈82px，仍 < 126px）；`advloop=0` 回到单次滑动（原行为）；
-            //   · 命令值夹在 [minCmd, maxCmd]：maxCmd 由起手 y 与屏幕底边余量推出（手势不能出屏）。
+            // ── ★ 翻页（2026-09-14 整体改造）：每页**恰一次主滑动**，落地位移唯一可信源 = fpband ──
+            //   命令 = 目标/增益（跨页 EMA 吸收系统偏差）+ pageDrift（上一页超限残差记账）。
+            //   「没滚够」不再同页补滑（用户定稿）：旧闭环补滑 while 与相位校正反向滑全部废除；
+            //   残差消化只走两条路——fpband φ 平移进本页点击坐标 / 超限记账进下一次滑动距离。
+            //   「完全没落地」由外层指纹判定 → 到底重发兜底（手势失效 ≠ 距离偏差）。
+            //   旧的 gridShift2D/profileShift 闭环测量随补滑一起退场（混叠/孪生失效源，见
+            //   swipe-landing-measure.md「现有测量器为何全部不可靠」）。
             val rowPitch = profile.gridGeometryFor(gridKey)
                 ?.let { Math.round(it.rowPitch * profile.scaleY).toInt() }
                 ?.takeIf { it > 40 } ?: 204
-            val advTol = if (TimingOverrides.advanceTolPx > 0) {
-                TimingOverrides.advanceTolPx
-            } else {
-                Math.round(rowPitch * 0.4f)
+            // ── ★ 空读格回读（2026-09-16，方案 ③）：本页「解析不出件」的格 settle 后**重访一次** ──
+            //   实测缺口 33/1281 格 = 2.6%，性质是**单格读失败**（stale 帧 / 瞬时 OCR 失败），
+            //   不是跳行（前进仅 14 件/21，结构性跳不了）。重访代价 ~250ms/格，只在失败时付。
+            //   失败格也解释了行级闭环的 SKIP 误报（锚点那格恰好空读）⇒ **顺序必须是先回读、再判定**。
+            //   守卫：整页产出过少（< 5 件）时不重试（可能是 pageSkip / 列表尾的空格）。
+            if (pageKeys.count { it.isEmpty() } > 0 && pageKeys.count { it.isNotEmpty() } >= 5) {
+                val emptyIdx = pageKeys.indices.filter { pageKeys[it].isEmpty() }
+                var recovered = 0
+                Log.i(TAG, "pagedGrid[$gridKey] 空读格回读: page=$pageNo ${emptyIdx.size} 格 idx=$emptyIdx")
+                for (i in emptyIdx) {
+                    val col = i % cols
+                    val row = i / cols
+                    if (row >= traverseRows) continue
+                    runVisit(visit, gridKey, col, row, i, pageProfile)
+                    val k = lastCellKey
+                    lastCellKey = null
+                    if (!k.isNullOrEmpty()) {
+                        pageKeys[i] = k
+                        recovered++
+                    }
+                }
+                if (recovered > 0) {
+                    Log.i(TAG, "pagedGrid[$gridKey] 空读格回读: page=$pageNo 补回 $recovered/${emptyIdx.size} 件")
+                }
             }
+            // ── ★ 行级闭环（方案 C）：判定本页相对上一页实际前进了多少件 ────────────────
+            //   前进 ≥ 一页卡片数 ⇒ 上一页末格之后、本页首格之前的件**从未被点过** = 跳行漏件
+            //   （几何：点击容差只有卡片半高 126px ⇒ 跨页空隙 > 一卡片有效区即丢件）。
+            //   回补必须"往后退"：被跳的件在当前视图**上方**（第 0 行以上不可见）⇒ 只能把内容拉回来点。
+            if (rowCheckPrevKeys.isNotEmpty() && pageKeys.isNotEmpty()) {
+                val pageSize = cols * traverseRows
+                // ⚠️ 2026-09-16：C1（滑空回补）经评估**不接入主流程**（整页重复也可能是"列表到底/半页重叠"，
+                //   回补会平白多滑动）。STALL 判定与用例保留在 GridRowCheck 里备用，此处不传 stallBelow
+                //   ⇒ 默认 0 ⇒ 永不触发（代码保留、不注释、不接入）。
+                val rc = GridRowCheck.check(rowCheckPrevKeys, pageKeys, pageSize)
+                Log.i(
+                    TAG,
+                    "pagedGrid[$gridKey] 行级闭环: page=$pageNo 前进=${rc.advance?.toString() ?: "≥1页"}件 / " +
+                        "$pageSize ⇒ ${rc.verdict}" + (rc.skipped?.takeIf { it > 0 }?.let { "（漏 $it 件）" } ?: ""),
+                )
+                rowCheckGlobalStart += (rc.advance ?: (cols * traverseRows))
+                Log.i(TAG, "pagedGrid[$gridKey] 覆盖率: page=$pageNo 本页首格全局序号≈$rowCheckGlobalStart")
+                if (rc.verdict == GridRowCheck.Verdict.STALL) rowCheckStalls++
+                if (rc.verdict == GridRowCheck.Verdict.SKIP) rowCheckSkips++
+                // ⚠️ STALL **只计数不回补**（2026-09-16）：整页重复既可能是"真滑空"也可能是"列表到底"
+                //   或"半页重叠"（既有单测 `duplicate artifacts across pages are deduped` 正是后者的真实场景：
+                //   三页同内容 ⇒ 若这里回补会平白多 2 次滑动、并把"到底"语义搅乱 ✗）。
+                //   而"滑空本身不直接丢件"（内容未变 ⇒ 覆盖已含）⇒ 回补收益未证实 ⇒ 按"不影响既有功能"降级为
+                //   检测+计数，供日志/统计定位（真正的漏件根因仍待证，见 design-docs/inconsistency-audit）。
+                if (rc.verdict == GridRowCheck.Verdict.SKIP) {
+                    if (skipRepairs < ROW_CHECK_MAX_REPAIRS && geoStart != null) {
+                        skipRepairs++
+                        Log.w(
+                            TAG,
+                            "pagedGrid[$gridKey] 行级闭环判跳行 ⇒ 退 1 行回补" +
+                                "（第 $skipRepairs/$ROW_CHECK_MAX_REPAIRS 次；面板未动，重遍历本页即覆盖被跳行）",
+                        )
+                        repairSkippedRows(visit, gridKey, pageProfile, geoStart!!, cols, traverseRows, rowPitch)
+                        pageKeys.clear() // 回补已覆盖本页，清序列避免把空占位留到下一次判定
+                    } else if (geoStart == null) {
+                        Log.w(TAG, "pagedGrid[$gridKey] 行级闭环判跳行，但本档走字面 from/to 滑动路径 ⇒ 无起点，跳过回补")
+                    }
+                }
+            }
+            rowCheckPrevKeys = ArrayList(pageKeys)
             val minCmd = Math.round(rowPitch * 0.6f)
-            val maxCmdRaw = if (geoStart != null) {
+            val maxCmd = if (geoStart != null) {
                 (geoStart.y - ADV_MIN_END_Y).coerceAtLeast(minCmd + 40)
             } else {
                 advTarget
             }
-            // `advcmdmax`：把单次命令压到游戏 fling 阈值以下 ⇒ 落地 ≈ 命令（实测命令 60 落地 51、
-            // 命令 612 落地 720 不可控）。配合 `advmax` 多做几步即可线性逼近目标。
-            val maxCmd = if (TimingOverrides.advanceCmdMaxPx > 0) {
-                Math.min(maxCmdRaw, Math.max(TimingOverrides.advanceCmdMaxPx, minCmd))
-            } else {
-                maxCmdRaw
-            }
-            val loopOn = TimingOverrides.advanceLoop > 0 && geoStart != null && beforeProf != null
             var latest: Mat
-            if (loopOn) {
-                var prevProf = beforeProf!!
-                var gain = advGainEma.coerceIn(0.25, 1.0)
-                var totalDy = 0
-                var steps = 0
-                var outFrame: Mat? = null
-                while (outFrame == null) {
-                    val need = advTarget - totalDy
-                    // ⚠️ **保守**命令：`cmd = min(剩余, 剩余/增益)` —— 只在增益 >1 时压小，**从不放大**。
-                    //   为什么不做"按增益放大"的预补偿：**过冲会整行跳过 ⇒ 漏件**（少滚只是本页重叠，安全）。
-                    //   代价是本页可能 2~3 次滑动；收益是绝不丢件。增益记忆仅用于"增益 >1 时收敛"。
-                    val cmd: Int = Math.min(
-                        need,
-                        Math.round(need.toDouble() / gain).toInt(),
-                    ).coerceIn(60, maxCmd)
-                    actions.swipe(geoStart!!.x, geoStart!!.y, geoStart!!.x, geoStart!!.y - cmd)
-                    val f = awaitGridStable(profile, gridKey)
-                    steps++
-                    val p = VoteJudges.gridRowProfile(f, profile, gridKey)
-                    var curGray: Mat? = null
-                    runCatching {
-                        val g = Mat()
-                        if (f.channels() == 1) f.copyTo(g)
-                        else org.opencv.imgproc.Imgproc.cvtColor(f, g, org.opencv.imgproc.Imgproc.COLOR_BGR2GRAY)
-                        curGray = g
-                    }
-                    // ★ 位移测量：**2D 模板优先**（卡片图案唯一 ⇒ 无周期歧义）；不可信时回退 1D+期望先验
-                    val m2 = if (prevGray != null && curGray != null)
-                        VoteJudges.gridShift2D(prevGray!!, curGray!!, profile, gridKey) else null
-                    // 期望位移 = 本次命令（周期歧义消解的先验，见 profileShift 注释）
-                    val m1 = if (p != null) VoteJudges.profileShift(prevProf, p, cmd) else null
-                    val m = m2 ?: m1
-                    prevGray?.release()
-                    prevGray = curGray
-                    val raw = if (m != null && m.second >= VoteJudges.PROFILE_SHIFT_MIN_SCORE) m.first else -1
-                    // ⚠️ **可信性守卫**（2026-09-12 实测）：互相关偶发"锁到相邻周期"⇒ 命令 60px 却测出 714px。
-                    //    这类野值若计入累计，会把增益 EMA 冲到 6.4 并把页面推飞（实测 累计=1537）。故：
-                    //    落地 > 命令×2 + 80 ⇒ 判为不可信，**不计入、不更新增益**，并按"测不到"处置。
-                    val plausible = raw >= 0 && raw <= cmd * 2 + 80
-                    val dy = if (plausible) raw else -1
-                    if (dy >= 0) {
-                        totalDy += dy
-                        val g = (dy.toDouble() / cmd).coerceIn(0.03, 1.6)
-                        gain = (0.5 * gain + 0.5 * g).coerceIn(0.03, 1.6)
-                        prevProf = p!!
-                    }
-                    // ⚠️ **必须在此处（已计入本次落地后）重算** remaining：若沿用发送前的值，
-                    //    本步已到位/已过冲也会被判成"还没够" ⇒ 再朝前补一次 ⇒ 把过冲越推越大。
-                    val remaining = advTarget - totalDy
-                    // ⚠️ 停止条件用 `remaining <= advTol`（**只判"够了/超过了"**），**绝不朝前追过冲**：
-                    //    过冲（remaining<0）交给已有的「相位校正」反向拉回（|φ|>半卡高才补，代价小）；
-                    //    若在这里继续发正向滑动，只会越推越远（实测 -102 → -252 → -925）。
-                    val done = dy < 0 || remaining <= advTol || steps >= TimingOverrides.advanceMaxSteps
-                    Log.i(
-                        TAG,
-                        "advance[$gridKey]: 闭环#$steps 命令=$cmd 落地=${if (raw >= 0) "${raw}px" else "测不到"}" +
-                            (if (raw >= 0 && !plausible) "(不可信>$cmd×2)" else "") +
-                            " score=${m?.second?.let { "%.2f".format(it) } ?: "null"}" +
-                            " 累计=$totalDy 目标=$advTarget 剩余=$remaining 增益=${"%.2f".format(gain)}" +
-                            if (done) " ⇒ 结束" else " ⇒ 补滑",
-                    )
-                    if (done) {
-                        outFrame = f
-                    } else {
-                        f.release()
-                    }
-                }
-                latest = outFrame!!
-                advGainEma = gain
+            // ★ 本页实际发出的主滑命令（帧 px）—— 相位块的增益 EMA 用它当分母（不是 target）
+            var pageCmd = 0
+            if (geoStart != null) {
+                // ⚠️ 2026-09-16 用户定稿：**命令不加增益**（恒 1.0）—— 增益补偿会放大命令 ⇒ 过滚 ⇒
+                //   **静默跳行漏件**（宁愿欠滚重复点）。`advGainEma` 仅保留为**诊断量**（日志 `增益=`），
+                //   不再参与命令；命令上界由 planMainSwipe 封顶在 target。
+                val driftPrev = pageDrift
+                val plan = GridAlign.planMainSwipe(advTarget, 1.0, driftPrev, minCmd, maxCmd)
+                val cmd = plan.first
+                pageCmd = cmd
+                pageDrift = plan.second
+                Log.i(
+                    TAG,
+                    // `增益=` 仅诊断（不参与命令，见上）；`封顶` 便于核对是否被 target 上限截断
+                    "advance[$gridKey]: 主滑规划 目标=$advTarget 增益=${"%.2f".format(advGainEma)}(诊断)" +
+                        " 记账(上一页)=$driftPrev 余量=${plan.second} ⇒ 命令=$cmd",
+                )
+                swipeLogged(gridKey, geoStart!!.x, geoStart!!.y, geoStart!!.y - cmd, "主滑")
+                latest = awaitGridStable(profile, gridKey, requireChange = true)
             } else {
-                // 原行为：单次滑动（`advloop=0` 或非几何路径）
-                if (geoStart != null) {
-                    // 用 advTarget（= advDist ?: |to.y−from.y|）而非 advDist!!：非几何路径下 advDist 可能为 null
-                    actions.swipe(geoStart!!.x, geoStart!!.y, geoStart!!.x, geoStart!!.y - advTarget)
-                } else {
-                    actions.swipe(
-                        profile.scale(advFrom.getInt(0), profile.scaleX),
-                        profile.scale(advFrom.getInt(1), profile.scaleY),
-                        profile.scale(advTo.getInt(0), profile.scaleX),
-                        profile.scale(advTo.getInt(1), profile.scaleY),
-                    )
-                }
-                latest = awaitGridStable(profile, gridKey)
+                // profile 字面 from/to 路径：坐标写死无法调距 ⇒ 不启用记账（pageDrift 恒 0）
+                actions.swipe(
+                    profile.scale(advFrom.getInt(0), profile.scaleX),
+                    profile.scale(advFrom.getInt(1), profile.scaleY),
+                    profile.scale(advTo.getInt(0), profile.scaleX),
+                    profile.scale(advTo.getInt(1), profile.scaleY),
+                )
+                latest = awaitGridStable(profile, gridKey, requireChange = true)
             }
             // ⚠️ 翻页**未生效**的重试守卫（2026-09-12 实测新增）：实测约 1/17 页的翻页滑动**完全没落地**
             //   （整页 21 格全重复），且失败**连续出现** ⇒ 回卷判据「连续 2 个整页零新增」会把整轮扫描
@@ -1212,30 +1291,103 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             var endTries = 0
             var atEnd = false
             while (true) {
-            // §12.5 相位偏移遍历（2026-09-05，替代逐页对齐补滑）：遍历目标是「视口内 3 行卡片」
-            // 而非「回到初始相位」。累计相位 φ = centeredMod(det − p0) 即本页网格相对 profiles
-            // 几何的真实偏移（±整行错位被 mod 吸收）→ 直接平移下一页点击/投票坐标，不滑动。
-            // 仅当 |φ| 超过卡片半高（逼近 ±146 混叠边界，再多滚会整行跳过 7 卡）时补滑拉回；
-            // 补滑把新相位驱动到 ~0（小距增益 ~0.8，循环重测收敛），少滚方向天然只重叠不漏。
-            // 测量用 base profile（固定参考）；指纹判到底取最终帧。
-            var corrections = 0
+            // ── ★ 相位消化（2026-09-14 整体改造）：唯一主判据 = fpband 落地条带 ──────────────
+            //   res = L − advTarget（raw）；φ_mod = centeredMod(**−res**, rowPitch)（补偿量=target−L，
+            //   与 withGridRowOffset 的 y+=φ 语义一致；符号写反过一次，见 GridAlign.phiFromLanding）。
+            //   |φ_mod| ≤ 卡片半高 ⇒ 仅平移本页点击坐标（pageDrift 记账清零）；超限 ⇒ 本页不平移、
+            //   pageDrift = −res（并入下一次主滑动距离，§12.2 控制律语义）。同页一律**不补滑**（用户定稿）。
+            //   fpband 不可测（Reject）⇒ 回退特征锁 phiDetect 仅平移；L < 半行距 ⇒ 判手势未送达
+            //   ⇒ 不消化不记账不更 EMA，交外层指纹判定 → 到底重发兜底。
+            //   ⚠️ 依赖 advTarget ≡ 行距整数倍（本项目 876 = 3×292 ✓）；若用 advdist/advextra 引入
+            //      > 卡片半高的常量偏置，会表现为恒定残差 ⇒ 应先把该偏置从 advTarget 扣掉再比。
             val cardHalf = (profile.gridGeometryFor(gridKey)?.let { profile.scale(it.cardH, profile.scaleY) } ?: 253) / 2
-            var measured = GridAlign.phaseOffset(latest, profile, gridKey)
-            while (measured != null && Math.abs(measured) > cardHalf && corrections < MAX_FINISH_SWIPES) {
-                val sx = geoStart?.x ?: profile.scale(advFrom.getInt(0), profile.scaleX)
-                val sy = geoStart?.y ?: profile.scale(advFrom.getInt(1), profile.scaleY)
-                Log.i(TAG, "advance[$gridKey]: 相位校正#${corrections + 1} φ=$measured (阈值 $cardHalf)")
-                actions.swipe(sx, sy, sx, sy - measured)
-                val next = awaitGridStable(profile, gridKey)
-                latest.release()
-                latest = next
-                corrections++
-                measured = GridAlign.phaseOffset(latest, profile, gridKey)
+            var pageOffset: Int? = null
+            var phiSrc = "—"
+            // ★ 2026-09-16（审计 P1-1）：fpband 给出**可信读数**（Ok 且落地 ≥ 半行距）即置真 ⇒
+            //   禁止再回退特征锁平移。超限档 |φ|∈(126,146] 正是特征锁最易锁到邻行的区间，
+            //   且回退平移与定稿「超限 ⇒ 本页不平移」相反。Reject/未送达/未登记 ⇒ 保持 false ⇒ 允许回退。
+            var fpbandAccepted = false
+            if (landingBand != null && landingGeom != null) {
+                val gCur = grayOf(latest)
+                if (gCur != null) {
+                    try {
+                        val sx = Math.max(0, landingGeom.sy0).coerceAtMost(Math.max(0, gCur.rows() - 1))
+                        val ex = Math.min(gCur.rows(), landingGeom.sy1)
+                        if (ex > sx + 8) {
+                            val search = gCur.submat(org.opencv.core.Range(sx, ex),
+                                org.opencv.core.Range(landingGeom.x0, landingGeom.x1))
+                            // ★ 期望落点先验（2026-09-16）：把峰搜索限制在 advTarget ± 0.85 行 ⇒
+                            //   排除 ±1 行孪生峰（同套密集卡页 peakGap 常掉到 0.02~0.11 被拒、真机 6 页拒 2）。
+                            //   离线语料实测生产对 gap 0.20→0.44；门限一个都不放宽。
+                            val priorHalf = Math.round(rowPitch * VoteJudges.LANDING_PRIOR_HALF_RATIO).toInt()
+                            when (val lr = VoteJudges.landingShift(
+                                landingBand!!, search, landingGeom.y0 - landingGeom.sy0, advTarget, priorHalf,
+                            )) {
+                                is VoteJudges.LandingResult.Ok -> {
+                                    val L = lr.shift.dy
+                                    if (L < rowPitch / 2) {
+                                        // 内容上移不足半行 = 手势未送达：残差无意义 ⇒ 不消化、不记账、不更 EMA
+                                        Log.i(
+                                            TAG,
+                                            "advance[$gridKey]: 落地条带 L=${L}px score=${"%.2f".format(lr.shift.score)}" +
+                                                " ⇒ 不足半行距 ⇒ 判手势未送达，交指纹判定",
+                                        )
+                                    } else {
+                                        val dec = VoteJudges.landingDecision(lr.shift, advTarget, pageCmd, advGainEma)
+                                        // ⚠️ 符号：补偿量 = target − L = −residual（见 GridAlign.phiFromLanding 的 KDoc）
+                                        val phiMod = GridAlign.phiFromLanding(dec.residual, rowPitch)
+                                        advGainEma = dec.gain
+                                        fpbandAccepted = true
+                                        if (Math.abs(phiMod) <= cardHalf) {
+                                            pageOffset = phiMod
+                                            phiSrc = "fpband平移"
+                                            pageDrift = GridAlign.driftAfterPage(phiMod, dec.residual, cardHalf)
+                                            Log.i(
+                                                TAG,
+                                                "advance[$gridKey]: 落地条带 L=${L}px score=${"%.2f".format(lr.shift.score)}" +
+                                                    " 残差=${dec.residual} φ=$phiMod ⇒ 平移点击坐标（记账清零）",
+                                            )
+                                        } else {
+                                            pageDrift = GridAlign.driftAfterPage(phiMod, dec.residual, cardHalf)
+                                            phiSrc = "fpband超限记账"
+                                            Log.i(
+                                                TAG,
+                                                "advance[$gridKey]: 落地条带 L=${L}px score=${"%.2f".format(lr.shift.score)}" +
+                                                    " 残差=${dec.residual} φ=$phiMod ⇒ 超半卡高($cardHalf) ⇒ 本页不平移，" +
+                                                    "记账 ${pageDrift}px 进下一次主滑",
+                                            )
+                                        }
+                                    }
+                                }
+                                is VoteJudges.LandingResult.Reject -> {
+                                    phiSrc = "fpband拒"
+                                    Log.w(TAG, "advance[$gridKey]: 落地条带不可测(${lr.reason}) ⇒ 回退特征锁")
+                                }
+                            }
+                        } else {
+                            Log.w(TAG, "advance[$gridKey]: 落地条带搜索窗越界(sx=$sx,ex=$ex) ⇒ 回退特征锁")
+                        }
+                    } finally {
+                        gCur.release()
+                    }
+                }
+                // ★ 2026-09-16（审计 P2-6）：模板**不在此处释放** —— 否则走「到底重发」回边时条带已失效，
+                //   只能回退特征锁（±70px）。条带取自**本页首次滑动前**的帧，重发后仍是它的平移且搜索窗
+                //   含原位 ⇒ 依旧可测。释放挪到本页翻页真正结束处（下方 while(true) 出口）。
             }
-            if (measured != null) {
-                pageProfile = profile.withGridRowOffset(measured)
-                Log.i(TAG, "advance[$gridKey]: 页面相位 φ=$measured corrections=$corrections")
-            } // φ 测量失败（守卫不通过）：沿用上一页偏移（相位近似延续）
+            if (pageOffset == null && !fpbandAccepted) {
+                // 回退：特征锁（fpband 未跑/未登记/拒/未送达——未送达页画面没动，测出即上一页相位）
+                pageOffset = GridAlign.phaseOffset(latest, profile, gridKey)
+                if (pageOffset != null) phiSrc = "特征锁"
+            } else if (pageOffset == null) {
+                // ★ 2026-09-16（审计 P1-1）：fpband 有可信读数但超半卡高 ⇒ **本页不平移**（定稿），
+                //   只把残差记账进下一次主滑；此处禁止用特征锁兜（超限档必锁邻行）。
+                Log.i(TAG, "advance[$gridKey]: 本页不平移（$phiSrc）⇒ 沿用上一页相位、残差已记账")
+            }
+            if (pageOffset != null) {
+                pageProfile = profile.withGridRowOffset(pageOffset)
+                Log.i(TAG, "advance[$gridKey]: 页面相位 φ=$pageOffset ($phiSrc)")
+            } // 测量全失败：沿用上一页偏移（相位近似延续）
 
             latestThumb = try {
                 VoteJudges.gridThumb(latest, profile, gridKey)
@@ -1254,7 +1406,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 "pagedGrid[$gridKey]: 翻页指纹未变（疑似滑动未生效；已到底也会如此）⇒ 重发翻页滑动 #$endTries",
             )
             if (geoStart != null && advDist != null) {
-                actions.swipe(geoStart.x, geoStart.y, geoStart.x, geoStart.y - advDist)
+                swipeLogged(gridKey, geoStart.x, geoStart.y, geoStart.y - advDist, "到底重发#$endTries")
             } else {
                 actions.swipe(
                     profile.scale(advFrom.getInt(0), profile.scaleX),
@@ -1265,9 +1417,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             }
             latest = awaitGridStable(profile, gridKey)
             }
+            // ★ 2026-09-16（审计 P2-6）：条带模板到「本页翻页真正结束」才释放 ⇒ 重发回边仍可测量
+            landingBand?.release()
+            landingBand = null
             if (atEnd) break
             pagesAdvanced++
-            Log.i(TAG, "pagedGrid advanced to page ${pagesAdvanced + 1} (maxPages=$maxPages)")
+            Log.i(TAG, "pagedGrid 翻页#$pagesAdvanced（已扫 $pageNo 页, maxPages=$maxPages）")
             if (pagesAdvanced >= maxPages) {
                 Log.i(TAG, "pagedGrid early stop: reached maxPages=$maxPages (debug 早停，用于翻页准确性验证)")
                 vars.stopRequested = true
@@ -1633,11 +1788,69 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     /**
      * 翻页滑动**落地增益**的跨页 EMA（实测落地 px ÷ 指令 px）。
      *
-     * 用途：闭环首滑按 `目标 / 增益` 预补偿 —— 实测单次手势的落地只有指令的 ~0.7 倍（且每页波动），
-     * 开环时每页都要靠补滑纠偏；记住增益后第 2 页起通常**一次滑到位**。
-     * 初值 0.7 是 2244/BS 上的实测典型值；首轮会自我修正。
+     * 用途（2026-09-14 单滑模型）：每页主滑命令 = `目标 / 增益` —— 增益 >1（系统性过冲）时压小、
+     * <1 时预补偿，偏差由 fpband 落地测量逐页收敛。
+     * ⚠️ 初值 = **0.91**（2026-09-16 真机实测定标，非"无先验"）：3200/BS 上 39 次翻页实测
+     * `L/target = 753~833 / 876`，均值 **0.910** ⇒ 单滑模型 `cmd = round(target/gain)` 直接相除，
+     * 初值取实测值 ⇒ **首滑就基本到位**（cmd = 876/0.91 = 963，落地 ≈876）。
+     * 取 1.0（无补偿）会让每页少滚 ~79px（0.27 行）⇒ 页首重叠 + 相位残差逐页累积
+     * （真机 45/45 次 `增益=1.00` 即此状态）；取 0.7（旧值）又会首滑放大 43%（876→1251，
+     * 被 maxCmd 钳到 1118 ⇒ 过冲风险）。若换设备/分辨率真实增益≈1.0，则首滑过冲 ~87px
+     * （φ=−87，仍在卡片半高 126 内）⇒ 安全，且随即被 EMA 按实测收敛。
      */
-    private var advGainEma = 0.7
+    private var advGainEma = 0.91
+
+    // ── ★ 行级闭环（2026-09-16 方案 C）：用内容键量「上一页→本页」前进量，判跳行并回补 ──
+    /** 每格计算出的内容键（含重复件）；页末收集成本页键序列。 */
+    private var lastCellKey: String? = null
+
+    /** 上一页的键序列（**含读失败的空串占位**，下标 = 页内序号 —— 占位必须保留，否则前进量算错）。 */
+    private var rowCheckPrevKeys: List<String> = emptyList()
+
+    /** 行级闭环统计（进 scan finished 摘要）：判跳行 / 判滑空 / 实际回补次数。 */
+    private var rowCheckSkips = 0
+    private var rowCheckStalls = 0
+    private var skipRepairs = 0
+
+    /** 回补期抑制「连续重复」计数：重读 21 格会被回卷判据误判成"整页零新增"。 */
+    private var suppressDupStreak = false
+
+    /** scope=cell 止扫（3★/2★）的**连续命中计数**：单格误读不得截断整轮。 */
+    private var stopWhenCellStreak = 0
+
+    /** ★ 面板指纹快照（GOODScanner `panel_snapshot`）：上次**稳定**面板的原始像素（仅作加载闸门）。 */
+    private var panelFpSnapshot: ByteArray? = null
+
+    /**
+     * ★ 卡格（网格卡片）指纹：上一格的像素快照。
+     *
+     * ⚠️ **只用来决定"要不要等面板"，绝不用来跳过点击/解析**（2026-09-16 定谳）：
+     * 本账号实测存在 **18 张同套同部位同强化的 MarechausseeHunter 羽毛** ⇒ 它们的**卡片像素几乎全同**
+     * （同图标 + 同 5★ 星带 + 同锁标）⇒ 若按卡格像素判重直接跳过点击，会把这 18 张**并成 1 张** ✗✗。
+     * （GOODScanner `detect_grid_duplicates` 的原始用例是**武器**：同款武器面板完全相同，"多份同款"正合适。）
+     * ⇒ 这里只用它回答"**这一格的卡与上一格是不是同一张**"：同 ⇒ 面板本该不变 ⇒ **无需等待**（省 1.5s）；
+     *   不同 ⇒ 面板应变 ⇒ 若还没变就是**陈旧帧** ⇒ 才进等待闸门。
+     */
+    private var lastCellFp: ByteArray? = null
+
+    /** 本格卡格指纹是否与上一格不同（决定面板闸门要不要等）。 */
+    private var gridCellChanged = true
+
+    /**
+     * **会话级看门狗心跳**（2026-09-16）：最后一次"确实有进展"的时间戳（`SystemClock.elapsedRealtime()`）。
+     * 由 [freshFrame] 打点 —— 覆盖"每格抓帧 + settle 轮询"两条主路径 ⇒
+     * **真的卡死（JNI/a11y/MediaProjection 阻塞）时它不会前进**，而只是在慢（如长 settle）时会前进 ✓。
+     * 监视方在 `ScriptRunner`（独立 daemon 线程）⇒ 专治**visit 内部挂死**（页级看门狗只在格与格之间检查，抓不到）。
+     */
+    @Volatile
+    var lastProgressAtMs: Long = 0L
+        private set
+
+    /**
+     * 覆盖率仪表（2026-09-16）：当前页首格在列表里的**全局序号**（按实测前进量累加）。
+     * 只靠"每页新增件数"看不出位置；有了全局序号才能看出"哪一段从没被点到"。
+     */
+    private var rowCheckGlobalStart = 0
 
     /**
      * 连续「整页零新增」的页数；达到 [dupPageConfirm] 才断言列表回卷。
@@ -1845,6 +2058,9 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      * `identity == null` ⇒ 不介入（既不计也不重置）。返回 true = 应止扫。
      */
     private fun noteDupAndMaybeStop(identity: String?, seen: Collection<String>): Boolean {
+        // ★ 跳行回补期间的重读**不计**连续重复：否则 21 格重读 = "整页零新增" ⇒ 连中两次回卷判据
+        //   就会把整轮扫描提前收掉（本文件 2026-09-16 回卷判据说明里的那个坑）。
+        if (suppressDupStreak) return false
         val limit = if (dupLimitEffective > 0) dupLimitEffective else charDupStreakLimit
         val (next, hit) = CharDupJudge.step(seen, identity, charDupStreak, limit)
         charDupStreak = next
@@ -1944,10 +2160,37 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      * 现改「帧间差异比例阈值」：容忍抖动，仍可靠检测翻页大变化。
      * @return 稳定后的最新帧（调用方负责 release）
      */
-    private suspend fun awaitGridStable(profile: ScreenProfile, gridKey: String): Mat {
+    /** 帧 → 灰度（落地条带 fpband 测量的搜索区用）。失败返回 null；返回值归调用方 release。 */
+    private fun grayOf(frame: Mat): Mat? = runCatching {
+        val g = Mat()
+        if (frame.channels() == 1) frame.copyTo(g)
+        else org.opencv.imgproc.Imgproc.cvtColor(frame, g, org.opencv.imgproc.Imgproc.COLOR_BGR2GRAY)
+        g
+    }.getOrNull()
+
+    /**
+     * 2026-09-14 诊断：翻页滑动**派发可见性**。
+     * 此前 advance 路径 actions.swipe(...) 的返回值被丢弃且不打日志 ⇒ 派发被拒/手势没送达完全不可见
+     * （2560「翻页落地 0px」长期隐身的直接原因）。所有翻页滑动都走它。
+     */
+    private fun swipeLogged(gridKey: String, x: Int, y0: Int, y1: Int, why: String): Boolean {
+        val t0 = System.nanoTime()
+        val ok = actions.swipe(x, y0, x, y1)
+        val ms = (System.nanoTime() - t0) / 1_000_000
+        Log.i(TAG, "advance[$gridKey]: swipe($why) ($x,$y0)→($x,$y1) accepted=$ok ${ms}ms")
+        return ok
+    }
+
+    private suspend fun awaitGridStable(
+        profile: ScreenProfile,
+        gridKey: String,
+        requireChange: Boolean = false,
+    ): Mat {
         val start = clock()
         var prevThumb: ByteArray? = null
         var stableSince = -1L
+        var sawChange = false
+        var warnedNoChange = false
         var latest: Mat? = null
         try {
             val sPoll = TimingOverrides.settlePollMs
@@ -1960,12 +2203,33 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 if (thumb != null) {
                     val diff = VoteJudges.thumbChangedFraction(prevThumb, thumb)
                     if (diff != null && diff <= GRID_SIMILAR_DIFF) {
+                        // ★ 2026-09-14（`requireChange`，滑动后专用）：本循环只判「连续 700ms 帧间差 ≤ 阈值」，
+                        //   从不要求"先看到变化" ⇒ 而手势是**异步派发**（见 swipeGridToTop 注释：780ms 手势不等走完）
+                        //   ⇒ 若画面起步晚于 ~700ms，会把**滑动前的静止帧**当稳定帧返回（日志照样 diff=0.000）
+                        //   ⇒ 位移/相位测的是滑动前状态，且**静默**。故：在 [SETTLE_CHANGE_WINDOW_MS] 内
+                        //   **必须先观察到一次变化**才允许判稳定；超窗仍未变 ⇒ 视为"滑动未送达/列表到底"。
+                        //   ★ 2026-09-14（补滑空转可见性）：旧逻辑只在 6000ms 全程超时才告警，
+                        //   「1500ms 先变化窗已过 → 仍按连续稳定判返回」的区间是**静默**的
+                        //   （实测 5 连 0 补滑的 settle 全部无告警）。超窗仍未看到变化 ⇒ 打一次警告（每次调用仅一行）。
+                        if (requireChange && !sawChange && !warnedNoChange && clock() - start >= SETTLE_CHANGE_WINDOW_MS) {
+                            warnedNoChange = true
+                            Log.w(
+                                TAG,
+                                "settle: ${clock() - start}ms 未观察到变化（超 ${SETTLE_CHANGE_WINDOW_MS}ms 窗）" +
+                                    " ⇒ 本次滑动疑似未送达 / 列表已到底",
+                            )
+                        }
+                        if (requireChange && !sawChange && clock() - start < SETTLE_CHANGE_WINDOW_MS) {
+                            prevThumb = thumb
+                            continue
+                        }
                         if (stableSince < 0) stableSince = clock()
                         if (clock() - stableSince >= sStable) {
                             Log.i(TAG, "page settle: ${clock() - start}ms (stable diff=${"%.3f".format(diff)})")
                             return latest
                         }
                     } else {
+                        sawChange = true
                         stableSince = -1L
                     }
                     prevThumb = thumb
@@ -1975,7 +2239,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             latest?.release()
             throw e
         }
-        Log.w(TAG, "settle not stabilized within ${SETTLE_MAX_MS}ms, using latest frame")
+        Log.w(
+            TAG,
+            "settle not stabilized within ${SETTLE_MAX_MS}ms, using latest frame" +
+                if (requireChange && !sawChange) "（⚠️ 全程未观察到变化 ⇒ 本次滑动疑似未送达 / 列表已到底）" else "",
+        )
         return latest ?: freshFrame(SETTLE_FRAME_TIMEOUT_MS)
     }
 
@@ -2409,11 +2677,27 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             Log.w(TAG, "subStats 词典 '$dictKey' 不支持档位吸附（仅支持 rollTable），保持原值")
             return list
         }
+        // ★★ 2026-09-16 加**吸附容差**（真机 GT 对账定谳）★★
+        //   原实现是"无条件吸到最近档位" ⇒ 把游戏里**真实存在、但不在我们档位表里**的值改掉 ✗：
+        //   实测 `def_ 18.9`（GT 真值，Irminsul 直读游戏数据）被吸成 `19.0`
+        //   （我们穷举表的 5★ def_ 三次和只有 18.2/19.0/19.7 ⇒ 18.9 不在表里）⇒ 导出与 GT 差 1 件 ✗。
+        //   容差 0.06 = OCR 抖动级（1 位小数显示值 ±0.05）⇒ 只消化真正的读数抖动，
+        //   **不再改动画面上写的值**（宁可保留原始值，也不臆造"更标准"的值）。
         return list.map { s ->
             val snapped = RollTable.snap(rarity, s.key, s.value)
             if (snapped != null && snapped != s.value) {
-                Log.d(TAG, "rollTable 吸附: ${s.key} ${s.value} → $snapped")
-                s.copy(value = snapped)
+                val delta = Math.abs(snapped - s.value)
+                if (delta <= SNAP_TOL) {
+                    Log.d(TAG, "rollTable 吸附: ${s.key} ${s.value} → $snapped（Δ=%.2f）".format(delta))
+                    s.copy(value = snapped)
+                } else {
+                    Log.i(
+                        TAG,
+                        "rollTable **不吸附**（超容差 %.2f）：${s.key} ${s.value}（最近档 $snapped）" +
+                            " ⇒ 保留游戏显示值（档位表可能缺该值）".format(delta),
+                    )
+                    s
+                }
             } else {
                 s
             }
@@ -2514,6 +2798,49 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 "verify 失败 $zone 期望=$expect 实际=$actual",
             )
         }
+    }
+
+    /**
+     * **跳行回补**（行级闭环触发，方案 C）：向后（列表往回）滑 `rowsBack` 行 ⇒ **重遍历本页**（21 格）
+     * ⇒ 再向前滑回原位。
+     *
+     * 为什么不是"多滑一点"或"改点击偏移"：被跳的件在**当前视图上方**（第 0 行以上被面板裁掉）
+     * ⇒ 任何在当前视图内的点击都够不到 ⇒ 唯一办法是把内容拉回来再点。
+     * 回补期间**必须压制连续重复计数**：21 格重读会被「一页卡片数」回卷判据当成整页零新增
+     * ⇒ 连中两次就会把整轮扫描提前收掉（见本文件 2026-09-16 回卷判据说明）。
+     * 成本：2 次滑动 + 21 格 ≈ 6s，仅触发时付（上限 [ROW_CHECK_MAX_REPAIRS] 次/轮）。
+     */
+    private suspend fun repairSkippedRows(
+        visit: JSONArray,
+        gridKey: String,
+        prof: ScreenProfile,
+        geoStart: FramePoint,
+        cols: Int,
+        rows: Int,
+        rowPitch: Int,
+        rowsBack: Int = 1,
+    ) {
+        swipeLogged(gridKey, geoStart.x, geoStart.y, geoStart.y + rowPitch * rowsBack, "回补-退")
+        awaitGridStable(prof, gridKey, requireChange = false)
+        val streakBefore = charDupStreak
+        val streakVarBefore = vars.charDupStreak
+        suppressDupStreak = true
+        try {
+            var idx = 0
+            for (row in 0 until rows) {
+                for (col in 0 until cols) {
+                    runVisit(visit, gridKey, col, row, idx, prof)
+                    idx++
+                }
+            }
+        } finally {
+            suppressDupStreak = false
+            charDupStreak = 0
+            vars.charDupStreak = if (streakBefore == 0 && streakVarBefore == 0) 0 else vars.charDupStreak
+            charDupStreak = 0
+        }
+        swipeLogged(gridKey, geoStart.x, geoStart.y + rowPitch * rowsBack, geoStart.y, "回补-还")
+        awaitGridStable(prof, gridKey, requireChange = false)
     }
 
     private suspend fun runVisit(
@@ -2727,18 +3054,8 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                             // 计时口径：签名的判据是**墙钟**（含采样/确认），与旧路径的"delay 之和"
                             // 略有不同但更真实（旧口径漏掉每轮的抓帧+OCR 时间）。
                             val tPanel = SystemClock.elapsedRealtime()
-                            waitReadyBySignature(
-                                before = sigBefore,
-                                a = sigA,
-                                b = sigB,
-                                roi = sigRoi!!,
-                                step = TimingOverrides.panelSigPollMs,
-                                maxMs = PANEL_CHANGE_WAIT_MAX_MS,
-                                minMs = 0L,
-                                fallbackMs = TimingOverrides.panelStableFallbackMs,
-                                what = "panel",
-                                stableSamples = TimingOverrides.panelSigSamples,
-                            ) {
+                            // ★ 2026-09-16：确认回调提为**具名匿名函数** —— 兜底重发后需要**重复等待**（见下方 while）。
+                            val onPanelStable: suspend () -> Boolean = stable@{
                                 // ★ 收尾 OCR 确认（整个就绪判定里唯一的一次 OCR）。
                                 //
                                 // ⚠️ 为什么确认必须能"否决"（2026-09-12 实测教训）：
@@ -2751,8 +3068,8 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                                 ctx.frame = freshFrame()
                                 panelFrameReady = true
                                 // 确认 OCR 可关（内容带已覆盖"最后渲染的字段" ⇒ 冗余度下降）
-                                if (!TimingOverrides.panelSigConfirm) return@waitReadyBySignature true
-                                val f = ctx.frame ?: return@waitReadyBySignature false
+                                if (!TimingOverrides.panelSigConfirm) return@stable true
+                                val f = ctx.frame ?: return@stable false
                                 val nm = ocr?.readLines(f, listOf(nameRect!!))?.firstOrNull()
                                 // 名字非空 **且** 面板星级已画出（后者是"面板真正渲染完"的强证据）
                                 val stars = countStars(f, gridKey)
@@ -2762,6 +3079,33 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                                     Log.i(TAG, "sigExit cell($col,$row) name='${nm ?: ""}' stars=$stars band=$gridKey")
                                 }
                                 !nm.isNullOrBlank() && (stars > 0 || !panelHasStarBand(gridKey))
+                            }
+                            var clickRetry = 0
+                            while (true) {
+                                val sawChange = waitReadyBySignature(
+                                    before = sigBefore,
+                                    a = sigA,
+                                    b = sigB,
+                                    roi = sigRoi!!,
+                                    step = TimingOverrides.panelSigPollMs,
+                                    maxMs = PANEL_CHANGE_WAIT_MAX_MS,
+                                    minMs = 0L,
+                                    fallbackMs = TimingOverrides.panelStableFallbackMs,
+                                    what = if (clickRetry == 0) "panel" else "panel-retry$clickRetry",
+                                    stableSamples = TimingOverrides.panelSigSamples,
+                                    confirm = onPanelStable,
+                                )
+                                if (sawChange || clickRetry >= CLICK_RETRY_MAX_ON_NOCHANGE) break
+                                // 全程未见面板变化 ⇒ 极可能**点击被游戏吞掉**（2026-09-16 run6 page3 实证：
+                                //   21 格耗时零方差且最快 = 就绪轮询秒过 = 内容从未变化）⇒ **同坐标重发**。
+                                //   安全性：坐标完全相同 ⇒ 最坏只是重读同一张卡（幂等），不会误加相邻件。
+                                clickRetry++
+                                Log.w(
+                                    TAG,
+                                    "visit cell($col,$row) idx=$index 面板全程未见变化（clickOk=$clickOk）" +
+                                        " ⇒ 疑似点击被吞 ⇒ 同坐标重发 #$clickRetry",
+                                )
+                                actions.click(cx, cy)
                             }
                             tmPanelMs += SystemClock.elapsedRealtime() - tPanel
                         }
@@ -2900,7 +3244,10 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 }
                 // panel 类判据：详情面板固定位置，用原始 profile（不随网格相位偏移）
                 "artifact.panel.zhusheng" -> {
-                    vars.crafted = VoteJudges.panelZhusheng(frame, profile).matched
+                    val zr = VoteJudges.panelZhusheng(frame, profile)
+                    // 诊断：命中数 + 三点采样（排查"祝圣件没被识别"用；GT 实测本账号 20 件 elixerCrafted）
+                    Log.i(TAG, "vote zhusheng matched=${zr.matched} hits=${zr.count}（≥${VoteJudges.Thresholds.BANNER_POINTS_REQUIRED}/3 且紫占比>${VoteJudges.Thresholds.BANNER_PURPLE_RATIO}）col=$col row=$row")
+                    vars.crafted = zr.matched
                 }
                 "artifact.panel.lock" -> {
                     // 双区判定：同一单件名可普通(锁徽 y)/祝圣(锁徽 y+shift)两种面板（2560 实测 744 vs 808），
@@ -2955,6 +3302,49 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         // 单格共享帧：复用 click 轮询收敛帧（visit 结束由 ctx 统一释放）
         val owned = ctx == null
         val frame = ctx?.acquire { freshFrame() } ?: freshFrame()
+        // ★★ 面板指纹 = **面板加载闸门**（GOODScanner `wait_until_panel_loaded` / `panel_snapshot`）★★
+        //   语义澄清（2026-09-16 真机回归后定谳）：`panel_snapshot` 相同 **≠** "重复件"，
+        //   而是"**新面板还没渲染出来**"（点了另一张卡、但抓到的还是上一张的面板）⇒ **必须等它换**，
+        //   **绝不可跳过解析** —— 曾把"未换"当"重复"，实测导出 937 → **817**（−120 真件被丢）✗✗。
+        //   （GOODScanner 的**去重**是另一套：`detect_grid_duplicates` 比**网格卡格**像素，点击前判重；
+        //     面板 snapshot 只负责"等加载完 + 保证后续 OCR 读的是新面板"。）
+        //   ⇒ 本闸门收益 = **修陈旧帧误读**（GT 里 B 类 1 件）；重复格仍由**内容键**去重（保留不变）。
+        //   ⚠️ 仅在「卡格指纹显示换了卡」时才进等待：同卡（半页重叠/重复点击）时面板**本就不该变**，
+        //     白等 PANEL_FP_WAIT_MS 会让吞吐崩（实测 5min 仍在第 1 页 ✗）。
+        val fpRects = if (PANEL_FP_GATE_ENABLED && gridCellChanged) {
+            PanelFingerprint.regions(profile, panelKey)
+        } else {
+            emptyList()
+        }
+        if (fpRects.isNotEmpty()) {
+            val fp0 = PanelFingerprint.capture(frame, fpRects)
+            if (fp0 != null && PanelFingerprint.same(fp0, panelFpSnapshot)) {
+                var waited = 0L
+                while (waited < PANEL_FP_WAIT_MS) {
+                    delay(PANEL_FP_POLL_MS)
+                    waited += PANEL_FP_POLL_MS
+                    val f2 = runCatching { freshFrame() }.getOrNull() ?: break
+                    val fp2 = try {
+                        PanelFingerprint.capture(f2, fpRects)
+                    } finally {
+                        f2.release()
+                    }
+                    if (fp2 != null && !PanelFingerprint.same(fp2, panelFpSnapshot)) {
+                        Log.i(TAG, "面板指纹：等 ${waited}ms 后新面板就绪（陈旧帧已修复）")
+                        panelFpSnapshot = fp2
+                        break
+                    }
+                }
+                if (!PanelFingerprint.same(PanelFingerprint.capture(frame, fpRects), panelFpSnapshot)) {
+                    panelFpSnapshot = PanelFingerprint.capture(frame, fpRects)
+                } else if (waited >= PANEL_FP_WAIT_MS) {
+                    Log.w(TAG, "面板指纹：${PANEL_FP_WAIT_MS}ms 内面板未变化（按原样解析，可能陈旧帧）")
+                    panelFpSnapshot = fp0
+                }
+            } else if (fp0 != null) {
+                panelFpSnapshot = fp0
+            }
+        }
         try {
             if (panelKey == "weapon_backpack") {
                 parseWeaponPanel(frame, ocr, step.optJSONObject("dict"))
@@ -3033,6 +3423,16 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         dict: JSONObject? = null,
     ) {
         val base = "panels.$panelKey"
+        // ══ 祝圣之霜（Sanctifying Elixir）内容下移：**只移 y 轴在横幅以下的那几项** ══════════
+        // 【用户 2026-09-16 定稿 + GOODScanner ELIXIR_SHIFT 佐证】
+        //   横幅画在面板上部，把**它以下**的内容整体下移 zhushengShiftPx（3200 帧 = 63px）。
+        //   ✅ 受影响（位移）：**等级、4 条副词条**（外加同区域的 锁 / 收藏(星标) 两个投票判据，
+        //      见 VoteJudges.panelLock / panelAstral 的 yShift 参数）
+        //   ❌ **不受影响（绝不可平移）**：**单件名 name、部位 slot、主词条名 mainName、
+        //      主词条值 mainValue、管理界面的 set_name** —— 这些槽位在横幅以上/之外，位置固定。
+        //   ⚠️ 单件名槽尤其关键：我们**不读 set_name**，setKey 全靠「单件名 → 套装」反推
+        //      （good_names.artifactPieces，276 件；用户 2026-09-01 定稿）⇒ 一旦把 name 槽也平移，
+        //      祝圣件的单件名会读成别的行 ⇒ 反推链直接断掉。**不要"顺手"给 name/slot/main 加 shift。**
         val yShift = if (vars.crafted) profile.zhushengShiftPx else 0
 
         // 一次批量读全部文本槽（name/slot/mainName/mainValue/level/subStats×4）——单帧单调用，
@@ -3078,20 +3478,49 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         val rarity = if (starCount > 0) starCount else vars.rarity
         vars.rarity = rarity
 
-        // 副词条（祝圣 yShift；4 行）——blank 槽 parse 为 null 被 mapNotNull 过滤
-        var substats = lines.drop(5).mapNotNull { StatParser.parse(it, names) }
+        // 副词条（祝圣 yShift；**连续块**读取）
+        // ★★ 2026-09-16 **ground truth 定标修正**（旧「5★恒4条 / 4★最高3条」假设被推翻：
+        //   design-docs/good-diff-20260916.md，对比 dsl/verify/_audit/good_diff_20260916.json）：
+        //   · GT 实测 **5★+0 有 67%（158/235）只有 3 条** ⇒ 旧规则「5★恒 4」会把紧随词条块的
+        //     **套装名/套装效果行**当成第 4 条留下 ⇒ **幻影词条**（真机 5★+0 读 4 条的 205 件 vs GT 77 件）。
+        //     布局证据：verify/annotated/artifact_backpack.png —— 词条行位 794/858/922/986（间距 64），
+        //     y≈1090 起是「套装名: 2件套：…」⇒ 只有 3 条时第 4 行 ROI 正好压在这一行上。
+        //   · GT 实测 **4★+16 24/24 全是 4 条** ⇒ 旧规则「4★ 最高 3」把真第 4 条砍掉 ⇒ **少读**（24/24）。
+        //   ⇒ 改为**不按稀有度猜条数**：读**连续块**，遇"非空但解析不出 stat"的行即块结束，全局上限 4。
+        var substats = StatParser.parseBlock(lines.drop(5), names)
 
-        // 稀有度-词条数规则（用户定稿 2026-09-02）：5★恒4词条 / 4★初始2最高3 / 3★2★止扫不解析
-        when {
-            rarity < STOP_MARKER_RARITY -> {
-                Log.d(TAG, "parsePanel: rarity=$rarity stop-marker, not parsed")
-                return
-            }
-            rarity == 5 && substats.size > MAX_SUBS_5STAR -> substats = substats.take(MAX_SUBS_5STAR)
-            rarity == 4 && substats.size > MAX_SUBS_4STAR -> {
-                Log.w(TAG, "parsePanel: 4★ has ${substats.size} substats (>3), parse anomaly")
-                substats = substats.take(MAX_SUBS_4STAR)
-            }
+        // 仅保留止扫判定（3★/2★ 不解析）
+        // ★★ 2026-09-16 修（新 GT 定标：账号 941 件全 4★/5★、无任何 3★，却有 13 件
+        //   TheExile/Instructor「4★+16」被止扫吃掉 —— 散落单格静默丢件）：
+        //   `rarity = if (starCount > 0) starCount else vars.rarity` ⇒ **starCount == 0 时用的是 banner 值**。
+        //   而**星带是权威判据**：归档实拍 3★/4★ 面板逐格金像素 = 891/903/894/0/0（3 颗）与
+        //   969/975/992/1000/0（4 颗），余量近 10 倍 ⇒ **starCount==0 只可能是"这一帧不是有效面板"**
+        //   （面板没开/帧陈旧），此时 banner 的低星读数**不可信**，不得作为止扫依据。
+        //   处理：不 emit（本格本就没读到）、**不发布低星 rarity**（否则 flow 的 stopWhen 误触发、
+        //   把后面的件全切掉）、并让 lastCellKey 保持空 ⇒ 交「空读格回读」重取。
+        if (rarity < STOP_MARKER_RARITY && starCount == 0) {
+            Log.w(
+                TAG,
+                "parsePanel: starCount=0（无效面板帧）而 banner 判 rarity=$rarity " +
+                    "⇒ 不作止扫依据、不发布低星；待空读格回读（piece=${pieceName ?: "?"} level=${vars.level}）",
+            )
+            vars.rarity = STOP_MARKER_RARITY
+            lastCellKey = null
+            return
+        }
+        if (rarity < STOP_MARKER_RARITY) {
+            // ★ 2026-09-16 定向诊断（GT 实测：本账号 941 件**全 4★/5★、无 3★**，却有 13 件
+            //   TheExile/Instructor「4★+16」被读成 rarity<4 ⇒ 走到这里 return ⇒ **静默丢件**
+            //   （导出里 rarity<4 的件为 0，证明它们根本没被 emit）。
+            //   ⇒ 把"为什么读成低星"的全部证据打出来：星带命中数、banner 色、等级、单件名、主词条。
+            Log.w(
+                TAG,
+                "parsePanel 止扫命中（疑似误判，账号无 3★）：rarity=$rarity starCount=$starCount " +
+                    "level=${vars.level} piece=${pieceName ?: "?"} slot=${slotKey ?: "?"} " +
+                    "main=${mainStat?.key ?: "?"} 词条=${substats.size}条 " +
+                    "⇒ 若为 4★/5★ 件则是**星带/banner 误判**，需查 starBand 几何或 banner 色域",
+            )
+            return
         }
         // §14 dict.subStats：OCR 数值吸附到标准档位（rollTable），使导出值与游戏内一致
         dict?.optString("subStats")?.takeIf { it.isNotEmpty() }?.let { subDict ->
@@ -3109,6 +3538,8 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 names?.match(it, GoodNames.Kind.PIECE)?.key
             }
         }
+        // ★ A1'（2026-09-16）：把单件名规范化为**词典标准名**，供去重键使用（见内容键注释）。
+        //   只影响"入键用的名字"，不改变 setKey 反推本身；词典未命中/未注入词典时回落原始名。
         // §14 P2-C3：管理界面面板 set_name **可读直采**（背包面板被遮挡，只能单件名反推）。
         // 直采优先；失败仍回落反推。同帧顺带判读 lockChip/starChip 图标。
         if (panelKey == "artifact_manage") {
@@ -3129,6 +3560,49 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             Log.w(TAG, "setKey not found for piece '$pieceName' (dict miss)")
         }
 
+        // ★ 2026-09-16（按 GOODScanner roll_solver 补齐）：解「每条强化次数 + 首档值 + 整件 totalRolls」。
+        //   不可解 ⇒ 原样导出（宁缺不错）；解出后 initialValue 只在唯一时写入。
+        // ★ 2026-09-16：带「(待激活)」标记一起送进 solver —— lv0 时 init 由标记直接定
+        //   （GOODScanner result_init = num_active − count(inactive)），不再靠猜；且待激活条
+        //   **不计入 totalRolls**、导出时单列 `unactivatedSubstats`（GT 894/894 件都有该字段）。
+        val rollIn = substats.map { RollSolver.In(it.key, it.value, it.inactive) }
+        val solved = RollSolver.solve(rarity, vars.level, rollIn)
+        if (solved == null && substats.isNotEmpty()) RollSolver.logMiss(rarity, vars.level, rollIn)
+        // ★ 2026-09-16（GT 定案）：`+0` 件末尾那行「待激活」词条 **要保留** —— Irminsul/GT 把它
+        //   **单列**到 `unactivatedSubstats`（894/894 件都有该字段），不是丢弃。
+        //   拆分优先级：① OCR 显式「(待激活)」标记（最准）② 无标记但 solver 推断出末尾一条是待激活
+        //   （`activeCount` < 总行数）⇒ 按"末行是待激活"切尾。
+        val unactFromFlag = substats.count { it.inactive }
+        val inferredTail = if (unactFromFlag == 0 && solved != null && solved.activeCount in 1 until substats.size) {
+            Log.d(
+                TAG,
+                "待激活（solver 推断，无 OCR 标记）: 末 ${substats.size - solved.activeCount} 行" +
+                    "（rarity=$rarity level=${vars.level}）",
+            )
+            substats.size - solved.activeCount
+        } else {
+            0
+        }
+        val cut = unactFromFlag + inferredTail
+        val activSubs: List<GoodSubStat>
+        val unactSubs: List<GoodSubStat>
+        if (solved != null) {
+            activSubs = solved.substats.take(solved.substats.size - cut)
+                .map { GoodSubStat(it.key, it.value, it.initialValue, it.rollCount) }
+            unactSubs = solved.substats.drop(solved.substats.size - cut)
+                .map { GoodSubStat(it.key, it.value, it.initialValue, it.rollCount) }
+        } else {
+            val n = substats.size - inferredTail
+            activSubs = substats.take(n).map { GoodSubStat(it.key, it.value) }
+            unactSubs = substats.drop(n).map { GoodSubStat(it.key, it.value) }
+        }
+        if (cut > 0) {
+            Log.i(
+                TAG,
+                "unactivatedSubstats: ${unactSubs.size} 条（OCR 标记=$unactFromFlag 推断=$inferredTail）" +
+                    " → ${unactSubs.joinToString { "${it.key}=${it.value}" }}",
+            )
+        }
         val artifact = GoodArtifact(
             setKey = setKey,
             slotKey = slotKey,
@@ -3136,10 +3610,13 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             rarity = rarity,
             mainStatKey = mainStat?.key,
             mainStatValue = mainStat?.value ?: 0.0,
-            substats = substats.map { GoodSubStat(it.key, it.value) },
+            substats = activSubs,
+            unactivatedSubstats = unactSubs,
             lock = vars.locked == true,
             favorited = vars.favorited,
-            pieceName = pieceName ?: "",
+            pieceName = pieceName ?: "", // 仅作 QA/日志，**不入去重键**（见内容键注释）
+            totalRolls = solved?.totalRolls,
+            elixerCrafted = vars.crafted,
         )
         // 指纹去重入库（Q2 决策；键升级为内容指纹）：翻页 settle 半格重叠会重复出现同一件，
         // 快速点击的 stale 读内容也与上一件完全一致——两者都靠内容键拦截。
@@ -3150,19 +3627,43 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             listOfNotNull(
                 setKey,
                 slotKey,
-                pieceName?.takeIf { it.isNotEmpty() },
+                // ★★ 2026-09-16 用户定稿：**名字一律不进去重键** ★★
+                //   理由（实测支撑）：① 名字只是"套装的函数"（`artifactPieces` 是 piece→(set,slot) 的函数），
+                //   对键**零增量区分力**；② **同名圣遗物极多**（同套同部位同强化的复数件名字完全相同 ⇒
+                //   靠名字去重会把它们并掉 ✗ 实测 A1'/A1'' 都在这里翻车：一次 −21 件、一次撞名）；
+                //   ③ 名字是**原始 OCR 文本**，同一张卡两次读可能差一个字 ⇒ 键不同 ⇒ 该去重的没去掉。
+                //   ⇒ 去重身份只由**内容**决定：set/slot/level/main(+value)/lock/fav/substats。
+                //      （"两件副词条完全一样"在游戏里基本不可能 ⇒ 这正是最可靠的判重依据。）
                 level.toString(),
                 mainStatKey,
                 mainStatValue.toString(),
                 "L$lock",
                 "F$favorited",
+                // 内容身份含**全部**读到的行（含待激活那条：它也是该件的真实数据，GT 单列导出）
             ).joinToString("|") + "|" + substats.joinToString("|") { "${it.key}:${it.value}" }
         }
+        lastCellKey = contentKey
         // ★ 连续重复件判据：身份键用**与 dedupe 相同的 contentKey**（件名+等级+词条），
         //   不能只用件名 —— 同件名的不同圣遗物会被秒判重复。
         noteDupAndMaybeStop(contentKey, seenArtifactKeys.toList())
         if (dedupe && !seenArtifactKeys.add(contentKey)) {
             Log.d(TAG, "duplicate artifact skipped: $pieceName")
+            return
+        }
+        // ★ 2026-09-16（新 GT 对账定标）：**垃圾条拦截** —— 实测导出 22 件是 setKey/词条全空的空壳
+        //   （只读到等级/稀有度、其余没解析出来）。它们既污染导出（"错"），又让该格不再被回读（"漏"）
+        //   ⇒ 不入库 + lastCellKey 置空，交「空读格回读」重读。
+        // ⚠️ 判据升级（2026-09-16 二轮真机实测）：**词条为空即视为读失败**，不只是"全空"。
+        //   实测有大量"半读条"——setKey/等级/主词条都读到了、`substats=[]`（stale/半幅帧）。
+        //   GT 复核：**941 件里每件至少 2 条词条**（0 条不存在）⇒ `substats` 为空必是失败。
+        //   这类条同时造成"错"（多出）与"漏"（挤掉真件），必须丢弃 + 回读。
+        if (setKey.isNullOrEmpty() || substats.isEmpty()) {
+            Log.w(
+                TAG,
+                "丢弃读失败条目（setKey=${setKey ?: "null"} 词条 ${substats.size} 条）；piece=${pieceName ?: "?"} " +
+                    "level=${vars.level} rarity=$rarity ⇒ 交空读格回读重取",
+            )
+            lastCellKey = null
             return
         }
         results.add(artifact)
@@ -3218,6 +3719,24 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     }
 
     /** 星带逐格采样：格内金像素>100 → 该星点亮（profiles starBand.judge 固化阈值）。星带不随祝圣 yShift 移动。 */
+    /**
+     * 卡格指纹矩形：卡片中心一小块（默认 72×72 帧 px）——**只要够区分"同一张卡"即可**。
+     * 用当前页的相位偏移 profile（`prof`）取该格中心，保证与点击坐标同源。
+     */
+    private fun cellFingerprintRect(
+        gridKey: String,
+        prof: ScreenProfile,
+        col: Int,
+        row: Int,
+        pageProfile: ScreenProfile,
+    ): FrameRect? = runCatching {
+        val g = prof.gridGeometryFor(gridKey) ?: return null
+        if (col >= g.colXs.size || row >= g.rowYs.size) return null
+        val cx = g.colXs[col] + g.cardW / 2
+        val cy = g.rowYs[row] + g.cardH / 2
+        FrameRect(cx - 36, cy - 36, cx + 36, cy + 36)
+    }.getOrNull()
+
     private fun countStars(frame: Mat, panelKey: String = "artifact_backpack"): Int {
         val band = profile.rawObject("panels.$panelKey")?.optJSONObject("starBand")
             ?: return 0
@@ -3313,10 +3832,21 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             .onFailure { Log.w(TAG, "stopWhen 表达式求值失败，按未命中处理：$expr (${it.message})") }
             .getOrDefault(false)
         if (hit) {
+            // ★ 2026-09-16 守卫（真机实测驱动）：`scope=cell` 的 3★/2★ 止扫**必须连续 2 格命中**才认。
+            //   本账号实测**没有 3★/2★**（背包 941 全 5★/4★）⇒ 任何 `rarity < 4` 读数都是**单格星级误读**；
+            //   一次误读即置 stopRequested 会把整轮扫描在第 10 页截断（实测只入库 149/941）。
+            //   连续 2 格同时误读同一 rarity<4 的概率极低 ⇒ 代价可忽略，收益是避免整轮报废。
+            stopWhenCellStreak++
+            if (scope == "cell" && stopWhenCellStreak < 2) {
+                Log.i(TAG, "stopWhen ($scope) 命中但未连续确认（$stopWhenCellStreak/2）⇒ 继续扫描：$expr")
+                return
+            }
             // scope=cell（本页后停）：置 flag，页遍历结束后停止；scope=page 立即停
             vars.stopRequested = true
             vars.stopReason = "stopWhen"
             Log.i(TAG, "stopWhen triggered ($scope): $expr")
+        } else {
+            stopWhenCellStreak = 0
         }
     }
 
@@ -3334,6 +3864,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      *    最多 [SIG_CONFIRM_RETRIES] 次。这一步替代旧判据的"文本非空"隐含防护（空白平台期）。
      *
      * @param what 日志前缀（如 `panel` / `nav:天赋`）
+     * @return **整个等待期是否至少观察到一次变化**。`false` = 面板签名**从未变过** ⇒ 极可能
+     *   **点击被送达但被游戏吞掉**（2026-09-16 run6 实证：该页 21 格耗时**零方差且最快**
+     *   = 就绪轮询一上来签名即稳定 = 内容从未变化；第 1 格是新件、第 2~21 格全重复）。
+     *   调用方（cell 路径）据此做**同坐标重发**兜底。
+     *   ⚠️ 与内部 `changedEver` **不同**：后者会被 `confirm 空读重试`重置（见下），不可用作该判据。
+     *   签名不可用而中止 ⇒ 无法判断 ⇒ 返回 `true`（按"已送到"处理，不触发重发）。
      */
     private suspend fun waitReadyBySignature(
         before: ByteArray,
@@ -3348,12 +3884,14 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         /** 认定"已稳定"所需的**跨帧**连同样本数（默认 [SIG_STABLE_SAMPLES]）。 */
         stableSamples: Int = SIG_STABLE_SAMPLES,
         confirm: (suspend () -> Boolean)? = null,
-    ) {
+    ): Boolean {
         val roiI = roi.toIntRect()
         var waited = 0L
         var first = true
         var lastGen = Long.MIN_VALUE
         var changedEver = false
+        // ★ 2026-09-16：与 changedEver 并行、**永不重置**的"见过变化"标记（返回值判据，见 KDoc）
+        var sawAnyChangeEver = false
         var sameStreak = 0
         var retries = 0
         var prev: ByteArray? = null
@@ -3378,7 +3916,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             waited += step
             if (!frameSource.sampleSignature(roiI, cur, SIG_BLOCKS_X, SIG_BLOCKS_Y)) {
                 Log.w(TAG, "$what signature unavailable mid-poll, abort")
-                return
+                return true   // 无法判断 ⇒ 不判"点击被吞"
             }
             val gen = frameSource.frameGeneration()
             val genChanged = first || gen != lastGen
@@ -3406,6 +3944,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             when {
                 changed -> {
                     changedEver = true
+                    sawAnyChangeEver = true
                     // 未动判据**严格**：任何一块不同都不算"同一状态"（见 SIG_LEN 旁的事故记录）
                     val sameAsPrev = p != null && changedFraction(p, cur) == 0f
                     sameStreak = if (sameAsPrev && genChanged) sameStreak + 1 else 1
@@ -3417,7 +3956,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                     // 未变兜底：用"距动作的墙钟"（静态屏也能兜底）
                     if (waited >= maxOf(fallbackMs, minMs)) {
                         logWait("unchanged-fallback")
-                        return
+                        return sawAnyChangeEver   // false = 全程未变 ⇒ 疑似点击被吞
                     }
                 }
                 else -> sameStreak = 0
@@ -3426,11 +3965,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 val ok = confirm?.invoke() ?: true
                 if (ok) {
                     logWait("stable")
-                    return
+                    return sawAnyChangeEver
                 }
                 if (retries >= SIG_CONFIRM_RETRIES) {
                     Log.w(TAG, "$what confirm still empty after $retries retries, proceed")
-                    return
+                    return sawAnyChangeEver
                 }
                 retries++
                 Log.i(TAG, "$what confirm empty → 以当前签名为新基准再等一轮 retry=$retries")
@@ -3450,6 +3989,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         }
         logWait("timeout")
         Log.w(TAG, "$what signature not settled within ${maxMs}ms")
+        return sawAnyChangeEver
     }
 
     /**
@@ -3584,6 +4124,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     private suspend fun freshFrame(timeoutMs: Long = 2500L): Mat {
         // 只读探针：freshFrame **包含「等一个新帧」的等待**（投影 ~30fps ⇒ 平均 ~33ms），
         // 这部分不计入 nav/panel/settle ⇒ 是「其它」里最易被忽略的大块（见 IMAGE-PATH-COST.md §8）。
+        lastProgressAtMs = android.os.SystemClock.elapsedRealtime()
         val t0 = System.nanoTime()
         try {
             return try {
@@ -3663,6 +4204,16 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          * 上限 1 轮：正常路径 0 轮（实测圣遗物/武器流程 0 次读空），异常格最多多花 ~300ms。
          */
         const val SIG_CONFIRM_RETRIES = 1
+
+        /**
+         * cell 点击后「面板全程未见变化」时的**同坐标重发**上限（2026-09-16）。
+         *
+         * 为什么安全：重发用的是**完全相同的点击坐标** ⇒ 最坏只是重复读同一张卡（幂等），
+         * 不会误加相邻件；代价 ≈ 1 次点击 + 一轮等待。取 1（共 2 次尝试）——
+         * 观测到的"被吞窗口"可长达 20 击，重发 1 次已能给多数瞬时吞点击兜底，
+         * 且不把偶发问题变成常态耗时。
+         */
+        const val CLICK_RETRY_MAX_ON_NOCHANGE = 1
         /**
          * 面板"就绪内容带"的典型组成项（**仅文档性**；实现取面板内**所有**矩形条目的并集，
          * 刻意不按 key 过滤 —— 带必须覆盖我们实际要读的每个字段，锁图标/星行/横幅都算）。
@@ -3679,6 +4230,15 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   ⇒ 下一次滑动打在滚动动画中 ⇒ 被整段吞掉。700ms 让 settle 跨过尾巴。
         const val SETTLE_STABLE_MS = 700L
         const val SETTLE_MAX_MS = 6000L
+
+        /**
+         * ★ 2026-09-14（[awaitGridStable] 的 `requireChange` 专用）：命令滑动后，在此窗口内必须
+         * **先观察到一次画面变化**才允许判「已稳定」。堵「手势异步派发 ⇒ 起步前的静止帧被当稳定帧」这个
+         * 静默误判（实测手势时长 780ms，故留 1500ms 余量；超窗未变 = 滑动未送达/列表到底）。
+         */
+        const val SETTLE_CHANGE_WINDOW_MS = 1500L
+
+
         const val SETTLE_FRAME_TIMEOUT_MS = 800L
         /** `pollAnchorReady` 的轮询步长（enterScreen 末端就绪）。一次采样 = 抓帧 + 1 次 rec ≈ 10~25ms。 */
         const val ANCHOR_POLL_MS = 150L
@@ -3698,8 +4258,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         /** 诊断用：VoteJudges.gridThumb 的缩略图尺寸（24×16），仅用于掩码日志与长度校验。 */
         const val THUMB_COLS = 24
         const val THUMB_ROWS = 16
-        // §12.5 相位校正（2026-09-05）：|φ| 超过卡片半高（pagedGrid 内按 geometry 计算）才补滑，最多 2 次
-        const val MAX_FINISH_SWIPES = 2
+
         /** §14 A3：snap 遍历最大轮数兜底（防指纹判据失效时死循环；正常由 peek 消失终止）。 */
         const val MAX_SNAP_ROUNDS = 400
         const val MAX_SCROLL_TOP_ROUNDS = 12
@@ -3715,6 +4274,39 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          * 代价不对称：真到底时多滑 3 次（≈3s），误判则整轮报废。
          */
         const val GRID_END_RETRIES = 3
+
+        /** 行级闭环（方案 C）每轮扫描最多回补次数（防病态页面把时间耗光）。 */
+        const val ROW_CHECK_MAX_REPAIRS = 12
+
+        /**
+         * 页级看门狗（2026-09-16）：真机偶发「主滑派发后无任何后续日志」的硬挂
+         * （本轮实测卡死 >5min，整轮扫描报废）。正常单页 ~6s ⇒ 超过本阈值即判挂死，
+         * 置 stopRequested 让 pagedGrid 正常收尾（**已入库结果照常导出**，不白跑）。
+         */
+        const val PAGE_WATCHDOG_MS = 90_000L
+
+        /** 面板指纹**等待**上限/轮询（GOODScanner `wait_until_panel_loaded`）：面板未换时最多等这么久。 */
+        //   ⚠️ 2026-09-16 真机实测：20 次"等待成功"**全部只需 120ms**（= 一个轮询间隔）⇒
+        //   1.5s 上限纯属浪费（41 次超时每次都白烧 1.5s ≈ 61s ⇒ 整轮 +14% 时长）⇒ 砍到 400ms。
+        const val PANEL_FP_WAIT_MS = 400L
+        const val PANEL_FP_POLL_MS = 120L
+
+        /**
+         * 面板指纹闸门**总开关（true = 已接入；卡格指纹条件化后不会再白等）**。
+         *
+         * ⚠️ 2026-09-16 真机两轮实测结论：
+         * - 当"重复件"用时 ✗：把"面板未变"当重复直接跳过解析 ⇒ 导出 **937 → 817（丢 120 件）** ✗✗
+         * - 当"加载闸门"用时 ✗：语义正确（等新面板渲染），但**我方半页重叠是预期行为** ⇒
+         *   重复格的面板本来就"不变" ⇒ 每格白等 `PANEL_FP_WAIT_MS` ⇒ **吞吐崩**（5 分钟仍在第 1 页）
+         *
+         * 正解（GOODScanner 原设计）：**去重放在"点击前"** —— `detect_grid_duplicates` 比**网格卡格**像素，
+         * 判为重复格则**根本不点**（既不等待也不跑 OCR）；面板 snapshot 只负责"等加载完"。
+         * 该实现待做（`PanelFingerprint` 已具备像素抓取/比较能力，复用即可）。
+         */
+        const val PANEL_FP_GATE_ENABLED = true
+
+        /** 档位吸附容差（1 位小数显示值的 OCR 抖动级）：超此差值**不吸附**，保留画面原值。 */
+        const val SNAP_TOL = 0.06
 
         /**
          * 翻页滑动的**起手 y 到底边至少留出的余量**（帧 px）。
@@ -3733,8 +4325,13 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          */
         const val DEFAULT_SET_DICT = "mappings.artifactSets"
         const val DEFAULT_CHAR_DICT = "mappings.characters"
-        const val MAX_SUBS_5STAR = 4 // 稀有度-词条数规则（用户定稿 2026-09-02）：5★ 恒 4 词条
-        const val MAX_SUBS_4STAR = 3 // 4★ 初始 2 最高 3（>3 = 解析异常截断）
+        /**
+         * ⚠️ 2026-09-16 GT 定标（旧两条常量 MAX_SUBS_5STAR=4 / MAX_SUBS_4STAR=3 **已删除**）：
+         * 按稀有度猜条数与真值矛盾 —— GT 实测 5★+0 有 67% 只有 3 条、4★+16 100% 是 4 条
+         * ⇒ 一多（幻影第 4 条）一少（砍掉真第 4 条）两类错。现由 [StatParser.parseBlock]
+         * 的连续块读取 + [StatParser.MAX_SUBS] 上限统一处理，不再按稀有度截断。
+         * 条数真值校验见 design-docs/good-diff-20260916.md。
+         */
         const val STOP_MARKER_RARITY = 4 // 3★/2★ = 止扫标识不解析（flow 语义 rarity < 4，即低于 4★ 止扫）
 
         /** chain 锚名 → profile rect 路径（P1-a 固定映射；P3 收敛为 chain 机读格式）。 */

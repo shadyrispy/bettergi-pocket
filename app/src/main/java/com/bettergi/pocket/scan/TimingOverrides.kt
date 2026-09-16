@@ -59,33 +59,6 @@ object TimingOverrides {
     var advanceExtraPx: Int = 0
 
     /**
-     * ★ 翻页**落地位移闭环**开关（默认 `1` = 开）。
-     *
-     * 为什么需要（2026-09-12 实测）：单次手势的**落地位移远小于指令距离**，且波动极大
-     * （扫描前段 ~0.7×，后段可低到 ~0.05×）⇒「一页推进 3 行」靠单次滑动根本做不到；
-     * 而自适应点击位置只能吸收 **±半卡高（≈126px）**。
-     * 闭环 = 每次滑动后用 [VoteJudges.profileShift] 实测落地位移，不足则按**实测增益**补滑。
-     * `0` = 回到单次滑动（原行为，便于 A/B）。
-     */
-    var advanceLoop: Int = 1
-
-    /** 闭环容差（帧 px）；`0` = 自动取「行距 × 0.4」（≈82px，仍小于自适应能吸收的 126px）。 */
-    var advanceTolPx: Int = 0
-
-    /** 闭环里单页最多滑动次数（含首次）。 */
-    var advanceMaxSteps: Int = 6
-
-    /**
-     * \u2605 单次滑动命令的**上限**（帧 px）；`0` = 不限制。
-     *
-     * 为什么需要（2026-09-12 A/B 实测）：落地量与命令是**分段**关系 ——
-     *   命令 612 ⇒ 落地 **720**（触发游戏 fling，量不可控、常过冲）；
-     *   命令 60  ⇒ 落地 **51**（≈1:1 跟随，**可控**）。
-     * ⇒ 把每步命令压到 fling 阈值以下（~150~200px）多走几次，落点反而是**线性可控**的
-     *   （例：4×150 ≈ 600 ≈ 3 行，误差 ~12px，远优于"单次 612 却落地 720"）。
-     */
-    var advanceCmdMaxPx: Int = 0
-    /**
      * ★ 就绪签名的**分块网格**（列×行）。块越小 ⇒ 对"淡入早期的小变化"越敏感 ⇒ 越早检出"已变"
      * （实测 `firstChange` 占整个等待的 83%）；块越大 ⇒ 均值越平滑、越不容易被噪声干扰。
      * 只增不减地夹到 [ScanEngine.SIG_BLOCKS_X_MAX]/[SIG_BLOCKS_Y_MAX]。
@@ -141,10 +114,7 @@ object TimingOverrides {
         sigBlocksY = D_SIGBY
         advanceDistPx = 0
         advanceExtraPx = 0
-        advanceLoop = 1
-        advanceTolPx = 0
-        advanceMaxSteps = 6
-        advanceCmdMaxPx = 0
+
         swipeFastSteps = D_SF_STEPS
         swipeFastMs = D_SF_MS
         swipeSlowSteps = D_SS_STEPS
@@ -161,7 +131,7 @@ object TimingOverrides {
             panelSigSamples == D_SIGSAMPLES && panelSigConfirm == D_SIGCONFIRM &&
             panelSigGateCached == D_SIGGATE && !sigDebug && sigBlocksX == D_SIGBX && sigBlocksY == D_SIGBY &&
             advanceDistPx == 0 && advanceExtraPx == 0 &&
-            advanceLoop == 1 && advanceTolPx == 0 && advanceMaxSteps == 6 && advanceCmdMaxPx == 0 &&
+
             swipeFastSteps == D_SF_STEPS &&
             swipeFastMs == D_SF_MS && swipeSlowSteps == D_SS_STEPS &&
             swipeSlowMs == D_SS_MS && swipeBackMs == D_SB_MS
@@ -204,10 +174,7 @@ object TimingOverrides {
                     "sigdebug" -> sigDebug = v != 0L
                     "advdist" -> advanceDistPx = v.toInt().coerceIn(50, 2000)
                     "advextra" -> advanceExtraPx = v.toInt().coerceIn(-500, 1000)
-                    "advloop" -> advanceLoop = if (v != 0L) 1 else 0
-                    "advtol" -> advanceTolPx = v.toInt().coerceIn(0, 400)
-                    "advmax" -> advanceMaxSteps = v.toInt().coerceIn(1, 8)
-                    "advcmdmax" -> advanceCmdMaxPx = v.toInt().coerceIn(0, 800)
+
                     "swFastSteps" -> swipeFastSteps = v.toInt().coerceAtLeast(1)
                     "swFastMs" -> swipeFastMs = v.coerceAtLeast(10L)
                     "swSlowSteps" -> swipeSlowSteps = v.toInt().coerceAtLeast(0)
@@ -226,7 +193,7 @@ object TimingOverrides {
             "sigband=${if (panelSigBand) 1 else 0},sigsamples=$panelSigSamples,sigconfirm=${if (panelSigConfirm) 1 else 0}," +
             "siggate=${if (panelSigGateCached) 1 else 0}," +
             "advdist=$advanceDistPx,advextra=$advanceExtraPx," +
-            "advloop=$advanceLoop,advtol=$advanceTolPx,advmax=$advanceMaxSteps,advcmdmax=$advanceCmdMaxPx," +
+
             "sigblocks=${if (sigBlocksX > 0) "${sigBlocksX}x$sigBlocksY" else "auto"}," +
             "swFast=${swipeFastSteps}x$swipeFastMs,swSlow=${swipeSlowSteps}x$swipeSlowMs,swBack=$swipeBackMs," +
             "swipeTotal=$swipeTotalMs" + if (isDefault) " (default)" else ""

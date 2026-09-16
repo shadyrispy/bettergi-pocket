@@ -345,9 +345,12 @@ class OverlayWindowController(
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT,
         ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = prefs.getInt(KEY_X, 0)
-            y = prefs.getInt(KEY_Y, dp(120))
+            // ★ 2026-09-14（用户定稿）：悬浮窗**只允许沿屏幕右侧边缘纵向移动**，默认落在右上角
+            //   游戏按钮带（背包/角色/返回，1440 基准 y≈36..125px）**下方**，避免误触。
+            //   gravity 用 TOP|END ⇒ x = 距右缘偏移，钉死 dp(8)；wrap_content 无需先量宽度 ⇒ 无"先左后右"闪位。
+            gravity = Gravity.TOP or Gravity.END
+            x = overlayRightMarginPx()
+            y = prefs.getInt(KEY_Y, 0)   // 0 ⇒ 首帧后由 clampOverlayPosition() 抬到按钮带下方
         }
 
         setupDragAndClick(bubble, layoutParams) {
@@ -435,6 +438,11 @@ class OverlayWindowController(
         rootView = root
         params = layoutParams
         windowManager.addView(root, layoutParams)
+        // ★ 2026-09-14：wrap_content 宽度 layout 后才有 ⇒ 首帧后立刻规范化（右缘 + 按钮带下方，避免左缘闪位）
+        root.post {
+            clampOverlayPosition(layoutParams)
+            updateLayout(layoutParams)
+        }
         setLogWindowVisible(prefs.getBoolean(KEY_LOG_VISIBLE, false), persist = false)
         setAutoSkipMenuExpanded(prefs.getBoolean(KEY_AUTO_SKIP_EXPANDED, false), persist = false)
         setLaunchMenuExpanded(prefs.getBoolean(KEY_LAUNCH_EXPANDED, false), persist = false)
@@ -449,8 +457,11 @@ class OverlayWindowController(
         mainHandler.postDelayed(refreshA11yLater, 2000L)
         root.post {
             rememberScreen()
-            clampToScreen(layoutParams)
-            if (!expanded) snapToEdge(layoutParams, animate = false)
+            // ★ 2026-09-16（审计 P2-1）：改走 clampOverlayPosition —— 本类 gravity 已是 TOP|END，
+            //   而 clampToScreen/snapToEdge 内部按「x = 左坐标」运算（snapToEdge 的
+            //   `targetX = screen.first − width` 分支在 END 下会把窗推去屏幕左侧）⇒ 主窗一律不再经过它们。
+            clampOverlayPosition(layoutParams)
+            updateLayout(layoutParams)
             scheduleIdleFade()
         }
     }
@@ -820,7 +831,10 @@ class OverlayWindowController(
                 .setInterpolator(ease)
                 .withEndAction {
                     transforming = false
-                    params?.let { snapToEdge(it, animate = true) }
+                    params?.let {
+                        clampOverlayPosition(it)   // ★ 收起后回右缘（不再吸最近边）
+                        updateLayout(it)
+                    }
                     scheduleIdleFade()
                 }
                 .start()
@@ -1430,15 +1444,26 @@ class OverlayWindowController(
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    lp.x = startX + (event.rawX - touchX).toInt()
-                    lp.y = startY + (event.rawY - touchY).toInt()
-                    clampToScreen(lp)
+                    if (lp === params) {
+                        // ★ 主悬浮窗：只纵向（x 钉右缘）；日志窗 drag 行为不变
+                        lp.y = startY + (event.rawY - touchY).toInt()
+                        clampOverlayPosition(lp)
+                        updateLayout(lp)
+                    } else {
+                        lp.x = startX + (event.rawX - touchX).toInt()
+                        lp.y = startY + (event.rawY - touchY).toInt()
+                        clampToScreen(lp)
+                    }
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                     persistPosition(lp)
+                    // ⚠️ 2026-09-16（审计 P2-1）：`snapOnRelease` 目前唯一调用点传 false（本窗不再左右吸边），
+                    //   但此分支一旦放开就必须走 clampOverlayPosition —— 本类 gravity=TOP|END，
+                    //   而 snapToEdge 内部按「x = 左坐标」运算 ⇒ 会把窗推去屏幕左侧。
                     if (snapOnRelease && !expanded) {
-                        snapToEdge(lp, animate = true)
+                        clampOverlayPosition(lp)
+                        updateLayout(lp)
                     }
                     true
                 }
@@ -1478,9 +1503,10 @@ class OverlayWindowController(
                         moved = true
                     }
                     if (moved) {
-                        lp.x = startX + dx
+                        // ★ 只纵向：忽略 dx（x 由 clampOverlayPosition 钉在右缘）
                         lp.y = startY + dy
-                        clampToScreen(lp)
+                        clampOverlayPosition(lp)
+                        updateLayout(lp)
                     }
                     true
                 }
@@ -1491,7 +1517,8 @@ class OverlayWindowController(
                         onClick()
                     } else {
                         persistPosition(lp)
-                        snapToEdge(lp, animate = true)
+                        clampOverlayPosition(lp)
+                        updateLayout(lp)   // ★ 不再左右吸边（只纵向移动）
                     }
                     if (!expanded) scheduleIdleFade()
                     true
@@ -1499,8 +1526,11 @@ class OverlayWindowController(
                 MotionEvent.ACTION_CANCEL -> {
                     dragHandle.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
                     if (moved) {
+                        // ★ 2026-09-16（审计 P2-1）：与 ACTION_UP 一致走 clampOverlayPosition
+                        //   （原来漏改 ⇒ 拖球被打断时仍 snapToEdge，破坏「只沿右缘纵向移动」）
                         persistPosition(lp)
-                        snapToEdge(lp, animate = true)
+                        clampOverlayPosition(lp)
+                        updateLayout(lp)
                     }
                     if (!expanded) scheduleIdleFade()
                     true
@@ -1510,6 +1540,12 @@ class OverlayWindowController(
         }
     }
 
+    /**
+     * ⚠️ 2026-09-16（审计 P2-1）：**已无调用点**（主窗改为「只沿右缘纵向移动」）。
+     * 保留仅为历史参考 —— 它内部按 `gravity=START` 的「x = 左坐标」语义运算，
+     * 与本类现行的 `gravity=TOP|END` 冲突，**禁止再对主窗调用**。
+     */
+    @Deprecated("主窗已改右缘纵向定位（clampOverlayPosition）；本函数按 START 语义运算，勿复用")
     private fun snapToEdge(lp: WindowManager.LayoutParams, animate: Boolean) {
         val view = rootView ?: return
         val screen = screenSize()
@@ -1563,6 +1599,26 @@ class OverlayWindowController(
         clampToScreen(lp)
     }
 
+    /** ★ 2026-09-14：主悬浮窗距右缘固定内边距（只纵向移动 ⇒ x 恒定）。 */
+    private fun overlayRightMarginPx(): Int = dp(8)
+
+    /** ★ 2026-09-14：纵向安全上界 = 游戏右上按钮带下方（1440 基准按钮带 y≈36..125px ⇒ 取 12%，下限 dp140）。 */
+    private fun overlaySafeTopY(): Int = Math.max(dp(140), (screenSize().second * 0.12f).toInt())
+
+    /**
+     * ★ 2026-09-14：主悬浮窗位置规范化 —— x 钉右缘 + y 夹在 [按钮带下方, 屏底−导航栏] 之间。
+     * 拖动/重定位/展开收起都走它，保证「只沿右缘纵向移动」在任何入口都成立。
+     */
+    private fun clampOverlayPosition(lp: WindowManager.LayoutParams) {
+        val view = rootView ?: return
+        val screen = screenSize()
+        val height = if (view.height > 0) view.height else dp(48)
+        lp.x = overlayRightMarginPx()
+        val minY = overlaySafeTopY()
+        val maxY = (screen.second - height - navigationBarHeight() - dp(4)).coerceAtLeast(minY)
+        lp.y = lp.y.coerceIn(minY, maxY)
+    }
+
     private fun clampToScreen(lp: WindowManager.LayoutParams) {
         val view = rootView ?: return
         val screen = screenSize()
@@ -1586,7 +1642,9 @@ class OverlayWindowController(
     }
 
     private fun persistPosition(lp: WindowManager.LayoutParams) {
-        prefs.edit().putInt(KEY_X, lp.x).putInt(KEY_Y, lp.y).apply()
+        // ★ 2026-09-16（审计 P2-2）：不再存 x —— 主窗 x 恒由 clampOverlayPosition 钉在右缘
+        //   （gravity=END 下 x 是**距右缘偏移**），持久化它既无意义、又容易被误当作左坐标复用。
+        prefs.edit().putInt(KEY_Y, lp.y).apply()
     }
 
     private fun wakeBubble() {
@@ -1636,12 +1694,9 @@ class OverlayWindowController(
             rememberScreen()
             val lp = params ?: return@post
             if (expanded) constrainPanelHeight() // 旋转后面板高度上限重算（横竖屏可视高度不同）
-            clampToScreen(lp)
-            if (!expanded) {
-                snapToEdge(lp, animate = false)
-            } else {
-                persistPosition(lp)
-            }
+            clampOverlayPosition(lp)   // ★ x 钉右缘 + y 避按钮带（替代 clampToScreen + snapToEdge）
+            updateLayout(lp)
+            persistPosition(lp)
             clampLogWindows()
             logHandleParams?.let { persistLogPosition(it) }
         }
@@ -1687,7 +1742,6 @@ class OverlayWindowController(
 
     private companion object {
         private const val PREFS_NAME = "overlay_window"
-        private const val KEY_X = "x"
         private const val KEY_Y = "y"
         private const val KEY_LOG_X = "log_x"
         private const val KEY_LOG_Y = "log_y"

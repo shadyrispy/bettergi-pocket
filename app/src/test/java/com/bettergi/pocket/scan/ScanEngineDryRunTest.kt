@@ -83,11 +83,12 @@ class ScanEngineDryRunTest {
     private fun syntheticFrame(rarity: Int, page: Int = 0): Mat {
         val m = Mat(1440, 3200, CvType.CV_8UC3, WHITE)
         // ① 五星开关 pill（profiles.json 3200 基坐标 [2009,199,2126,260]，calibrate(3200,1440) 后不变）：
-        //    pillState 取**中心 1/4 区**的金像素占比判态 ⇒ 画成金底 ⇒ 判 "on"，与 flow 的
-        //    `dualStateButton ensure:"on"` 一致（直接通过、不点击 ⇒ 点击数断言不受影响）。
-        //    ⚠️ 2026-09-12 实测：圣遗物背包该开关 **off/深藏青** 态 = 「只显示 5★」视图（列表仅 ~110 件），
-        //    **on/金底** 态才是「全部圣遗物」⇒ 全量扫描必须 ensure=on（原写 off ⇒ 只扫到 110/933）。
-        rect(m, 2009, 199, 2126, 260, Scalar(60.0, 180.0, 230.0))
+        //    pillState 取**中心 1/4 区**的金像素占比判态（>50% ⇒ on）⇒ 画成**深藏青底**（金像素≈0）
+        //    ⇒ 判 "off"，与 flow 的 `dualStateButton ensure:"off"`（2026-09-14 加回：pill=ON 时
+        //    漏斗/排序被游戏禁用，必须先切 OFF）幂等匹配 ⇒ 0 击，entry 链点击数保持 5。
+        //    ⚠️ 若画成金底（旧做法，服务已删除的 ensure:"on" 步骤）⇒ 判 on≠off ⇒ 重试点击 3 次
+        //    ⇒ 干跑断言的 clicks 全部 +3（2026-09-15 实测 4 个用例因此失败）。
+        rect(m, 2009, 199, 2126, 260, Scalar(120.0, 60.0, 20.0))
         // ② cell(0,0) 卡内锁徽 rel [8,6,48,46]：origin(416,297) → (424,303)——仅页 1
         if (page == 0) rect(m, 424, 303, 472, 349, PINK)
         // ③ 祝圣三采样点 5x5 紫（zone artifact.panel.zhusheng points y703）
@@ -129,16 +130,40 @@ class ScanEngineDryRunTest {
 
         // 按格递增的唯一件名（模拟真实网格每件不同）；页切换时重置（模拟跨页同件重叠 → 去重测试）
         private val NAME_RECT = FrameRect(2230, 220, 2630, 270)
+        private val SUB0_RECT = FrameRect(2230, 794, 2990, 848)
+        private val SUB0_RECT_CRAFTED = FrameRect(2230, 857, 2990, 911)
         /** 当前「面板名」= 由**最后一次点击坐标**决定：同一格跨页同名（去重可判），
          *  且不受遍历前链式点击影响。初始值供首次点击前读取。 */
         private var lastNameCell = "晨光的明誓#0"
+
+        /** 最近一次点击的格序（row*7+col，0..20）——夹具用它制造"每格词条不同"。 */
+        private var cellIdx = 0
 
         // readNumber 可编程脚本（onZero 重试等按次序变化场景）；空则回退页静态值
         val numberScript = ArrayDeque<Int?>()
 
         val frameSource = object : FrameSource {
-            override suspend fun grabFresh(afterTimestampMs: Long, timeoutMs: Long): Mat =
-                pages[pageIndex].frame.clone()
+            /**
+             * ★ 2026-09-16：**面板区域随点击变化**（此前按页固定 ⇒ 同页 21 格面板像素全同，
+             *   与"每格 OCR 文本递增"的 mock 语义**自相矛盾**：真实里每张卡的面板就是不同的）。
+             *   现在在面板指纹区域内画一个随点击数变化的红块 ⇒ 面板指纹闸门（PanelFingerprint）
+             *   能正确区分"不同卡"；跨页重复格由**内容键**去重兜底（本 harness 的既有断言语义不变）。
+             *   位置 (2960..2988, 900..904) 落在指纹区（subStats x2230..2990 / y794..1040）内，
+             *   且避开全部像素判据区（锁 2811..2845、收藏 2900..2947、星带 y599..640、祝圣点 y703）。
+             */
+            override suspend fun grabFresh(afterTimestampMs: Long, timeoutMs: Long): Mat {
+                val m = pages[pageIndex].frame.clone()
+                val tick = clicks.size
+                // ⚠️ harness 是**嵌套类**（非 inner）⇒ 拿不到外层测试类的 rect 辅助函数，直接调 Imgproc
+                org.opencv.imgproc.Imgproc.rectangle(
+                    m,
+                    org.opencv.core.Point(2960.0, 900.0),
+                    org.opencv.core.Point((2964 + (tick % 7) * 4).toDouble(), 904.0),
+                    org.opencv.core.Scalar(0.0, 0.0, 255.0),
+                    -1,
+                )
+                return m
+            }
 
             override fun markActionAt(timestampMs: Long) = Unit
             override fun acquireLatestBgr() = throw FrameTimeoutException(0, 0) // dry-run 不走该路径
@@ -162,6 +187,12 @@ class ScanEngineDryRunTest {
                 //   且与遍历前的 enterScreen/setFilter 链式点击无关（曾用自增序号 → 页 1 序号被前置点击偏移，
                 //   页 2 重置后错位 → 去重漏 2 件：expected 21 but was 23）。
                 lastNameCell = "晨光的明誓#${x * 10000 + y}"
+                // 格序（row*7+col）：供 sub0 制造 21 个互不相同的"真实字段差异"（名字已不参与去重键）
+                // ⚠️ 用**真实网格几何**（profiles.json：cardOrigin [416,297]、pitch [244,292]）——
+                //    早先误写 294（列距）⇒ 21 格里 3 格算出同一 (row,col) ⇒ 夹具件数 21→18 ✗。
+                val col = ((x - 416) / 244).coerceIn(0, 6)
+                val row = ((y - 297) / 292).coerceIn(0, 2)
+                cellIdx = row * 7 + col
                 return true
             }
 
@@ -187,8 +218,18 @@ class ScanEngineDryRunTest {
                     //    21 格/页 × 6s ≈ 126s/页，多页用例 250~500s（实测 three-star 用例 498.8s），
                     //    表现为「单测跑不完」。改为**每次点击**推进（同格稳定、跨页因 swipe 重置而重号，
                     //    去重语义与原先完全一致）。
-                    if (r == NAME_RECT) lastNameCell else pages[pageIndex].ocrLines[r]
+                    // ★ 2026-09-16（用户定稿"名字不能作为去重依据"后）：**名字出键** ⇒ 夹具若仍只靠
+                    //   名字区分 21 格，去重会把它们并成 1 件（判据失真）⇒ 这里让 **sub0 也随之变化**
+                    //   （由同一点击坐标派生 ⇒ 同一格跨页取同值、不同格不同值，与真实"每件词条不同"一致）。
+                    val sub0 = "暴击率+%.1f%%".format(5.4 + cellIdx * 0.1) // 21 格 ⇒ 21 个不同值
+                    when (r) {
+                        NAME_RECT -> lastNameCell
+                        SUB0_RECT, SUB0_RECT_CRAFTED -> sub0
+                        else -> pages[pageIndex].ocrLines[r]
+                    }
                 }
+
+
         }
 
         val listener = object : ScanListener {
@@ -240,14 +281,10 @@ class ScanEngineDryRunTest {
 
     // ---- dry-run ----
     private fun runEngine(pages: List<Page>, dedupe: Boolean = false, numberScript: List<Int?> = emptyList()): RunResult {
-        // ⚠️ 干跑**关闭翻页落地位移闭环**（`advloop=0`）：闭环靠 `VoteJudges.profileShift` 实测"这次滑动实际
-        //    滚了多少 px"再补滑，而合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ 互相关测出的
-        //    位移没有物理意义 ⇒ 会凭空多出 1~3 次补滑，把"点击数/滑动数"这类**编排层断言**搅乱。
-        //    闭环本身由 `VoteJudgesProfileShiftTest` 用**纯函数**（构造已知平移的剖面）覆盖。
-        //    另：此处直接调 `engine.run()`，不经过 `ScriptRunner.startScan` 的 `TimingOverrides.apply`，
-        //    故手动置位不会被复位；finally 里还原，避免污染其它用例。
-        TimingOverrides.advanceLoop = 0
-        try {
+        // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
+        //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
+        //    fpband/判据本身由 LandingShiftTest / LandingDecisionTest 用合成平移帧（纯函数）覆盖。
+        //    此处直接调 `engine.run()`，不经过 `ScriptRunner.startScan`。
         val profile = ScreenProfile(JSONObject(File(assetsDir(), "profiles.json").readText()))
         profile.calibrate(3200, 1440)
         val flow = JSONObject(File(assetsDir(), "flows/artifact_scan.json").readText())
@@ -281,9 +318,7 @@ class ScanEngineDryRunTest {
         //    加 withTimeout：卡死从「永久挂起」变成「失败 + 协程栈」，既防呆又能直接定位卡点。
         runBlocking { withTimeout(ENGINE_RUN_TIMEOUT_MS) { engine.run() } }
         return RunResult(engine, h)
-        } finally {
-            TimingOverrides.advanceLoop = 1
-        }
+
     }
 
     // ---- 入库去重（Q2 决策）：两页同件 → 第二次出现跳过 ----
@@ -335,7 +370,8 @@ class ScanEngineDryRunTest {
         assertEquals(4780.0, a.mainStatValue, 1e-9)
         assertEquals(4, a.substats.size)
         assertEquals("critRate_", a.substats[0].key)
-        assertEquals(5.8, a.substats[0].value, 1e-9)
+        // 夹具的 sub0 现按**格序**制造差异（格 0 ⇒ 5.4）；名字已不参与去重键（用户 2026-09-16 定稿）
+        assertEquals(5.4, a.substats[0].value, 1e-9)
         assertEquals("hp", a.substats[1].key)
         assertEquals("enerRech_", a.substats[2].key)
         assertEquals("eleMas", a.substats[3].key)
@@ -353,11 +389,11 @@ class ScanEngineDryRunTest {
     fun `readCount and enterScreen wiring`() {
         val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)))
         assertEquals(1026, engine.vars.total)
-        // 首击 = 背包锚点（2026-09-13 由 (2824,80) 改为交集中心 (2830,93)，兼容刘海机）；其后 3 击 = 筛选复位链（filterRoundBtn → filterPanel.reset → filterPanel.ok）
-        assertEquals(2830 to 93, h.clicks[0])
+        // 首击 = 背包锚点（2026-09-13 晚：BS@3200 实机复核后**回退为实测值** (2824,80)——交集中心 (2830,93) 只对 2244 档（双机）成立）；其后 3 击 = 筛选复位链（filterRoundBtn → filterPanel.reset → filterPanel.ok）
+        assertEquals(2824 to 80, h.clicks[0])
         assertEquals(ENTER_CHAIN_CLICKS, h.clicks.size - 21)
         // 前置点击序列（profile 3200 基坐标中心）：
-        //   0=背包(2830,93)（2026-09-13 跨设备修正：取两机图标交集中心） → 1=**圣遗物页签**(250,415) → 2=漏斗(399,1336) → 3=面板⟲重置(401,1337) → 4=面板确认(852,1337)
+        //   0=背包(2824,80)（BS@3200 模板匹配 0.9970 实测） → 1=**圣遗物页签**(250,415) → 2=漏斗(399,1336) → 3=面板⟲重置(401,1337) → 4=面板确认(852,1337)
         // ⚠️ 第 1 击（页签）是 2026-09-13 新增：背包会**记住上次打开的类别**，不主动切页签就会落在「武器」页
         //    （实测 artifact_scan 入口因此中止）。顺序错了就会点到页面按钮（实测踩过「锁定辅助」全屏面板）。
         assertEquals(250 to 415, h.clicks[1])
@@ -366,9 +402,13 @@ class ScanEngineDryRunTest {
         assertEquals(852 to 1337, h.clicks[4])
         // 第一次格点击 = cell(0,0) 中心 (416+100, 297+126)=(516,423)（索引 = 链长）
         assertEquals(516 to 423, h.clicks[ENTER_CHAIN_CLICKS])
-        // 翻页滑动 = §12.1 几何起点 (1858,1178) 上滑 dist=876 → (1858,302)
-        // （旧写死坐标 (1614,1150)→(1614,274) 已由几何公式取代：落点从第 5 列卡中间移到末尾两卡间隙）
-        assertEquals((1858 to 1178) to (1858 to 302), h.swipes[0])
+        // 翻页滑动 = 几何起点（advanceStart：最左卡间缝隙中点 (638,1178)）上滑 dist → (638,452)
+        // ⚠️ 2026-09-16（行级闭环方案 C）：profile `grids.artifact_backpack.advance.extra = -150`
+        //    ⇒ 目标 876→726（≈2.49 行）：相邻页必重叠（内容键可测前进量）+ 覆盖带 837px > 目标+过冲
+        //    ⇒ 结构性免跳行。故本期望由 302 改为 452（1178-726）。
+        // （2026-09-14 定案：旧起点 x=1858 贴住详情面板左缘 ⇒ 拖拽被面板吃掉（2560 实测 0px）；
+        //   2026-09-16 定稿：**命令不加增益**（恒 gain=1.0）+ 封顶 = target ⇒ 恒 876）
+        assertEquals((638 to 1178) to (638 to 452), h.swipes[0])
     }
 
     @Test

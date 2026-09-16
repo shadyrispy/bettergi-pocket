@@ -302,7 +302,12 @@ class InputAccessibilityService : AccessibilityService() {
             toY: Int,
             durationMs: Long = 400L,
             segments: Int = 3,
-            method: SwipeMethod = SwipeMethod.WAYPOINT_CHAIN,
+            // 2026-09-14 改默认：WAYPOINT_CHAIN（5 段 continueStroke 链）实测不稳 ——
+            //   同设备同坐标连测：segments=1 帧差 27.99%、THREE_SEGMENT 28.03%，
+            //   而 WAYPOINT_CHAIN 仅 0.27%（5 段回调均 done ok=true 却完全不滚，间歇性，
+            //   疑与回调内 continueStroke 的续段时限/模拟器时序有关）⇒ 翻页间歇性 落地=0px。
+            //   三段式为同仓「对齐 irminsul/genshin-scanner-app 已验证实现」，末速≈0 精度更好。
+            method: SwipeMethod = SwipeMethod.THREE_SEGMENT,
             onDone: ((Boolean) -> Unit)? = null,
         ): Boolean {
             if (instance != null) return swipeLocal(fromX, fromY, toX, toY, durationMs, segments, method, onDone)
@@ -563,6 +568,8 @@ class InputAccessibilityService : AccessibilityService() {
                 val accepted = service.dispatchGesture(
                     GestureDescription.Builder().addStroke(stroke).build(),
                     callback { ok ->
+                        // 2026-09-14 诊断：逐段可见性（此前"派发被拒/中途断链"完全不可见）
+                        Log.i(TAG, "wp[$index/${waypoints.lastIndex}] done ok=$ok")
                         if (!ok) {
                             onDone?.invoke(false)
                             return@callback
@@ -586,7 +593,10 @@ class InputAccessibilityService : AccessibilityService() {
                     },
                     null,
                 )
-                if (!accepted) onDone?.invoke(false)
+                if (!accepted) {
+                    Log.w(TAG, "wp[$index/${waypoints.lastIndex}] dispatch REJECTED")
+                    onDone?.invoke(false)
+                }
             }
 
             val first = waypoints[0]

@@ -5,7 +5,16 @@ import android.util.Log
 import org.json.JSONObject
 
 /** GOOD v3 圣遗物条目（键风格与 GOODScanner 导出一致）。 */
-data class GoodSubStat(val key: String, val value: Double)
+/**
+ * GOOD 副词条。`initialValue` / `rollCount` 由 [RollSolver] 解出（2026-09-16 补齐）：
+ * `initialValue` = 首档显示值（歧义为 null ⇒ 不写进导出），`rollCount` = 强化次数（0 = 未解出）。
+ */
+data class GoodSubStat(
+    val key: String,
+    val value: Double,
+    val initialValue: Double? = null,
+    val rollCount: Int = 0,
+)
 
 data class GoodArtifact(
     val setKey: String?,
@@ -20,6 +29,17 @@ data class GoodArtifact(
     val location: String = "",
     /** OCR 原文单件名（词典 276 件全局唯一）——入库去重键，不参与 GOOD 导出。 */
     val pieceName: String = "",
+    /** 初始词条数 + 强化次数（[RollSolver] 解出；null = 不可解 ⇒ 不写进导出）。 */
+    val totalRolls: Int? = null,
+    /**
+     * 祝圣之霜打造（面板有紫横幅 + 内容整体下移 [ScreenProfile.zhushengShiftPx]）
+     * ⇒ 导出 GOOD v3 `elixerCrafted`。
+     * ⚠️ 另有 `astralMark`（GT 941 里 19 件，与 elixer 仅 1 件重叠）是**另一个**属性，
+     * 我方暂无判据 ⇒ **不臆造**（宁可少写不可写错）。
+     */
+    val elixerCrafted: Boolean = false,
+    /** 带「(待激活)」标记的副词条（仅有 lv0 件；GT/Irminsul **每件都写**该字段，无则空数组）。 */
+    val unactivatedSubstats: List<GoodSubStat> = emptyList(),
 )
 
 /** GOOD v3 武器（结构比圣遗物简单：name+key/refine/level/rarity/lock） */
@@ -82,9 +102,26 @@ object GoodExporter {
                     subs.put(JSONObject().apply {
                         put("key", s.key)
                         put("value", s.value)
+                        // ★ 2026-09-16：GOOD v3 的 roll 字段（Irminsul 同格式）；解不出就不写
+                        s.initialValue?.let { put("initialValue", it) }
+                        if (s.rollCount > 0) put("rollCount", s.rollCount)
                     })
                 }
                 put("substats", subs)
+                a.totalRolls?.let { put("totalRolls", it) }
+                // ★ 2026-09-16：待激活词条单列（GT 894/894 件都有该字段，无则空数组）
+                val unas = org.json.JSONArray()
+                for (s in a.unactivatedSubstats) {
+                    unas.put(JSONObject().apply {
+                        put("key", s.key)
+                        put("value", s.value)
+                        s.initialValue?.let { put("initialValue", it) }
+                        if (s.rollCount > 0) put("rollCount", s.rollCount)
+                    })
+                }
+                put("unactivatedSubstats", unas)
+                // ★ 2026-09-16：祝圣之霜标记（GT 20/941 为 true）；来源 = 紫横幅检测
+                if (a.elixerCrafted) put("elixerCrafted", true)
             })
         }
         root.put("artifacts", arr)

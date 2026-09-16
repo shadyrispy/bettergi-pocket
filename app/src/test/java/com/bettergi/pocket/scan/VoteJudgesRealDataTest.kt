@@ -1,6 +1,7 @@
 package com.bettergi.pocket.scan
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -18,6 +19,24 @@ class VoteJudgesRealDataTest {
     private val M5724_LOCK_RED = 621          // 管理界面 lockChip 红掩码
     private val M5724_STAR_GOLD = 625         // 管理界面 starChip 金掩码（已收藏）
     private val GRAY_STAR_BASELINE = 7        // 灰星基线（未收藏 ≤7px，m3587=7/m3601=0/m3602=0）
+
+    /**
+     * 祝圣紫横幅色域回归（2026-09-16 修 bug 后加）。
+     * 实拍均值取自 `dsl/uploaded/artifact_backpack_zhusheng_1000053497.jpg`（含紫横幅「祝圣之霜定义」）
+     * 三点 (2390/2400/2410, 703) 与对照 `artifact_backpack_1000053536.jpg`（无祝圣）。
+     * ⚠️ 旧色域 B[200,255] 把实拍紫(B≈178~194)判成非紫 ⇒ vars.crafted 恒 false ⇒ 祝圣件读错位。
+     */
+    @Test
+    fun `purple banner predicate matches crafted sample and rejects plain panel`() {
+        // 祝圣图三点均值（RGB）
+        assertTrue(VoteJudges.PURPLE_BANNER.matches(145, 107, 190))
+        assertTrue(VoteJudges.PURPLE_BANNER.matches(133, 96, 178))
+        assertTrue(VoteJudges.PURPLE_BANNER.matches(150, 113, 194))
+        // 对照图三点均值 ⇒ 必须判非紫（否则每个非祝圣件都会被误判 crafted ⇒ 整体错位）
+        assertFalse(VoteJudges.PURPLE_BANNER.matches(238, 230, 219))
+        // 跨通道约束确实生效（B-G=... 若 B≈G 则非紫）
+        assertFalse(VoteJudges.PURPLE_BANNER.matches(160, 160, 170))
+    }
 
     @Test
     fun `panel lock threshold matches verdict 870 gold means locked`() {
@@ -62,12 +81,14 @@ class VoteJudgesRealDataTest {
         assertEquals(5, perCellCounts.count { it > 100 })
     }
 
-    // ---- 稀有度-词条数规则（用户定稿 2026-09-02）----
+    // ---- 词条数规则（2026-09-16 **ground truth 定标取代** 2026-09-02 的按稀有度假设）----
     @Test
-    fun `rarity substat rule constants`() {
-        // 5★ 恒 4 词条；4★ 初始 2 最高 3；3★/2★ 止扫不解析（止扫上界 = 低于 4★）
-        assertEquals(4, ScanEngine.MAX_SUBS_5STAR)
-        assertEquals(3, ScanEngine.MAX_SUBS_4STAR)
+    fun `substat count rule is truth-calibrated not rarity-guessed`() {
+        // 旧假设「5★恒 4 条 / 4★ 最高 3 条」被 GT 推翻（design-docs/good-diff-20260916.md）：
+        //   · GT 实测 5★+0 **67%（158/235）只有 3 条** ⇒ 「恒 4」会把套装名行读成幻影第 4 条；
+        //   · GT 实测 4★+16 **24/24 都是 4 条** ⇒ 「最高 3」会砍掉真第 4 条。
+        // 现改为 StatParser.parseBlock 的连续块读取 + 全局上限 4；止扫上界仍是"低于 4★"。
+        assertEquals(4, StatParser.MAX_SUBS)
         assertEquals(4, ScanEngine.STOP_MARKER_RARITY)
     }
 }

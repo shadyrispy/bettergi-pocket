@@ -285,31 +285,83 @@ class ScriptRunner(
                     // §13：流程名 → 识别日志的来源标签（LOCK/EQUIP/CHAR/SCAN）
                     flowName = flowName,
                 )
-                // 扫描期悬浮窗常驻输入穿透（防自遮挡吞掉游戏点击；hidden=排查用）
-                overlayController.setScanClickThrough(true, hidden = SCAN_OVERLAY_HIDDEN)
+                // ★ 2026-09-14：取消扫描期常驻穿透，回到逐点 prepare/restore（OverlayWindowController
+                //   内调用点均健在）。e63f7a4 引入常驻穿透是为防悬浮窗盖住操作区时手势 UP 不穿透；
+                //   现悬浮窗已改右上角小球（钉右缘、只纵向移动），与全部操作点零重叠 ⇒ 前提不成立，
+                //   而常驻穿透让扫描期停止/分享/拖球全部失效。仅保留 hidden=true 排查路径（GONE 对照）。
+                if (SCAN_OVERLAY_HIDDEN) {
+                    overlayController.setScanClickThrough(true, hidden = true)
+                }
+                // ★★ 2026-09-16 **会话级看门狗**（独立 daemon 线程）★★
+                //   真机实测：偶发"主滑派发后无任何日志"的**硬挂**（>15min），卡在 **单个 visit 内部**
+                //   ⇒ 页级看门狗（只在格与格之间检查，见 ScanEngine.PAGE_WATCHDOG_MS）**抓不到**
+                //   ⇒ 整轮数据全废（导出发生在 run() 返回之后）。
+                //   本线程只做一件事：盯 ScanEngine.lastProgressAtMs（freshFrame 打点）。
+                //   超 SESSION_STALL_MS 无进展 ⇒ 判挂死 ⇒ **立刻导出已入库结果**（与正常结束同一路径）
+                //   + 置 stopRequested（若阻塞随后解除，run() 会自行收尾，不重复导出）。
+                //   非侵入：不改任何既有判据/流程，只在扫描期多跑一个 5s 周期的只读线程。
+                val wdStop = java.util.concurrent.atomic.AtomicBoolean(false)
+                val exported = java.util.concurrent.atomic.AtomicBoolean(false)
+                fun exportNow(why: String) {
+                    if (!exported.compareAndSet(false, true)) return
+                    val arts = engine.results.toList()
+                    val wps = engine.resultsWeapons.toList()
+                    val chs = engine.resultsCharacters.toList()
+                    if (arts.isEmpty() && wps.isEmpty() && chs.isEmpty()) {
+                        Log.w(TAG, "导出跳过（$why）：无已入库结果")
+                        return
+                    }
+                    runCatching {
+                        val file = GoodExporter.export(appContext, arts, wps, chs)
+                        Log.i(TAG, "导出完成（$why）: $file (${arts.size}a ${wps.size}w ${chs.size}c)")
+                        listener.onProgress(
+                            "exported",
+                            mapOf(
+                                "file" to file,
+                                "count" to arts.size,
+                                "weapons" to wps.size,
+                                "characters" to chs.size,
+                            ),
+                        )
+                    }.onFailure { Log.e(TAG, "导出失败（$why）", it) }
+                }
+                val wd = Thread {
+                    while (!wdStop.get()) {
+                        try {
+                            Thread.sleep(5_000)
+                        } catch (_: InterruptedException) {
+                            return@Thread
+                        }
+                        if (wdStop.get()) return@Thread
+                        val last = engine.lastProgressAtMs
+                        if (last <= 0L) continue
+                        val idle = android.os.SystemClock.elapsedRealtime() - last
+                        if (idle > SESSION_STALL_MS) {
+                            Log.e(
+                                TAG,
+                                "会话级看门狗：${idle}ms 无进展（阈值 ${SESSION_STALL_MS}ms）⇒ 判挂死，" +
+                                    "导出已入库结果并请求停止",
+                            )
+                            runCatching { engine.vars.stopRequested = true }
+                            exportNow("watchdog")
+                            wdStop.set(true)
+                            return@Thread
+                        }
+                    }
+                }
+                wd.isDaemon = true
+                wd.name = "scan-session-watchdog"
+                wd.start()
                 try {
                     engine.run()
                 } finally {
-                    overlayController.setScanClickThrough(false)
+                    wdStop.set(true)
+                    wd.interrupt()
+                    if (SCAN_OVERLAY_HIDDEN) {
+                        overlayController.setScanClickThrough(false)
+                    }
                 }
-                val total = engine.results.size + engine.resultsWeapons.size + engine.resultsCharacters.size
-                if (total > 0) {
-                    val file = GoodExporter.export(
-                        appContext,
-                        engine.results,
-                        engine.resultsWeapons,
-                        engine.resultsCharacters,
-                    )
-                    listener.onProgress(
-                        "exported",
-                        mapOf(
-                            "file" to file,
-                            "count" to engine.results.size,
-                            "weapons" to engine.resultsWeapons.size,
-                            "characters" to engine.resultsCharacters.size,
-                        ),
-                    )
-                }
+                exportNow("normal")
             } catch (e: kotlinx.coroutines.CancellationException) {
                 // 主动 stop()：取消非失败，不刷 error 日志（真机实测 JobCancellationException 噪音）
                 Log.i(TAG, "scan cancelled")
@@ -381,10 +433,25 @@ class ScriptRunner(
     private companion object {
         const val TAG = "BetterGI.ScanRunner"
         const val RESTORE_TOUCH_DELAY_MS = 40L
+
+        /**
+         * **会话级看门狗**阈值（2026-09-16）：扫描期 `ScanEngine.lastProgressAtMs` 超此时长无进展
+         * ⇒ 判「visit 内部硬挂」（实测 >15min 无日志、页级看门狗抓不到）⇒ 立刻导出已入库结果。
+         * 正常单格 ~300ms、单页 ~7s（含 settle ≤6s）⇒ 120s 只可能是真卡死，不会误伤慢页。
+         */
+        const val SESSION_STALL_MS = 120_000L
         const val MAIN_DISPATCH_TIMEOUT_MS = 5000L
         /** 点击后恢复悬浮窗可触摸的宽放余量：须晚于 a11y 手势 UP 注入（否则 UP 被吞→无 click）。 */
         const val PASSTHROUGH_RESTORE_SLACK_MS = 600L
-        /** 排查开关：true=扫描期直接隐藏悬浮窗（GONE）；false=窗可见但常驻 NOT_TOUCHABLE。 */
+        /**
+         * 排查开关（**编译期常量**）：`true` = 扫描期把悬浮窗直接置 GONE（对照实验用）。
+         *
+         * ⚠️ 2026-09-16（审计 P2-4）说明：本常量恒为 `false` ⇒ 下面两个 `if` 是**死分支**，
+         * 即默认路径**完全不再调用** `setScanClickThrough` —— 扫描期悬浮窗保持可点
+         * （停止/分享/拖球都可用），代价是重新依赖逐点 `prepareClickPassthrough` 保证游戏侧点击。
+         * 该取舍得失由真机复验裁定：必须同时满足「悬浮窗可点」**且**「点击/滑动全生效」。
+         * 想复现旧行为（扫描期常驻穿透）只需把本常量改 `true` 重建。
+         */
         const val SCAN_OVERLAY_HIDDEN = false
     }
 }

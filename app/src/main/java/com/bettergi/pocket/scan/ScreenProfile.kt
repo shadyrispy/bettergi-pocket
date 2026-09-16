@@ -91,6 +91,11 @@ class ScreenProfile(
 
     /**
      * 祝圣 yShift（帧像素，crafted 时作用于 level/lock/astral/sub1-4）。
+     *
+     * ⚠️ **作用范围就是这 4 类，一个都别多加**（用户 2026-09-16 定稿）：祝圣横幅只把**横幅以下**
+     * 的内容下移 ⇒ 等级 / 4 条副词条 / 锁 / 收藏(astral 星标) 位移；
+     * **单件名(name)、部位(slot)、主词条名(mainName)、主词条值(mainValue)、set_name 位置固定、不位移**。
+     * 单件名槽位尤其不能动 —— setKey 靠「单件名→套装」反推（不读 set_name）。
      * 分辨率专属 profile 可用顶层 "zhushengYShiftFrame" 直接给定（如 2244x1080 = 47）；
      * 缺省按基准 [ZHUSHENG_YSHIFT_BASE] × [scaleY] 换算。
      */
@@ -222,8 +227,14 @@ class ScreenProfile(
     fun advanceStart(gridKey: String): FramePoint? {
         val g = gridGeometry(gridKey) ?: return null
         if (g.colXs.size < 2 || g.rowYs.size < 2) return null
-        val lastPitchX = g.colXs.last() - g.colXs[g.colXs.size - 2]
-        val x = g.colXs[g.colXs.size - 2] + g.cardW + (lastPitchX - g.cardW) / 2
+        // ★ 2026-09-14 修：改取**最左**卡间缝隙（原为「末尾两卡」缝隙）——
+        //   2560 上后者算出 x=1627，正好贴住右侧**详情面板**左缘（面板 x≳1640）⇒ 拖拽被判成
+        //   面板上的操作、网格**完全不滚**（`adb input swipe` 实测：x=1627 帧差 0.26%
+        //   vs x=1041 的 28.64%，且与 a11y/弹窗/手势形态均无关）；3200 同公式得 1858，
+        //   面板在 2100 外 ⇒ 所以**只有 2560 档**复现（也解释了"周四五 2244/3200 能全量扫"）。
+        //   约束保持不变：必须落在**卡片之间的缝隙**（压在卡上会被判成拖卡，equip12 实证）、且避开幕布/面板。
+        val pitchX = g.colXs[1] - g.colXs[0]
+        val x = g.colXs[0] + g.cardW + (pitchX - g.cardW) / 2
         val anchorRow = g.rowYs.size // 锚行 = visibleRows（第 4 行，被底栏遮挡、不遍历）
         val y = g.rowYs[anchorRow - 1] + ADVANCE_Y_BIAS
         return scalePoint(x, y) // 与 cellCenter 一致：一律返回帧坐标
@@ -269,6 +280,35 @@ class ScreenProfile(
             bottom = scale(g.rowYs.last() + g.cardH, scaleY),
         )
     }
+
+    /**
+     * 翻页落地测量条带（帧坐标，design-docs/swipe-landing-measure.md）：
+     * `grids.<key>.landingBand = { x:[x0,x1], y:[y0,y1], searchY:[sy0,sy1] }`
+     * y = 网格第4行**可见**条（视口底部硬裁剪之上的部分），x = 避开筛选状态条的后四列；
+     * searchY = 翻页后搜索窗（含条带未滚动原位 ⇒ 多步补滑的中间落点也可测）。
+     * 未登记返回 null ⇒ 引擎回退相邻帧 2D/相位法（不改变既有行为）。
+     */
+    fun landingBandFor(gridKey: String): LandingBand? {
+        val obj = rawObject("grids.$gridKey.landingBand") ?: return null
+        val x = obj.optJSONArray("x") ?: return null
+        val y = obj.optJSONArray("y") ?: return null
+        val s = obj.optJSONArray("searchY") ?: return null
+        if (x.length() < 2 || y.length() < 2 || s.length() < 2) return null
+        return LandingBand(
+            x0 = scale(x.getInt(0), scaleX),
+            y0 = scale(y.getInt(0), scaleY),
+            x1 = scale(x.getInt(1), scaleX),
+            y1 = scale(y.getInt(1), scaleY),
+            sy0 = scale(s.getInt(0), scaleY),
+            sy1 = scale(s.getInt(1), scaleY),
+        )
+    }
+
+    /** [landingBandFor] 的几何（帧坐标）。 */
+    class LandingBand(
+        val x0: Int, val y0: Int, val x1: Int, val y1: Int,
+        val sy0: Int, val sy1: Int,
+    )
 
     /** 网格几何：统一 profiles 里两种写法 —— cardOrigin+pitch 与 colX/rowY 数组。 */
     private fun gridGeometry(gridKey: String): GridGeometry? {

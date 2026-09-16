@@ -127,7 +127,8 @@ class GridAlignTest {
     /**
      * 已知局限（方案未覆盖）：网格是周期信号（周期=行距），搜索窗只有 ±150，
      * 真偏移超出窗口时相位会锁定到邻行（实测 +200px 被测成 −85，仍能通过 |err|≤146 限幅）。
-     * 此处钉死「不会输出荒谬值」的底线，真正的兜底是 [GridAlign.nextDistance] 的连续性判据。
+     * 此处钉死「不会输出荒谬值」的底线；兜底已是 fpband 落地条带 + pageDrift 记账
+     * （2026-09-14 翻页整体改造，nextDistance 控制律已删）。
      */
     @Test
     fun `aliased measurement stays within guard`() {
@@ -137,58 +138,6 @@ class GridAlignTest {
         val err = GridAlign.measureError(frame, p, "artifact_backpack")
         println("超出搜索窗 → err=$err（混叠，非真实偏移 200）")
         assertTrue("混叠结果仍需落在限幅内或被判 null：err=$err", err == null || Math.abs(err!!) <= 146)
-        frame.release()
-    }
-
-    /** 连续性判据：稳态行相位恒定 → 与上一页 err 相差超过半行距即判混叠，拒绝采用。 */
-    @Test
-    fun `continuity check rejects phase aliasing`() {
-        val p = profile()
-        val expected = p.gridGeometryFor("artifact_backpack")!!.rowYs.first()
-        val nominal = p.advanceDistance("artifact_backpack")!! // 876
-        // 上一页 err=-40（正常），本页因混叠测成 +87 → 相差 127 > 292/2=146? 否 → 再取更大跳变
-        val f1 = syntheticGrid(expected - 40)
-        val err1 = GridAlign.measureError(f1, p, "artifact_backpack")!!
-        f1.release()
-        // 构造一个与 err1 相差超过半行距的测量结果（混叠场景）
-        val aliased = err1 + 200
-        val next = nextDistanceWithError(aliased, nominal, err1, GridAlign.rowPitch(p, "artifact_backpack"))
-        assertEquals("相位跳变超过半行距应保持原距离", nominal, next)
-    }
-
-    /** 直接对连续性判据做单元验证（nextDistance 内部逻辑的等价展开，控制律 dist+err）。 */
-    private fun nextDistanceWithError(err: Int, currentDist: Int, lastErr: Int?, pitch: Int): Int =
-        if (lastErr != null && Math.abs(err - lastErr) > pitch / 2) {
-            currentDist
-        } else {
-            (currentDist + err).coerceIn(584, 1168)
-        }
-
-    @Test
-    fun `next distance subtracts error and clamps`() {
-        val p = profile()
-        val expected = p.gridGeometryFor("artifact_backpack")!!.rowYs.first()
-        val nominal = p.advanceDistance("artifact_backpack")!! // 876
-        val b = bias(p)
-        // 控制律 dist + err（err>0 欠量→增大 dist）。少滚 40（err = -40 + b）→ 下一次应少滚 40：nominal - 40 + b
-        val f1 = syntheticGrid(expected - 40)
-        assertEquals(nominal - 40 + b, GridAlign.nextDistance(f1, p, "artifact_backpack", nominal))
-        f1.release()
-        // 多滚 40（err = 40 + b）→ 下一次多滚 40：nominal + 40 + b
-        val f2 = syntheticGrid(expected + 40)
-        assertEquals(nominal + 40 + b, GridAlign.nextDistance(f2, p, "artifact_backpack", nominal))
-        f2.release()
-    }
-
-    @Test
-    fun `clamp bounds are two to four rows`() {
-        val p = profile()
-        // 极端：距离已最小再让 err 很大 → 应被 clamp 到 2 行(584)/4 行(1168)
-        val frame = syntheticGrid(p.gridGeometryFor("artifact_backpack")!!.rowYs.first())
-        val clamped = GridAlign.nextDistance(frame, p, "artifact_backpack", 100)
-        assertTrue("clamp 下限 584，实测 $clamped", clamped >= 584)
-        val clamped2 = GridAlign.nextDistance(frame, p, "artifact_backpack", 5000)
-        assertTrue("clamp 上限 1168，实测 $clamped2", clamped2 <= 1168)
         frame.release()
     }
 

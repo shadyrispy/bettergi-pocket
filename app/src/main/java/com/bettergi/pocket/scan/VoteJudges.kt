@@ -1,7 +1,9 @@
 package com.bettergi.pocket.scan
 
 import android.util.Log
+import org.opencv.core.Core
 import org.opencv.core.Mat
+import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 
@@ -20,10 +22,12 @@ object VoteJudges {
         val gMin: Int, val gMax: Int,
         val bMin: Int, val bMax: Int,
         val requireRB: Int = 0,  // 0=无跨通道约束；>0=R-B > requireRB
+        val requireBG: Int = 0,  // 0=无跨通道约束；>0=B-G > requireBG（紫横幅用，见 PURPLE_BANNER）
     ) {
         fun matches(r: Int, g: Int, b: Int): Boolean =
             r in rMin..rMax && g in gMin..gMax && b in bMin..bMax &&
-                (requireRB == 0 || r - b > requireRB)
+                (requireRB == 0 || r - b > requireRB) &&
+                (requireBG == 0 || b - g > requireBG)
     }
 
     // ---- 色域常量（profiles.json zones judge 逐字固化）----
@@ -37,7 +41,22 @@ object VoteJudges {
     val PINK_LOCK = RgbPredicate(201, 255, 120, 215, 110, 215)
 
     /** 祝圣紫横幅（三采样点 5x5 紫占比>0.6；紫≈R/B 高 G 低，实测带内取宽域） */
-    val PURPLE_BANNER = RgbPredicate(120, 220, 60, 140, 200, 255)
+    /**
+     * **祝圣之霜紫横幅**（`artifact.panel.zhusheng`）色域。
+     *
+     * 标定（2026-08-31 实拍，见 `dsl/docs/flow2-artifact-scan.md` 第 7 行）：
+     * 横幅 bbox `[2231,685,2483,729]`，三采样点 `(2390,703)/(2400,703)/(2410,703)`，
+     * 每点 5×5 像素紫占比 > [BANNER_PURPLE_RATIO]，≥ [BANNER_POINTS_REQUIRED]/3 点 ⇒ crafted。
+     * 实测：祝圣图 `artifact_backpack_zhusheng_1000053497.jpg` 三点均值 RGB ≈ (145,107,190)/(133,96,178)/(150,113,194)，
+     * 紫占比 0.96/0.92/0.72；无祝圣对照 `artifact_backpack_1000053536.jpg` 三点 (238,230,219) ⇒ 0.00/0.00/0.00。
+     *
+     * ⚠️⚠️ **2026-09-16 修（真 bug，影响 20 件祝圣圣遗物）**：旧值 `R[120,220] G[60,140] B[200,255]`
+     * 且**无 B−G 约束** ⇒ 实拍紫的 B≈178~194 **落在 [200,255] 之外** ⇒ 三点全部判非紫
+     * ⇒ `vars.crafted` **恒 false** ⇒ 祝圣件的等级/副词条**从未按 +63 平移**（读错位）
+     * ⇒ GT 里 20 件 `elixerCrafted` 一件都没识别出来。
+     * 按文档定稿改回 **R[110,200] G[50,130] B[150,235] 且 B−G>60** ⇒ 祝圣图 3/3 命中、对照 0/3。
+     */
+    val PURPLE_BANNER = RgbPredicate(110, 200, 50, 130, 150, 235, requireBG = 60)
 
     object Thresholds {
         const val CARD_LOCK_PINK = 60      // pink>60=已锁
@@ -383,7 +402,12 @@ object VoteJudges {
      * 与 [gridThumb] 取同一 ROI（**不含右侧详情面板** —— 含面板会让互相关曲线全废）；
      * 分辨率 = 1 帧像素/行，配 [profileShift] 做纵向互相关 ⇒ 直接读出"这次滑动实际滚了多少 px"。
      * 这是把「指令距离 → 实际落地」这个开环改成闭环的唯一可信输入。
+     *
+     * ⚠️ 2026-09-16（审计 P2-3）：**生产调用点已全部退场** —— 翻页改造后落地测量唯一来源是
+     * [landingShift]（fpband 落地条带）。本函数只被自身单测引用，保留作回归参考。
+     * 历史失效原因：大位移**周期混叠**（同命令 876 实测落地 191~1080，5.6× 波动）。
      */
+    @Deprecated("翻页已改用 fpband 落地条带（landingShift）；本测量器在大位移下周期混叠，勿再接入生产")
     fun gridRowProfile(frame: Mat, profile: ScreenProfile, gridKey: String): DoubleArray? {
         val roi = gridRoiBounds(frame, profile, gridKey) ?: return null
         val x0 = roi[0]
@@ -418,7 +442,12 @@ object VoteJudges {
      * ⚠️ [score] < [PROFILE_SHIFT_MIN_SCORE] 时**不可信**（内容没平移 / 被局部变化污染）——
      * 调用方必须据此放弃本次测量，不要拿 dy 去纠偏。实测真实位移的 score ≥ 0.6（多为 0.8+），
      * 而"没动"时最高分只有 0.4 上下 ⇒ 这个门限能把两者分开。
+     *
+     * ⚠️ 2026-09-16（审计 P2-3）：**生产调用点已全部退场** —— 翻页改造后落地测量唯一来源是
+     * [landingShift]（fpband 落地条带）。本函数只被自身单测引用，保留作回归参考。
+     * 历史失效原因：大位移**周期混叠**（同命令 876 实测落地 191~1080，5.6× 波动）。
      */
+    @Deprecated("翻页已改用 fpband 落地条带（landingShift）；本测量器在大位移下周期混叠，勿再接入生产")
     fun profileShift(before: DoubleArray, after: DoubleArray, expectedPx: Int = 0): Pair<Int, Double> {
         val n = Math.min(before.size, after.size)
         if (n < 32) return 0 to -1.0
@@ -476,8 +505,208 @@ object VoteJudges {
         return bestS to bestC
     }
 
-    /** [profileShift] 的可用门限：低于此值视为"测不到位移"（内容没动/被污染）。 */
+    /**
+     * [profileShift] 的可用门限：低于此值视为"测不到位移"（内容没动/被污染）。
+     *
+     * ⚠️ 2026-09-16（审计 P2-3）：随 [profileShift] 一起退出生产（翻页改用 fpband 落地条带）。
+     */
+    @Deprecated("随 profileShift 退出生产；翻页判据门限见 LANDING_MIN_SCORE")
     const val PROFILE_SHIFT_MIN_SCORE = 0.5
+
+    // ---- 翻页落地·条带 2D 匹配（design-docs/swipe-landing-measure.md，2026-09-14）----
+    // 背景：网格容器只在 y∈[276,1185] 渲染内容（顶部硬遮罩渐隐剖面实测 r：276→0.86、301→0.93），
+    // 3-pitch 翻页后 F0 的 R1-R3 全部滑入隐藏区 ⇒ gridShift2D（底部带→全 ROI 搜索）与 1D 剖面
+    // 互相关均不可靠（5 帧语料实测：gridShift2D 对真值 886 报 -10，profileShift 锁周期假峰 0.95+）。
+    // 唯一幸存共享内容 = F0 第4行可见条（y[R4顶,R4顶+63)，cols4-7 避筛选状态条）⇒ 以它做 2D 模板匹配。
+    // 回测（dsl/verify/_swipe_progress_3200/risk1d_correct_band.py）：886→886（score .60，主次峰差 .44）、
+    // 304→304（.85）、596→596（.68）、越界 1049→score .36<门限（安全拒绝）。
+
+    /** [landingShift] 的 score 门限：真值对实测 0.60-0.85，越界/渐隐/内容更换 <0.5。 */
+    const val LANDING_MIN_SCORE = 0.50
+
+    /** [landingShift] 的主次峰差门限：孪生卡（同套同部位同等级）两峰并列 ⇒ 歧义必须拒绝（漏纠安全）。 */
+    const val LANDING_MIN_PEAK_GAP = 0.15
+
+    /** [landingShift] 的次峰抑制半径（±px，主峰邻域内不找次峰）。 */
+    private const val LANDING_SUPPRESS_HALF = 40
+
+    /**
+     * [landingShift] 的**期望落点先验**半窗（×行距）：`expectedPx ± priorHalf` 之外的峰一律屏蔽。
+     *
+     * 为什么需要（2026-09-16 离线 A/B + 真机实测）：本账号是**同套同部位同等级**密集页
+     * （一屏十几张同名卡）⇒ 条带在 **±1 行（±292）** 处有孪生峰，`peakGap` 常态掉到 0.02~0.11
+     * 而被门限拒（真机 6 页拒 2 页，且拒后走特征锁回退的页各丢 7 格）。
+     * 离线语料实测（`_swipe_progress_3200/图库/1..5.jpg`，生产对 S≈886）：
+     *   · 无先验：`dy=886 sc=0.60 gap=0.20`（余量很薄）；
+     *   · ±0.85 行：`dy=886 sc=0.60 gap=0.44`（**2.2× 余量**），304/596/1049 等非物理落点被安全拒。
+     * ⇒ 用物理范围（单次手势只可能落在 target ± ~0.85 行）把 ±1 行孪生峰**排除在窗外**，
+     *   而不是放宽 `peakGap` 门限（放宽 = 接受歧义读数 = 点错行）。
+     */
+    const val LANDING_PRIOR_HALF_RATIO = 0.85
+
+    /** 条带匹配结果：dy=内容上移量（正=列表推进）、score=主峰、peakGap=主次峰差。 */
+    class LandingShift(val dy: Int, val score: Double, val peakGap: Double)
+
+    /**
+     * [landingShift] 结果（2026-09-14）：Ok=有效读数；Reject=不可测。
+     * Reject.reason 供设备侧打点定位「为何测不到」（score 不足 / 孪生歧义 / 几何不符）——
+     * C1 验收（swipe-landing-acceptance.md）曾因 null 三不可辨而阻塞。
+     */
+    sealed class LandingResult {
+        class Ok(val shift: LandingShift) : LandingResult()
+        class Reject(val reason: String) : LandingResult()
+    }
+
+    /**
+     * 落地残差的**增益采纳档**（±px）：`|L − target| ≤ 此值` 才把 `L/target` 吃进增益 EMA。
+     *
+     * ⚠️ 原为 20，2026-09-16 真机实测证明**过严 ⇒ EMA 被饿死**：3200/BS 上系统的实际落地增益是
+     * **0.910**（39 次翻页 L=753~833，均值 797，目标 876）⇒ 残差恒为 **−43~−119**，永远落在 ±20 之外
+     * ⇒ 日志 `主滑规划 … 增益=` **45/45 次都是 1.00** ⇒ 命令从不补偿 ⇒ 每页**少滚 ~0.27 行** ⇒
+     * 页首与上一页尾重叠 ⇒ 每页稳定出现 1~3 个"重复件"（并让相位残差逐页累积、贴到半行距上界）。
+     * ⇒ 放宽到 150：覆盖实测全部正常落地（−119~−43），同时仍然拒掉异常读数
+     * （如手势失效 L=191 ⇒ 残差 −685、过冲 L=1080 ⇒ +204、越界 1049）。fpband 自身的
+     * score/peakGap 门已是第一道过滤，此处不需要再叠一层"防污染"。
+     */
+    const val ADV_RESIDUAL_TOL = 150
+    /** 落地增益 EMA 平滑系数 / 夹持（吸收真机/模拟器系统偏差）。 */
+    private const val ADV_GAIN_ALPHA = 0.5
+    private const val ADV_GAIN_MIN = 0.03
+    private const val ADV_GAIN_MAX = 1.6
+
+    /**
+     * 落地判据结果：`residual` = raw 落地残差（L−target，未 mod）、`gain` = 更新后增益。
+     *
+     * ⚠️ **增益的分母是"本次实际命令"（`cmd`），不是 `target`**（2026-09-16 真机定标纠正）：
+     * 增益的定义是"落地 ÷ 命令"（`cmd = target/gain` 的逆运算）⇒ 不动点 `L = target`。
+     * 若误用 `L/target`：把 `cmd = target²/L` 代入 ⇒ 不动点 `L = target·√k`
+     * （k = 系统真实增益 0.91 ⇒ **836**；真机 42 页完整扫描实测落地均值 **835.6** —— 完全吻合）
+     * ⇒ 每页仍系统性少滚 40px（0.14 行），累积成"每 4~5 页出现一整行 7 个重复"（实测页 6/10/15/20/34 各 7）。
+     */
+    class LandingDecision(val residual: Int, val gain: Double)
+
+    /**
+     * 把条带落地测量转成残差与增益更新（design-docs/swipe-landing-measure.md §3/§4）。
+     *
+     * ⚠️ 补滑语义已废除（每页恰一次主滑动，用户定稿）⇒ 超限残差的处置（点击坐标平移 /
+     * 记账进下一次主滑）由 ScanEngine 依**卡片半高**判定，此处只算 raw 残差与 EMA：
+     * `gain = EMA(gainPrev, L / cmd)`（**分母 = 本次实际命令**，见 [LandingDecision] 的 KDoc），
+     * 仅在 `|L − target| ≤ [ADV_RESIDUAL_TOL]`（增益采纳档）时更新。
+     *
+     * @param target 期望推进量（= `advTarget`；用于**残差**与采纳档）
+     * @param cmd 本次**实际发出的滑动命令**（帧 px；用于**增益**）
+     */
+    fun landingDecision(measured: LandingShift, target: Int, cmd: Int, gainPrev: Double): LandingDecision {
+        val res = measured.dy - target
+        val gain = if (cmd > 0 && Math.abs(res) <= ADV_RESIDUAL_TOL) {
+            val g = (measured.dy.toDouble() / cmd).coerceIn(ADV_GAIN_MIN, ADV_GAIN_MAX)
+            (ADV_GAIN_ALPHA * gainPrev + (1 - ADV_GAIN_ALPHA) * g).coerceIn(ADV_GAIN_MIN, ADV_GAIN_MAX)
+        } else {
+            gainPrev
+        }
+        return LandingDecision(res, gain)
+    }
+
+    /**
+     * 翻页落地位移（条带 2D 模板匹配）。
+     *
+     * [band] = 翻页前帧的**第4行可见条**灰度模板（[landingBandMat] 提取）；
+     * [search] = 翻页后帧**同 x 窗**的搜索区灰度（须含条带未滚动时的原位，多步补滑的中间落点才可测）；
+     * [bandTopInSearch] = 条带未滚动时在 search 内的 y（= 条带绝对 y0 − search 绝对 y0）。
+     * [expectedPx] = 期望落地（帧 px，通常 = 翻页 `advTarget`）；>0 且 [priorHalf]>0 时启用先验窗。
+     * [priorHalf] = 先验半窗（帧 px）；生产取 `round(rowPitch × [LANDING_PRIOR_HALF_RATIO])`。
+     *
+     * 返回 [LandingResult.Reject]（调用方回退特征锁并打点）当：
+     *  - score < [LANDING_MIN_SCORE]：条带不在窗内 / 顶部渐隐裁切 / 页面内容更换；
+     *  - peakGap < [LANDING_MIN_PEAK_GAP]：孪生卡歧义；
+     *  - 模板/搜索窗几何不足。
+     *
+     * 滚动为刚性平移 ⇒ 条带窗口无需对齐卡片绝对行界（上一页相位残差 φ 只平移内容，
+     * 窗口内仍是卡片内容）⇒ 测得 dy 即真实翻译量，与 φ 无关。
+     */
+    fun landingShift(
+        band: Mat,
+        search: Mat,
+        bandTopInSearch: Int,
+        expectedPx: Int = 0,
+        priorHalf: Int = 0,
+    ): LandingResult {
+        if (band.rows() < 8 || band.cols() < 40) {
+            return LandingResult.Reject("band几何不足(${band.rows()}x${band.cols()})")
+        }
+        if (search.rows() < band.rows() || search.cols() != band.cols()) {
+            return LandingResult.Reject("搜索窗几何不符(${search.rows()}x${search.cols()})")
+        }
+        val res = Mat()
+        return try {
+            Imgproc.matchTemplate(search, band, res, Imgproc.TM_CCOEFF_NORMED)
+            // ★ 期望落点先验（见 LANDING_PRIOR_HALF_RATIO）：窗外峰一律屏蔽 ⇒ 排除 ±1 行孪生峰。
+            //   先验只**收窄搜索区**、不放宽任何门限；真峰若在窗外 ⇒ score 门自然拒（安全方向）。
+            var priorNote = ""
+            if (expectedPx > 0 && priorHalf > 0) {
+                val want = bandTopInSearch - expectedPx
+                val lo = want - priorHalf
+                val hi = want + priorHalf
+                var masked = 0
+                for (y in 0 until res.rows()) {
+                    if (y < lo || y > hi) {
+                        res.row(y).setTo(Scalar(-2.0))
+                        masked++
+                    }
+                }
+                priorNote = "；先验窗[${lo},${hi}] 屏蔽 ${masked}/${res.rows()} 行"
+            }
+            val mm = Core.minMaxLoc(res)
+            if (mm.maxVal < LANDING_MIN_SCORE) {
+                return LandingResult.Reject("score<%.2f(=%.2f)".format(LANDING_MIN_SCORE, mm.maxVal) + priorNote)
+            }
+            // 次峰：抑制主峰±[LANDING_SUPPRESS_HALF] 后取最大（不吞相邻周期，孪生卡才能暴露）
+            val peakY = Math.round(mm.maxLoc.y).toInt()
+            val y0 = Math.max(0, peakY - LANDING_SUPPRESS_HALF)
+            val y1 = Math.min(res.rows(), peakY + LANDING_SUPPRESS_HALF)
+            if (y0 > 0 || y1 < res.rows()) {
+                res.submat(
+                    org.opencv.core.Range(y0, y1),
+                    org.opencv.core.Range(0, res.cols()),
+                ).setTo(Scalar(-2.0))
+            }
+            val second = Core.minMaxLoc(res)
+            val gap = mm.maxVal - second.maxVal
+            if (gap < LANDING_MIN_PEAK_GAP) {
+                // 拒因带上**次峰位移** ⇒ 真机上可直接判定"孪生峰是否恰在 ±1 行"
+                val secondDy = bandTopInSearch - Math.round(second.maxLoc.y).toInt()
+                return LandingResult.Reject(
+                    "peakGap<%.2f(=%.2f;主峰dy=%d 次峰dy=%d sc=%.2f)".format(
+                        LANDING_MIN_PEAK_GAP, gap, bandTopInSearch - peakY, secondDy, second.maxVal,
+                    ) + priorNote,
+                )
+            }
+            LandingResult.Ok(LandingShift(bandTopInSearch - peakY, mm.maxVal, gap))
+        } finally {
+            res.release()
+        }
+    }
+
+    /**
+     * 从帧提取落地条带灰度模板（调用方负责 release；几何缺失/越界返回 null）。
+     * ⚠️ 模板 = **翻页前帧**像素的拷贝，与后续帧同 x 窗 ⇒ 匹配零额外拷贝（search 用 submat 视图）。
+     */
+    fun landingBandMat(frame: Mat, geom: ScreenProfile.LandingBand): Mat? {
+        if (geom.x1 <= geom.x0 || geom.y1 <= geom.y0) return null
+        if (geom.x1 > frame.cols() || geom.y1 > frame.rows()) return null
+        return try {
+            val g = Mat()
+            if (frame.channels() == 1) frame.copyTo(g)
+            else Imgproc.cvtColor(frame, g, Imgproc.COLOR_BGR2GRAY)
+            val sub = Mat(g, org.opencv.core.Rect(geom.x0, geom.y0, geom.x1 - geom.x0, geom.y1 - geom.y0))
+            val out = sub.clone()
+            sub.release()
+            g.release()
+            out
+        } catch (_: org.opencv.core.CvException) {
+            null
+        }
+    }
 
     /**
      * **2D 模板位移测量**（2026-09-13）：修复 [profileShift] 的**周期歧义**——
@@ -487,7 +716,12 @@ object VoteJudges {
      * 本方法用**卡片图案**做 2D 匹配（图案唯一 ⇒ 无歧义）；网格 ROI 1/4 下采样控制成本（~10ms）。
      * 模板取 before 的**底部带**（y 78%~98%）⇒ 前进 612px 后仍在屏内；搜索 = after 全 ROI。
      * 返回 (位移px, score)；score < 0.6 ⇒ null（不可信，调用方回退 1D）。
+     *
+     * ⚠️ 2026-09-16（审计 P2-3）：**生产调用点已全部退场** —— 翻页改造后落地测量唯一来源是
+     * [landingShift]（fpband 落地条带）。本函数只被自身单测引用，保留作回归参考。
+     * 历史失效原因：大位移**周期混叠**（同命令 876 实测落地 191~1080，5.6× 波动）。
      */
+    @Deprecated("翻页已改用 fpband 落地条带（landingShift）；本测量器在大位移下周期混叠，勿再接入生产")
     fun gridShift2D(before: Mat, after: Mat, profile: ScreenProfile, gridKey: String): Pair<Int, Double>? {
         val b = gridGrayQuarter(before, profile, gridKey) ?: return null
         val a = gridGrayQuarter(after, profile, gridKey) ?: return null
