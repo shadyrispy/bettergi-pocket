@@ -7,7 +7,7 @@
 
 ## 功能
 
-- **悬浮球**：授权后以气泡形式显示在其他应用之上，可拖动、展开面板（含滑动测试调参、A11y 探针）
+- **悬浮球**：以气泡形式显示在游戏之上，可拖动、展开面板；**零权限**（走无障碍悬浮窗，不需要「显示在上层」授权）
 - **屏幕共享**：MediaProjection 常驻丢帧流（唯一帧源），用于模板识别与扫描
 - **自动对话**：识别剧情对话后自动点击选项；可选「快速点击跳过」
 - **自动拾取**：周期点击屏幕下方拾取
@@ -19,17 +19,22 @@
   - **anchor 数字兜底**（`prefixStrict` flow 可配：weapon_scan 严格防跨 tab 误配；默认宽松容忍 OCR 丢前缀）+ 失败 BACK 清弹窗后重进重试
   - maxPages 翻页早停（悬浮窗可设，0=不限；调试翻页准确性）
   - **分辨率专属 profile**：`dsl/profiles_<w>x<h>.json` 按帧尺寸自动路由（无则回退基准 3200x1440；宽高比失真 >2% 告警——16:9 设备坐标不可用已实测钉死）
-- **悬浮窗扫描控制区**：「自动扫描」行展开——流程切换（圣遗物/武器）、页数输入、▶开始 / ■停止扫描、分享 GOOD（全部零通知依赖；重要提示走 Toast/悬浮窗文字）
+- **脚本驱动悬浮窗**：「自动扫描」行展开后，流程按钮**由脚本自己声明**（`ui` 段：文字/图标/顺序）——启用哪条就上哪条，关掉即从浮窗消失；页数输入、▶开始 / ■停止扫描；扫描中当前流程按钮转「运行中」态
+- **开始导出 / 设置**：面板底部的内置按钮（不写进脚本）——「开始导出」拉系统分享（飞书/微信，免 adb）；「设置」长按进入脚本管理器
+- **脚本管理器（MainActivity）**：导入本地 JSON（系统文件选择器，免存储权限）+ 逐条启用开关 + 恢复内置；含**滑动测试**调参卡片；首次启动自动出现，之后长按浮窗「设置」进入
+- **识别日志窗**：可在浮窗内开合（含按流程标签过滤），显示扫描/对话/加锁/装备/角色的实时识别行
 - **零通知权限**：不声明/不请求 `POST_NOTIFICATIONS`——FGS 常驻通知（系统强制，MediaProjection 必须由前台服务持有）在 Android 13+ 默认不显示，服务与悬浮窗全功能不受影响
 - **启动原神**：打开已安装的客户端，可选未检测到时自动启动
 
 ## 使用
 
-1. 安装并打开应用，按提示开启**悬浮窗**权限
-2. 先在应用设置中找到 更好的原神 进行单次授权
-3. 在系统设置中开启无障碍服务「更好的原神」（用于模拟点击、判断原神是否在前台）
-4. 点开悬浮球，打开**共享屏幕** → 系统投影授权弹窗直接弹出（SAW 豁免直启；个别 ROM 拦截时自动拉 app 前台再弹，**不依赖通知**）
-5. 展开悬浮窗「自动扫描」→ 选流程/页数 → 点「▶ 开始扫描」；完成后点「分享 GOOD」拉起系统分享（飞书/微信，免 adb）
+1. 安装并打开应用 —— 首次启动直接进入**脚本管理器**（导入/开关脚本、滑动测试）
+2. 在系统设置中开启无障碍服务「更好的原神」（模拟点击、判断原神是否在前台，**同时也是悬浮窗的宿主**）
+3. 点开悬浮球，打开**共享屏幕** → 系统投影授权弹窗直接弹出（个别 ROM 拦截时自动拉 app 前台再弹，**不依赖通知**）
+4. 展开悬浮窗「自动扫描」→ 点某条**脚本按钮**（如「圣遗物扫描」）即开跑；完成后点**「开始导出」**拉起系统分享
+5. 改脚本/调开关：长按浮窗**「设置」**回到管理器
+
+> 无需「显示在上层」授权：悬浮窗由无障碍服务以 `TYPE_ACCESSIBILITY_OVERLAY` 承载，因此**只开无障碍**即可。
 
 ## 架构
 
@@ -49,9 +54,21 @@ TriggerForegroundService（生命周期 + settingsListener + 前台通知）
 │        ├─ ArtifactSetDictionary / WeaponDictionary / CharacterDictionary（三级匹配）
 │        └─ GoodExporter（GOOD v3 artifacts+weapons → filesDir）
 ├─ AccessibilityAutomationController（动作域：Click/Back/LongPress/Swipe 三段无惯性）
-│    └─ InputAccessibilityService（本地/远程 ContentProvider 双路径 + 桥：CLICK/SWIPE/BACK/PROBE/SCAN_PROGRESS）
+│    └─ OverlayBridge（悬浮窗门面：show/hide/进度/点击穿透 —— 转成桥调用发给 :a11y）
 ├─ DebugControlReceiver（adb 调试链：SET_SCREEN_SHARE/SET_SCAN/SET_PROBE/SWIPE_TEST/SCAN_FLOW/STATUS）
-└─ OverlayWindowController（悬浮球/面板/进度；滑动测试内嵌面板，执行时自动缩球）
+└─ MainActivity（脚本管理器：导入 JSON + 启用开关 + 滑动测试）
+
+:a11y 进程（无障碍服务所在，悬浮窗宿主）
+└─ InputAccessibilityService
+     ├─ 输入注入（dispatchGesture：点击/三段无惯性滑动）
+     └─ A11yOverlayRuntime
+          └─ OverlayWindowController（悬浮球/面板/日志窗/脚本按钮，TYPE_ACCESSIBILITY_OVERLAY 零权限）
+               └─ BridgeSettingsRepository（设置读写的跨进程代理）
+
+跨进程通道（同 UID 两个 Provider）
+  app → :a11y   AccessibilityBridgeProvider（.a11y）   ：点击/滑动/悬浮窗指令
+  :a11y → app   SettingsBridgeProvider（.settings）    ：设置读写/开始导出/退出/识别日志
+  识别日志单一日志源在主进程；:a11y 侧日志窗按 700ms 拉镜像渲染
 ```
 
 - 端到端脚本：`scripts/e2e_scan.sh`（connect/install/grant/bubble/projection/game/scan/swipe/probe/wait/report 分阶段可单跑）
