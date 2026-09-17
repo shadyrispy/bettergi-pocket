@@ -13,6 +13,11 @@
     "total": "int",
     "results": "list<GoodArtifact>"
   },
+  "ui": {
+    "label": "圣遗物扫描",
+    "icon": "artifact",
+    "order": 10
+  },
   "steps": [
     {
       "do": "enterScreen",

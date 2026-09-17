@@ -12,6 +12,48 @@
       "minItems": 4,
       "maxItems": 4
     },
+    "overlayUi": {
+      "type": "object",
+      "title": "悬浮窗按钮描述（P2，2026-09-18）",
+      "description": "存在且 label 非空 ⇒ 在悬浮窗生成一个按钮；缺省或 label 为空 ⇒ 不上窗。非法 icon/color 由 FlowValidator 报错（不静默丢弃）。",
+      "properties": {
+        "label": {
+          "type": "string",
+          "description": "按钮文字（必填）"
+        },
+        "icon": {
+          "type": "string",
+          "enum": [
+            "artifact",
+            "weapon",
+            "character",
+            "lock",
+            "equip",
+            "gear"
+          ],
+          "default": "gear"
+        },
+        "order": {
+          "type": "integer",
+          "description": "排序（小在前）；缺省排最后"
+        },
+        "color": {
+          "type": "string",
+          "pattern": "^#[0-9A-Fa-f]{6}$"
+        },
+        "confirm": {
+          "type": "boolean",
+          "default": false,
+          "description": "点击是否二次确认（默认关）"
+        },
+        "hint": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "label"
+      ]
+    },
     "fallbackStep": {
       "type": "object",
       "description": "降级层，最多 2 层（D5）；再失败终止并输出诊断截图包",
@@ -201,6 +243,9 @@
       "items": {
         "type": "string"
       }
+    },
+    "ui": {
+      "$ref": "#/definitions/overlayUi"
     }
   },
   "required": [

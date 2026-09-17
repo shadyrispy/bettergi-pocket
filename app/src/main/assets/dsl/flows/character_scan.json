@@ -7,6 +7,11 @@
     "roster": "list",
     "suspects": "list"
   },
+  "ui": {
+    "label": "角色扫描",
+    "icon": "character",
+    "order": 30
+  },
   "steps": [
     {
       "do": "enterScreen",

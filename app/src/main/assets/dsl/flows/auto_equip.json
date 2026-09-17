@@ -6,6 +6,11 @@
   "vars": {
     "plan": "list<{char, slot, target:GoodArtifact}>"
   },
+  "ui": {
+    "label": "自动装备",
+    "icon": "equip",
+    "order": 50
+  },
   "steps": [
     {
       "do": "foreach",

@@ -8,6 +8,11 @@
     "seen": "set<fingerprint>",
     "results": "list<GoodWeapon>"
   },
+  "ui": {
+    "label": "武器扫描",
+    "icon": "weapon",
+    "order": 20
+  },
   "steps": [
     {
       "do": "enterScreen",

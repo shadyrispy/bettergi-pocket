@@ -6,6 +6,11 @@
   "vars": {
     "targets": "list<GoodArtifact>"
   },
+  "ui": {
+    "label": "圣遗物锁定",
+    "icon": "lock",
+    "order": 40
+  },
   "steps": [
     {
       "do": "enterScreen",

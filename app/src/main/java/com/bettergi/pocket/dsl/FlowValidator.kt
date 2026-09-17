@@ -9,9 +9,27 @@ import org.json.JSONObject
  *   v1.0 兼容（无 info，取顶层 `version` 字符串，min_host_version 默认 0.0.0）。
  * - [validate]：校验 `steps` 数组 + 每 step 含 `do` 原语名；报步骤序号与字段路径。
  * - [hostSatisfies]：min_host_version 语义比较当前宿主版本（BuildConfig.VERSION_NAME）。
+ * - [parseUi]：P2（2026-09-18）悬浮窗按钮描述 `ui{label,icon,order,color?,confirm?,hint?}` —— 缺省则不上窗；
+ *   非法 `icon`/`color` 在 [validate] 报错（避免静默丢弃）。
  */
 object FlowValidator {
     const val DEFAULT_TYPE = "pocket-script"
+
+    /** 悬浮窗按钮图标白名单（P2）。 */
+    val ICONS: Set<String> = setOf("artifact", "weapon", "character", "lock", "equip", "gear")
+
+    /** 颜色格式：#RRGGBB。 */
+    private val COLOR_RE = Regex("^#[0-9A-Fa-f]{6}$")
+
+    /** 悬浮窗按钮描述（P2）：由 DSL 的 `ui` 段解析；`label` 为空 ⇒ 不上窗。 */
+    data class OverlayUi(
+        val label: String,
+        val icon: String,
+        val order: Int,
+        val color: String? = null,
+        val confirm: Boolean = false,
+        val hint: String? = null,
+    )
 
     data class FlowInfo(
         val name: String,
@@ -46,6 +64,30 @@ object FlowValidator {
         )
     }
 
+    /**
+     * 解析 `ui` 段（P2）。规则：
+     * - 无 `ui` 或 `label` 为空 ⇒ 返回 null（不上悬浮窗）；
+     * - `icon` 非法 ⇒ 回落 `gear`（同时 [validate] 报 issue）；
+     * - `order` 缺省 ⇒ Int.MAX_VALUE（排最后）。
+     */
+    fun parseUi(json: JSONObject): OverlayUi? {
+        val ui = json.optJSONObject("ui") ?: return null
+        val label = ui.optString("label", "")
+        if (label.isBlank()) return null
+        val rawIcon = ui.optString("icon", "gear")
+        val icon = if (rawIcon in ICONS) rawIcon else "gear"
+        val color = ui.optString("color", "").takeIf { it.isNotBlank() }
+        val hint = ui.optString("hint", "").takeIf { it.isNotBlank() }
+        return OverlayUi(
+            label = label,
+            icon = icon,
+            order = ui.optInt("order", Int.MAX_VALUE),
+            color = color,
+            confirm = ui.optBoolean("confirm", false),
+            hint = hint,
+        )
+    }
+
     fun validate(json: JSONObject): List<Issue> {
         val issues = mutableListOf<Issue>()
         val steps = json.optJSONArray("steps")
@@ -64,6 +106,27 @@ object FlowValidator {
             }
             if (!step.has("do")) {
                 issues.add(Issue(i, "steps[$i].do", "missing primitive name 'do'"))
+            }
+        }
+        // ---- ui（P2：悬浮窗按钮描述，可选；有则逐项校验，避免静默丢弃）----
+        val ui = json.optJSONObject("ui")
+        if (ui != null) {
+            if (ui.optString("label", "").isBlank()) {
+                issues.add(Issue(null, "ui.label", "missing 'ui.label' (required when 'ui' present)"))
+            }
+            val icon = ui.optString("icon", "gear")
+            if (icon !in ICONS) {
+                issues.add(
+                    Issue(
+                        null,
+                        "ui.icon",
+                        "unknown icon '$icon'; allowed: " + ICONS.sorted().joinToString("|"),
+                    ),
+                )
+            }
+            val color = ui.optString("color", "")
+            if (color.isNotBlank() && !COLOR_RE.matches(color)) {
+                issues.add(Issue(null, "ui.color", "invalid color '$color'; expected #RRGGBB"))
             }
         }
         return issues
