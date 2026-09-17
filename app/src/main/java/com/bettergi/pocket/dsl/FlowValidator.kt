@@ -90,22 +90,23 @@ object FlowValidator {
 
     fun validate(json: JSONObject): List<Issue> {
         val issues = mutableListOf<Issue>()
+        // ⚠️ 不做提前 return：steps 与 ui 的问题要**一次列全**（管理界面要一次性看到所有问题）。
         val steps = json.optJSONArray("steps")
         if (steps == null) {
             issues.add(Issue(null, "steps", "missing 'steps' array"))
-            return issues
-        }
-        if (steps.length() == 0) {
-            issues.add(Issue(null, "steps", "empty 'steps' array"))
-        }
-        for (i in 0 until steps.length()) {
-            val step = steps.optJSONObject(i)
-            if (step == null) {
-                issues.add(Issue(i, "steps[$i]", "step is not a JSON object"))
-                continue
+        } else {
+            if (steps.length() == 0) {
+                issues.add(Issue(null, "steps", "empty 'steps' array"))
             }
-            if (!step.has("do")) {
-                issues.add(Issue(i, "steps[$i].do", "missing primitive name 'do'"))
+            for (i in 0 until steps.length()) {
+                val step = steps.optJSONObject(i)
+                if (step == null) {
+                    issues.add(Issue(i, "steps[$i]", "step is not a JSON object"))
+                    continue
+                }
+                if (!step.has("do")) {
+                    issues.add(Issue(i, "steps[$i].do", "missing primitive name 'do'"))
+                }
             }
         }
         // ---- ui（P2：悬浮窗按钮描述，可选；有则逐项校验，避免静默丢弃）----
