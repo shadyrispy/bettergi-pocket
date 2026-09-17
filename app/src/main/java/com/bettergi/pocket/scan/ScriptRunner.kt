@@ -8,7 +8,7 @@ import android.util.Log
 import com.bettergi.pocket.capture.FrameSource
 import com.bettergi.pocket.capture.ScreenCaptureController
 import com.bettergi.pocket.input.InputAccessibilityService
-import com.bettergi.pocket.overlay.OverlayWindowController
+import com.bettergi.pocket.overlay.OverlayBridge
 import com.bettergi.pocket.dsl.FlowSource
 import com.bettergi.pocket.dsl.FlowValidator
 import com.bettergi.pocket.recognition.ocr.OcrFactory
@@ -31,7 +31,7 @@ class ScriptRunner(
     context: Context,
     private val frameSource: FrameSource,
     private val captureController: ScreenCaptureController,
-    private val overlayController: OverlayWindowController,
+    private val overlayController: OverlayBridge,
     private val listener: ScanListener,
 ) {
     private val appContext = context.applicationContext

@@ -114,6 +114,56 @@ object RecognitionLog {
         mainHandler.post { listeners.forEach { runCatching { it(emptyList()) } } }
     }
 
+    // ---- 跨进程投递（2026-09-18 悬浮窗宿主迁到无障碍进程后新增）----
+    // 日志缓冲只存在于**写日志的那个进程**（主进程：扫描引擎/自动对话都在那儿）。
+    // 无障碍进程的日志窗因此需要一份"镜像"：主进程给全量快照，无障碍进程本地按标签过滤渲染
+    // ——过滤集留在渲染侧，两个进程各自维护，不再互相干扰。
+
+    /** 全量快照（**不按可见标签过滤**）：供跨进程投递。 */
+    fun snapshotAll(): List<Entry> = synchronized(lock) { buffer.toList() }
+
+    /**
+     * 用远端快照整体替换缓冲（仅镜像侧使用）。
+     * @return 内容确有变化为 true；相同则原地返回 false（避免每秒无谓重渲染）。
+     */
+    fun replaceAll(entries: List<Entry>): Boolean {
+        synchronized(lock) {
+            if (buffer.size == entries.size && buffer.toList() == entries) return false
+            buffer.clear()
+            for (e in entries.takeLast(MAX_LINES)) buffer.addLast(e)
+        }
+        mainHandler.post { listeners.forEach { runCatching { it(filteredLocked()) } } }
+        return true
+    }
+
+    /**
+     * 跨进程**写入**（无障碍进程发来一条日志）。
+     * 枚举名不合法就丢弃（不抛）——日志不该成为跨进程的崩溃点。
+     */
+    fun appendWire(tag: String, level: String, message: String): Boolean {
+        val t = runCatching { Tag.valueOf(tag) }.getOrNull() ?: return false
+        val l = runCatching { Level.valueOf(level) }.getOrNull() ?: return false
+        log(t, l, message)
+        return true
+    }
+
+    /** 条目 → 跨进程线格式（用不可见分隔符，避免与日志正文里的可见字符冲突）。 */
+    fun encode(entry: Entry): String =
+        entry.time + SEP + entry.tag.name + SEP + entry.level.name + SEP + entry.message
+
+    /** 跨进程线格式 → 条目；字段数不对或枚举不认识则返回 null（丢弃脏数据，不抛）。 */
+    fun decode(raw: String): Entry? {
+        val parts = raw.split(SEP)
+        if (parts.size < 4) return null
+        val tag = runCatching { Tag.valueOf(parts[1]) }.getOrNull() ?: return null
+        val level = runCatching { Level.valueOf(parts[2]) }.getOrNull() ?: return null
+        // 正文里若混入分隔符，第 4 段之后要拼回去
+        val message = if (parts.size > 4) parts.subList(3, parts.size).joinToString(SEP.toString()) else parts[3]
+        return Entry(parts[0], tag, level, message)
+    }
+
+    private const val SEP = '\u0001'
+
     /** 调用方须持 [lock]。 */
     private fun filteredLocked(): List<Entry> = buffer.filter { it.tag in visible }
 }

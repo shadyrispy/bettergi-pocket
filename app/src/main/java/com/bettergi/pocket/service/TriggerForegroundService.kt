@@ -5,7 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
@@ -14,6 +17,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import com.bettergi.pocket.MainActivity
@@ -29,7 +33,7 @@ import com.bettergi.pocket.genshin.GenshinLauncher
 import com.bettergi.pocket.input.AccessibilityAutomationController
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.input.SwipeMethod
-import com.bettergi.pocket.overlay.OverlayWindowController
+import com.bettergi.pocket.overlay.OverlayBridge
 import com.bettergi.pocket.recognition.RecognitionAssets
 import com.bettergi.pocket.recognition.ocr.OcrFactory
 import com.bettergi.pocket.scan.ScanListener
@@ -44,7 +48,12 @@ import kotlinx.coroutines.launch
 class TriggerForegroundService : Service() {
     private lateinit var settingsRepository: TriggerSettingsRepository
     private lateinit var captureController: ScreenCaptureController
-    private lateinit var overlayController: OverlayWindowController
+    /**
+     * 悬浮窗门面（2026-09-18 宿主迁移）。
+     * 悬浮窗本体已搬到无障碍进程（`TYPE_ACCESSIBILITY_OVERLAY` 零权限），本服务只持有转发门面；
+     * 方法签名与原控制器一致 ⇒ 扫描/自动对话侧零改动。
+     */
+    private lateinit var overlayController: OverlayBridge
     private lateinit var genshinLauncher: GenshinLauncher
     private lateinit var genshinLaunchMonitor: GenshinLaunchMonitor
     private lateinit var engine: TriggerEngine
@@ -57,6 +66,14 @@ class TriggerForegroundService : Service() {
 
     @Volatile
     private var shutDown = false
+
+    /** 无障碍状态变化 ⇒ 重连后把悬浮窗请求回来（见 onCreate 注释）。 */
+    private val a11yStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (shutDown) return
+            mainHandler.post { overlayController.show() }
+        }
+    }
 
     private val settingsListener: (TriggerSettings) -> Unit = { settings ->
         if (settings.screenShareEnabled) {
@@ -81,7 +98,8 @@ class TriggerForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        settingsRepository = TriggerSettingsRepository(applicationContext)
+        // 进程内单例：设置桥 Provider 必须拿到同一实例，否则两个缓存互相打架
+        settingsRepository = TriggerSettingsRepository.app(applicationContext)
         captureController = ScreenCaptureController(applicationContext) {
             if (settingsRepository.get().screenShareEnabled) {
                 settingsRepository.setScreenShareEnabled(false)
@@ -93,18 +111,9 @@ class TriggerForegroundService : Service() {
             }
         }
         genshinLauncher = GenshinLauncher(applicationContext)
-        overlayController = OverlayWindowController(
-            applicationContext,
-            settingsRepository,
-            genshinLauncher = genshinLauncher,
-            onExit = {
-                val stop = Intent(this, TriggerForegroundService::class.java).apply {
-                    action = ACTION_STOP
-                }
-                startService(stop)
-            },
-            onShareGoodRequested = { shareGood() },
-        )
+        // 「退出 / 开始导出」由无障碍进程经设置桥回调（METHOD_STOP / METHOD_SHARE_GOOD），
+        // 因此这里不再需要 onExit / onShareGoodRequested 回调。
+        overlayController = OverlayBridge(applicationContext)
         genshinLaunchMonitor = GenshinLaunchMonitor(
             settingsRepository = settingsRepository,
             launcher = genshinLauncher,
@@ -133,6 +142,15 @@ class TriggerForegroundService : Service() {
             listener = scanListener,
         )
         settingsRepository.addListener(settingsListener)
+        // ⚠️ 2026-09-18 上机实测：无障碍重连后**悬浮窗不会自己回来**（旧窗口随服务销毁，
+        //    而没有新的 overlay_show 请求）⇒ 表现为「助手在跑但球没了」，只能重启助手。
+        //    这里订阅无障碍状态变化，重连后补一次显示请求（幂等：已显示时 show() 直接返回）。
+        ContextCompat.registerReceiver(
+            applicationContext,
+            a11yStateReceiver,
+            IntentFilter(InputAccessibilityService.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         genshinLaunchMonitor.start()
     }
 
@@ -146,6 +164,10 @@ class TriggerForegroundService : Service() {
             ACTION_STOP -> {
                 shutdown()
                 stopSelf()
+            }
+            ACTION_SHARE_GOOD -> {
+                // 悬浮窗「开始导出」（无障碍进程发起）
+                shareGood()
             }
             ACTION_CAPTURE_RESULT -> {
                 requestingCapturePermission = false
@@ -442,13 +464,14 @@ class TriggerForegroundService : Service() {
         }
     }
 
-    /** 最近一次 GOOD 导出文件名（悬浮窗「分享 GOOD」用）。 */
+    /** 最近一次 GOOD 导出文件名（悬浮窗「开始导出」用）。 */
     @Volatile
     private var lastGoodFile: String? = null
 
     /**
-     * 悬浮窗「分享 GOOD」：拉 app 前台（MainActivity 中转）再起系统分享 chooser——
-     * service 后台直接 startActivity(chooser) 依赖 SAW 豁免，Android 14+ ROM 不可靠。
+     * 悬浮窗「开始导出」：拉 app 前台（MainActivity 中转）再起系统分享 chooser——
+     * service 后台直接 startActivity(chooser) 虽命中「UID 持有可见窗口」豁免，
+     * 但分享面板需要 Activity 上下文，Android 14+ ROM 上直接起不可靠。
      */
     private fun shareGood() {
         val file = lastGoodFile
@@ -491,6 +514,7 @@ class TriggerForegroundService : Service() {
         engine.release()
         captureController.stop()
         overlayController.hide()
+        runCatching { unregisterReceiver(a11yStateReceiver) }
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
@@ -510,12 +534,14 @@ class TriggerForegroundService : Service() {
         if (requestingCapturePermission) return
         requestingCapturePermission = true
         try {
-            // 悬浮窗点击是用户交互 + SAW 豁免（与原版同款语义）：直接启动授权 activity
+            // 悬浮窗点击 = 用户交互，且本应用 UID 持有可见窗口（无障碍进程里的悬浮窗）⇒
+            // 命中「允许后台启动 Activity」的豁免，无需 SAW 也能直接拉起授权 activity
+            // （2026-09-18 已用探针实测：吊销「显示在上层」权限后仍可启动）
             val intent = Intent(this, CapturePermissionActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
         } catch (e: Exception) {
-            // 兜底：部分 ROM 收紧 SAW 后台启动 → 拉 app 前台，MainActivity 前台内再发起（无通知依赖）
+            // 兜底：部分 ROM 收紧后台启动限制 → 拉 app 前台，MainActivity 前台内再发起（无通知依赖）
             requestingCapturePermission = false
             Log.w(TAG, "direct capture launch failed, bringing app to front", e)
             val intent = Intent(this, MainActivity::class.java)
@@ -634,6 +660,12 @@ class TriggerForegroundService : Service() {
         const val ACTION_STOP = "com.bettergi.pocket.action.STOP"
         const val ACTION_CAPTURE_RESULT = "com.bettergi.pocket.action.CAPTURE_RESULT"
         const val ACTION_CAPTURE_DENIED = "com.bettergi.pocket.action.CAPTURE_DENIED"
+        /**
+         * 悬浮窗「开始导出」：由无障碍进程经设置桥（`overlay_share_good`）转成服务指令。
+         * 之所以不在无障碍进程直接起分享：导出文件名只有本服务知道（`lastGoodFile`），
+         * 且系统分享面板必须由带 Activity 的进程拉前台。
+         */
+        const val ACTION_SHARE_GOOD = "com.bettergi.pocket.action.SHARE_GOOD"
         const val ACTION_SCAN_START = "com.bettergi.pocket.action.SCAN_START"
         const val ACTION_SCAN_STOP = "com.bettergi.pocket.action.SCAN_STOP"
         const val ACTION_DEBUG_SET_SCREEN_SHARE = "com.bettergi.pocket.action.DEBUG_SET_SCREEN_SHARE"

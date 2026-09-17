@@ -5,7 +5,6 @@
     <!-- 本 app 自 P1 起**不联网**：删除自身 INTERNET，并移除依赖库（com.google.android.datatransport:transport-backend-cct）带入的联网权限 -->
     <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
@@ -91,11 +90,18 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
+        <!-- 主进程 → 无障碍进程：下发点击 / 滑动 / 悬浮窗指令 -->
         <provider
             android:name=".input.AccessibilityBridgeProvider"
             android:authorities="${applicationId}.a11y"
             android:exported="false"
             android:process=":a11y" />
+
+        <!-- 无障碍进程 → 主进程：读/写设置、请求导出与退出、拉识别日志镜像 -->
+        <provider
+            android:name=".settings.SettingsBridgeProvider"
+            android:authorities="${applicationId}.settings"
+            android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

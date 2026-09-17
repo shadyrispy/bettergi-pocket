@@ -18,6 +18,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.ContextThemeWrapper
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -51,7 +52,7 @@ import com.bettergi.pocket.input.AccessibilityServiceHealth
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.log.RecognitionLog
 import com.bettergi.pocket.settings.TriggerSettings
-import com.bettergi.pocket.settings.TriggerSettingsRepository
+import com.bettergi.pocket.settings.SettingsGateway
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -63,7 +64,7 @@ import java.util.Locale
 
 class OverlayWindowController(
     private val context: Context,
-    private val settingsRepository: TriggerSettingsRepository,
+    private val settingsRepository: SettingsGateway,
     private val genshinLauncher: GenshinLauncher = GenshinLauncher(context),
     private val onExit: () -> Unit = {},
     private val onShareGoodRequested: () -> Unit = {},
@@ -170,6 +171,8 @@ class OverlayWindowController(
         val entries = runCatching { ScriptStore.list(context) }
             .getOrDefault(emptyList())
             .filter { it.enabled && it.hasUi }
+        // 证据日志：悬浮窗上到底挂了哪几条脚本（排障「按钮少了/顺序不对」的第一现场）
+        Log.i(TAG_OVERLAY, "flow buttons ← " + entries.joinToString { "${it.key}(${it.label})" })
         if (entries.isEmpty()) {
             container.addView(
                 TextView(themedContext).apply {
@@ -291,7 +294,10 @@ class OverlayWindowController(
 
     fun show() {
         if (rootView != null) return
-        if (!Settings.canDrawOverlays(context)) return
+        // 2026-09-18：宿主迁到无障碍进程后不再需要「显示在上层」授权。
+        // 服务未连接时 A11yOverlayRuntime 根本不会构造本对象，故此处无需再自检。
+        // ⚠️ 本类两个窗口（面板/日志）都必须用 TYPE_ACCESSIBILITY_OVERLAY，
+        //    否则在无障碍进程里会被 WindowManager 以权限不足拒绝。
 
         val root = LayoutInflater.from(themedContext).inflate(R.layout.overlay_window, null)
         val bubble = root.findViewById<View>(R.id.overlay_bubble)
@@ -386,7 +392,7 @@ class OverlayWindowController(
         val layoutParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
@@ -550,6 +556,16 @@ class OverlayWindowController(
         if (rootView?.handler?.looper == android.os.Looper.myLooper()) runnable()
         else rootView?.post(runnable) ?: Unit
     }
+
+    /**
+     * 远端日志出口（宿主搬到无障碍进程后由运行时注入）。
+     * ⚠️ 必须**既写本地又发远端**：本地写是为了即时可见；发远端是为了不被日志镜像整体覆盖
+     * （镜像的来源是主进程缓冲，见 A11yOverlayRuntime 的日志轮询）。
+     */
+    var remoteLogSink: ((String, String, String) -> Unit)? = null
+
+    /** 日志窗是否可见（无障碍进程的运行时据此决定要不要拉取主进程的日志镜像）。 */
+    fun isLogWindowVisible(): Boolean = logWindowVisible
 
     /** 扫描进度副文本（主线程调用；P1-c 悬浮窗入口）。 */
     fun updateScanProgress(text: String) {
@@ -848,6 +864,12 @@ class OverlayWindowController(
      */
     private fun appendLog(message: String) {
         RecognitionLog.log(RecognitionLog.Tag.AUTOSKIP, RecognitionLog.Level.I, message)
+        // 同时送回主进程的单一日志源（否则下一次镜像刷新会把这行冲掉）
+        remoteLogSink?.invoke(
+            RecognitionLog.Tag.AUTOSKIP.name,
+            RecognitionLog.Level.I.name,
+            message,
+        )
     }
 
     /** §13：订阅全局日志（开窗即回放全部历史）。 */
@@ -1160,7 +1182,7 @@ class OverlayWindowController(
         return WindowManager.LayoutParams(
             width,
             height,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             flags,
             PixelFormat.TRANSLUCENT,
         ).apply {
@@ -1568,6 +1590,7 @@ class OverlayWindowController(
     }
 
     private companion object {
+        private const val TAG_OVERLAY = "BetterGI.Overlay"
         private const val PREFS_NAME = "overlay_window"
         private const val KEY_Y = "y"
         private const val KEY_LOG_X = "log_x"

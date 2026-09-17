@@ -1,11 +1,9 @@
 package com.bettergi.pocket
 
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.Settings
 import android.widget.Button
 import android.widget.EditText
 import android.widget.RadioButton
@@ -68,7 +66,6 @@ class MainActivity : AppCompatActivity() {
 
     /** P3：管理器界面已展示 ⇒ onResume 不得再用旧的「悬浮窗授权」分支覆盖它。 */
     private var managerShown = false
-    private var permissionUiShown = false
     private var pendingCaptureRequest = false
     private var pendingShareFile: String? = null
 
@@ -109,31 +106,29 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (isFinishing) return
-        // P3：管理器界面优先，不能被「悬浮窗授权」分支顶掉（曾实测被覆盖 ⇒ 首启仍显示授权页 ✗）
+        // 管理器界面优先，不能被下面两个中转分支顶掉（曾实测被覆盖 ⇒ 首启仍显示别的界面 ✗）
         if (managerShown) return
-        if (Settings.canDrawOverlays(this)) {
-            when {
-                // 前台内发起投影授权（fix53：悬浮球路径的兜底，activity 前台时启动合法）
-                pendingCaptureRequest -> {
-                    pendingCaptureRequest = false
-                    startActivity(
-                        Intent(this, CapturePermissionActivity::class.java)
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                    )
-                }
-                // 前台内起系统分享 chooser（service 后台起 chooser 依赖 SAW 豁免，不可靠）
-                else -> {
-                    val shareFile = pendingShareFile
-                    if (shareFile != null) {
-                        pendingShareFile = null
-                        shareGood(shareFile)
-                    } else {
-                        launchOverlayAndExit()
-                    }
+        // ⚠️ 2026-09-18：这里原先还有一个「显示在上层」授权分支 —— 悬浮窗搬到无障碍进程后
+        //    （TYPE_ACCESSIBILITY_OVERLAY 零权限）已整体删除，只剩投影授权与分享两个中转。
+        when {
+            // 前台内发起投影授权（fix53：悬浮球路径的兜底，activity 前台时启动合法）
+            pendingCaptureRequest -> {
+                pendingCaptureRequest = false
+                startActivity(
+                    Intent(this, CapturePermissionActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+            // 前台内起系统分享 chooser（service 后台起 chooser 需要 Activity 上下文，不可靠）
+            else -> {
+                val shareFile = pendingShareFile
+                if (shareFile != null) {
+                    pendingShareFile = null
+                    shareGood(shareFile)
+                } else {
+                    launchOverlayAndExit()
                 }
             }
-        } else if (!permissionUiShown) {
-            showOverlayPermissionUi()
         }
     }
 
@@ -155,26 +150,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun continueLaunch() {
-        if (Settings.canDrawOverlays(this)) {
-            if (pendingCaptureRequest || pendingShareFile != null) return // 有中转任务，onResume 处理
-            launchOverlayAndExit()
-            return
-        }
-        showOverlayPermissionUi()
-    }
-
-    private fun showOverlayPermissionUi() {
-        if (permissionUiShown) return
-        permissionUiShown = true
-        setContentView(R.layout.activity_main)
-        findViewById<Button>(R.id.btn_request_overlay).setOnClickListener {
-            startActivity(
-                Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:$packageName"),
-                ),
-            )
-        }
+        if (pendingCaptureRequest || pendingShareFile != null) return // 有中转任务，onResume 处理
+        launchOverlayAndExit()
     }
 
     // ---- P3 脚本管理器：列表 + 开关（本地导入，不联网）----
@@ -298,6 +275,11 @@ class MainActivity : AppCompatActivity() {
         else -> "⚙"
     }
 
+    /**
+     * 交棒前台服务后退出。
+     * 悬浮窗现由无障碍服务承载（零权限）⇒ 这里不再做任何「显示在上层」检查；
+     * 无障碍未开时由服务侧提示一次（`InputAccessibilityService.promptIfDisconnected`）。
+     */
     private fun launchOverlayAndExit() {
         if (isFinishing) return
         val intent = Intent(this, TriggerForegroundService::class.java).apply {

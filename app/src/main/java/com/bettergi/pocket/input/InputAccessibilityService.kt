@@ -33,6 +33,9 @@ class InputAccessibilityService : AccessibilityService() {
         instance = this
         Log.i(TAG, "accessibility service connected")
         notifyStateChanged()
+        // 2026-09-18 宿主迁移：登记悬浮窗运行时的宿主服务。**此处不上窗** ——
+        // 「什么时候显示」仍由主进程前台服务决定（收到 overlay_show 才构建控制器）。
+        com.bettergi.pocket.overlay.A11yOverlayRuntime.attachService(this)
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -55,6 +58,8 @@ class InputAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     private fun clearInstance() {
+        // 无障碍断开 ⇒ 悬浮窗随之销毁（TYPE_ACCESSIBILITY_OVERLAY 的窗口活不过服务）
+        com.bettergi.pocket.overlay.A11yOverlayRuntime.detachService()
         if (instance === this) {
             instance = null
             lastAppPackage = null
@@ -368,7 +373,9 @@ class InputAccessibilityService : AccessibilityService() {
                         ),
                     )
                 }
-                else -> Bundle()
+                // 悬浮窗相关指令全部转交运行时（2026-09-18 宿主迁移）：
+                // 主进程的 OverlayBridge 只发这一组方法名，方法表在 A11yOverlayRuntime 里维护。
+                else -> com.bettergi.pocket.overlay.A11yOverlayRuntime.handle(method, extras)
             }
         }
 
