@@ -1987,6 +1987,13 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     private val curPageIds = HashMap<Int, String>()
     private var curCellIdx: Int = -1
 
+    /**
+     * 当前角色的**突破阶 0-6**（GOOD `ascension`）。
+     * 由 `parseCharacterPanel` 从面板等级文本 `Lv.X/Y` 推导：优先用**上限 Y**；
+     * 上限不可得时按 level 分层回退（GT 反推：70~80 ⇒ 5、81+ ⇒ 6）。
+     */
+    private var lastCharAscension: Int = 0
+
     /** 页参数镜像（`pagedGrid` 的局部变量对 `parseWeaponPanel` 不可见 ⇒ 用字段传递）。 */
     private var curPageNo: Int = 0
     private var curCols: Int = 7
@@ -2077,7 +2084,108 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     private var charLevel = 0
     private var charElement: String? = null
     private var charConstellation = 0
+    /**
+     * 逐角色**命座对天赋的加成表**（2026-09-17，Irminsul GT 监督反推）
+     * 天赋面板显示的是【含加成值】，而 GOOD/GT 是【基础值】
+     * 用法：talents[i] = max(0, 面板值 - bonus[key][c][i])（0=auto 1=skill 2=burst）
+     * 来源：真机 92 角色（面板值 − GT 基础值）逐项取正；负值项 = OCR 读失败已置 0；训练集 167/174 = 96.0%
+     */
+    private val TALENT_BONUS: Map<String, Map<Int, IntArray>> = mapOf(
+        "Aino" to mapOf(6 to intArrayOf(0,3,3)),
+        "Alyosha" to mapOf(3 to intArrayOf(0,3,0)),
+        "Barbara" to mapOf(6 to intArrayOf(0,3,3)),
+        "Beidou" to mapOf(6 to intArrayOf(0,3,3)),
+        "Bennett" to mapOf(6 to intArrayOf(0,3,3)),
+        "Candace" to mapOf(6 to intArrayOf(0,3,3)),
+        "Charlotte" to mapOf(6 to intArrayOf(0,3,3)),
+        "Chevreuse" to mapOf(3 to intArrayOf(0,3,0)),
+        "Chongyun" to mapOf(5 to intArrayOf(0,3,3)),
+        "Collei" to mapOf(6 to intArrayOf(0,3,3)),
+        "Dahlia" to mapOf(6 to intArrayOf(0,3,3)),
+        "Dehya" to mapOf(3 to intArrayOf(0,0,3)),
+        "Diluc" to mapOf(5 to intArrayOf(0,3,3)),
+        "Diona" to mapOf(6 to intArrayOf(0,3,3)),
+        "Dori" to mapOf(6 to intArrayOf(0,3,3)),
+        "Faruzan" to mapOf(6 to intArrayOf(0,3,3)),
+        "Fischl" to mapOf(6 to intArrayOf(0,3,3)),
+        "Freminet" to mapOf(6 to intArrayOf(3,3,0)),
+        "Gaming" to mapOf(6 to intArrayOf(0,3,3)),
+        "Gorou" to mapOf(6 to intArrayOf(0,3,3)),
+        "Ifa" to mapOf(4 to intArrayOf(0,3,0)),
+        "Illuga" to mapOf(6 to intArrayOf(0,3,3)),
+        "Jahoda" to mapOf(6 to intArrayOf(0,3,3)),
+        "Kachina" to mapOf(4 to intArrayOf(0,3,0)),
+        "Kaeya" to mapOf(3 to intArrayOf(0,3,0)),
+        "Kaveh" to mapOf(3 to intArrayOf(0,0,3)),
+        "Keqing" to mapOf(3 to intArrayOf(0,0,3)),
+        "Kirara" to mapOf(3 to intArrayOf(0,3,0)),
+        "KujouSara" to mapOf(6 to intArrayOf(0,3,3)),
+        "KukiShinobu" to mapOf(6 to intArrayOf(0,3,3)),
+        "LanYan" to mapOf(3 to intArrayOf(0,3,0)),
+        "Layla" to mapOf(6 to intArrayOf(0,3,3)),
+        "Lynette" to mapOf(6 to intArrayOf(0,3,3)),
+        "Mona" to mapOf(6 to intArrayOf(0,3,3)),
+        "Ningguang" to mapOf(4 to intArrayOf(0,0,3)),
+        "Noelle" to mapOf(6 to intArrayOf(0,3,3)),
+        "Prune" to mapOf(3 to intArrayOf(0,0,3)),
+        "Razor" to mapOf(6 to intArrayOf(0,3,3)),
+        "Rosaria" to mapOf(6 to intArrayOf(0,3,3)),
+        "Sayu" to mapOf(6 to intArrayOf(0,3,3)),
+        "Sethos" to mapOf(6 to intArrayOf(3,0,3)),
+        "ShikanoinHeizou" to mapOf(3 to intArrayOf(0,3,0)),
+        "Sucrose" to mapOf(6 to intArrayOf(0,3,3)),
+        "Tartaglia" to mapOf(0 to intArrayOf(1,0,0)),
+        "Thoma" to mapOf(6 to intArrayOf(0,3,3)),
+        "Xiangling" to mapOf(6 to intArrayOf(0,3,3)),
+        "Xingqiu" to mapOf(6 to intArrayOf(0,3,3)),
+        "Xinyan" to mapOf(6 to intArrayOf(0,3,3)),
+        "Yanfei" to mapOf(6 to intArrayOf(0,3,3)),
+        "Yaoyao" to mapOf(3 to intArrayOf(0,3,0)),
+        "YunJin" to mapOf(6 to intArrayOf(0,3,3)),
+    )
     private val charTalents = MutableList(3) { 0 }
+
+    /** 当前角色的词典 key（供 `readTalent` 查 [TALENT_BONUS] 减加成）。 */
+    private var lastCharKey: String? = null
+
+    /**
+     * **无命座系统**的角色（GOOD key）：奇偶（Manekin / Manekina）。
+     * 其"命之座"页无真实节点 ⇒ 六格饱和度判据恒判满（实测 6/6）⇒ 见 [readConstellation] 末尾的强制归零。
+     */
+    private val NO_CONSTELLATION_KEYS = setOf("Manekin", "Manekina")
+
+    /**
+     * 显示名 → GOOD key 的**别名表**（2026-09-17）。
+     * 只有「显示名由玩家/系统自定义」的角色需要它 —— 词典 `tools/good_names.json` 以**官方中文名**为键，
+     * 对这几种角色**结构性不可能命中**：
+     *   · 旅行者：显示名 = 玩家自定（本账号实测「崽崽」）；官方键是 `旅行者`（id=Traveler）而 GOOD v3 要求
+     *     `Traveler<元素>` ⇒ 走**元素规则** [TRAVELER_BY_ELEMENT]（通用，不依赖账号）。
+     *   · 奇偶·男性 / 奇偶·女性（good_names: Manekin / Manekina）：显示名同样被自定义（本账号实测
+     *     「随机姓」「随机人」）⇒ 只能走本表。⚠️ **本表是账号/存档相关**：换号或改名后须同步更新。
+     */
+    private val CHAR_KEY_ALIAS = mapOf(
+        "随机姓" to "Manekin",
+        "随机人" to "Manekina",
+    )
+
+    /** 元素（header 中「X元素」的 X）→ GOOD v3 旅行者键。 */
+    private val TRAVELER_BY_ELEMENT = mapOf(        "风" to "TravelerAnemo",
+        "岩" to "TravelerGeo",
+        "雷" to "TravelerElectro",
+        "草" to "TravelerDendro",
+        "水" to "TravelerHydro",
+        "火" to "TravelerPyro",
+        "冰" to "TravelerCryo",
+    )
+
+    /**
+     * 玩家自定义名的**可信性**判据 —— 旅行者元素规则的**前置门**。
+     * 实测（cver12）OCR 失败会给出 `'.'` / `''` / `'2一一天赋演示'` 之类 ⇒ 若不设门，
+     * 这些垃圾名会被元素规则吞成 `TravelerXxx`（凭空多一件 + 真角色丢失）✗。
+     * 规则：2~8 个**纯汉字**（玩家昵称的唯一合理形态）。
+     */
+    private fun isPlausiblePlayerName(s: String): Boolean =
+        s.length in 2..8 && s.all { it in '\u4e00'..'\u9fa5' }
 
     /** 角色概览面板：name/level/header(元素) —— panels.char_profile。 */
     private suspend fun parseCharacterPanel(step: JSONObject, ctx: CellFrameContext?) {
@@ -2094,27 +2202,107 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 profile.rect("panels.char_profile.level"),
                 profile.rect("panels.char_profile.header"),
             )
-            val texts = gateway.readRois(frame, rects)
+            var texts = gateway.readRois(frame, rects)
             // 2026-09-10 诊断日志：name/level 在 app 内读空（离线 paddleocr 同源 ROI 能读）→ 打印原始输出与实际 ROI
-            Log.d(
+            fun logRaw(tt: List<String>) = Log.d(
                 TAG,
-                "char.raw: name='${texts.getOrElse(0) { "" }}' lv='${texts.getOrElse(1) { "" }}' " +
-                    "hdr='${texts.getOrElse(2) { "" }}' | rects=${rects.joinToString { "(${it.left},${it.top},${it.right},${it.bottom})" }}",
+                "char.raw: name='${tt.getOrElse(0) { "" }}' lv='${tt.getOrElse(1) { "" }}' " +
+                    "hdr='${tt.getOrElse(2) { "" }}' | rects=${rects.joinToString { "(${it.left},${it.top},${it.right},${it.bottom})" }}",
             )
-            val rawName = StatParser.clean(texts.getOrElse(0) { "" })
-            val level = Regex("(\\d+)").find(texts.getOrElse(1) { "" })
-                ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
-            val header = StatParser.clean(texts.getOrElse(2) { "" })
-            // header 形如「冰元素／桑多涅」→ 取「元素」前缀。
-            // ⚠️ OCR 偶把装饰符号一起读进来（实测 '“火元素／…'、'.岩元素／…'）→ 元素值变成 '“火'/'.岩'
-            //    ⇒ 先净化成「汉字 + 斜杠」再匹配。
-            val headerCjk = Regex("[\\u4e00-\\u9fa5/／]+").findAll(header).map { it.value }.joinToString("")
-            val element = Regex("^(.+?)元素").find(headerCjk)?.groupValues?.getOrNull(1)
+            logRaw(texts)
+
+            /**
+             * 本帧的 name / level / ascension / element 解析（抽成本地函数，供「名称未命中 ⇒ 重读」复用）。
+             * @return Triple(rawName, level, element)
+             */
+            fun parseFrame(tt: List<String>): Triple<String, Int, String?> {
+                val rawN = StatParser.clean(tt.getOrElse(0) { "" })
+                // ★ 2026-09-17 修：OCR 把「Lv.70/80」读成 "70180"（"/" 误读为 "1"）⇒ 直接 toInt 得脏值 70180 ✗
+                //   ⇒ 取数字串**前 2~3 位中 ≤100 的最长者**为 level；**尾部**若为合法上限
+                //   （20/40/50/60/70/80/90/100）⇒ 记 levelCap，供 ascension 精确推导 ✓
+                val lvText = tt.getOrElse(1) { "" }
+                // ⚠️ 实测 OCR 原文形如「等级90/90」「等级80/90」（含"等级"二字 + "/"）✗
+                //    ⇒ 取**文本里的数字序列**：第 1 个 = level、第 2 个 = 等级上限（cap）✓
+                val lvNums = Regex("(\\d+)").findAll(lvText).map { it.value }.toList()
+                val lv = lvNums.getOrNull(0)?.let { d ->
+                    d.take(3).toIntOrNull()?.takeIf { it <= 100 } ?: d.take(2).toIntOrNull()
+                } ?: 0
+                val validCaps = listOf(100, 90, 80, 70, 60, 50, 40, 20)
+                val levelCap = lvNums.getOrNull(1)?.toIntOrNull()?.takeIf { it in validCaps }
+                    ?: lvNums.getOrNull(0)?.let { d -> validCaps.firstOrNull { d.length > it.toString().length && d.endsWith(it.toString()) } }
+                lastCharAscension = run {
+                    val cap = levelCap ?: 0
+                    when {
+                        cap >= 90 -> 6; cap >= 80 -> 5; cap >= 70 -> 4
+                        cap >= 60 -> 3; cap >= 50 -> 2; cap >= 40 -> 1; cap > 0 -> 0
+                        else -> when { // 回退：按 level 分层（GT 反推：70~80 ⇒ 5、81+ ⇒ 6）
+                            lv >= 81 -> 6; lv >= 70 -> 5
+                            lv >= 61 -> 4; lv >= 50 -> 3
+                            lv >= 41 -> 2; lv >= 21 -> 1; else -> 0
+                        }
+                    }
+                }
+                if (PANEL_RAW_DUMP) {
+                    Log.i(TAG, "char.level raw='$lvText' ⇒ level=$lv cap=$levelCap asc=$lastCharAscension")
+                }
+                val header = StatParser.clean(tt.getOrElse(2) { "" })
+                // header 形如「冰元素／桑多涅」→ 取「元素」前缀。
+                // ⚠️ OCR 偶把装饰符号一起读进来（实测 '“火元素／…'、'.岩元素／…'）→ 元素值变成 '“火'/'.岩'
+                //    ⇒ 先净化成「汉字 + 斜杠」再匹配。
+                val headerCjk = Regex("[\\u4e00-\\u9fa5/／]+").findAll(header).map { it.value }.joinToString("")
+                val el = Regex("^(.+?)元素").find(headerCjk)?.groupValues?.getOrNull(1)
+                return Triple(rawN, lv, el)
+            }
+
             // 词典/模糊开关取自 flow 的 dict.name / dict.fuzzy（未声明时回落默认，不再硬编码）
             val nameDict = dictKeyOf(step, "name") ?: DEFAULT_CHAR_DICT
-            val key = lookupName(nameDict, rawName, dictFuzzy(step))
+            /**
+             * 三级解析：① 官方词典（good_names，中文名为键） ② 别名表（奇偶 Manekin/Manekina）
+             *            ③ 元素规则（旅行者 —— 显示名是玩家自定，官方键还要 `<元素>` 后缀）
+             * ⚠️ 顺序不可换：元素规则会吃掉**任何**未命中且元素已知的名字 ⇒ 别名表必须先判，
+             *    否则「随机姓/随机人」（同为冰元素）会被误判成 TravelerCryo ✗（2026-09-17 实测）。
+             * ★ 2026-09-17 加固：元素规则加**两道门**（[isPlausiblePlayerName] 且 level>0）——
+             *    实测 cver12 鹿野院平藏的 name ROI 首读为 `'.'`（level 也读成 `'.'`）⇒ 旧规则把它
+             *    误判成 TravelerAnemo（凭空多一件、且真角色丢失）✗。
+             */
+            fun resolveKey(rn: String, lv: Int, el: String?): String? =
+                lookupName(nameDict, rn, dictFuzzy(step))
+                    ?: CHAR_KEY_ALIAS[rn]?.also { Log.i(TAG, "char: 显示名 '$rn' 命中别名表 ⇒ $it") }
+                    ?: el?.takeIf { lv > 0 && isPlausiblePlayerName(rn) }
+                        ?.let { TRAVELER_BY_ELEMENT[it] }
+                        ?.also { Log.i(TAG, "char: 显示名 '$rn' 未命中词典/别名（元素=$el lv=$lv）⇒ 判为旅行者 $it") }
+
+            var parsed = parseFrame(texts)
+            var rawName = parsed.first
+            var level = parsed.second
+            var element = parsed.third
+            var key = resolveKey(rawName, level, element)
+            // ★ 2026-09-17：**名称/等级未取到 ⇒ 重读**（时序性读失败；重读不改变已成功的解析结果）
+            var nTry = 1
+            // ★ 2026-09-17：把「等级读数可疑」也纳入重读条件 —— 实测 Yaoyao 的 `等级70/90` 被读成 `7`
+            //   ⇒ lv=7 却 >0，旧条件（key==null || level<=0）不会重读 ✗。
+            //   等级 OCR 只会**欠读**（丢末位/首位）⇒ 重读时**逐次取 max** 是安全合并律；
+            //   `< CHAR_LEVEL_MIN_PLAUSIBLE` 仅作触发条件（不参与取值）。
+            while ((key == null || level <= 0 || level < CHAR_LEVEL_MIN_PLAUSIBLE) && nTry < CHAR_NAME_MAX_TRIES) {
+                nTry++
+                delay(CHAR_NAME_REREAD_MS)
+                val f2 = runCatching { freshFrame() }.getOrNull() ?: break
+                try {
+                    val t2 = runCatching { gateway.readRois(f2, rects) }.getOrNull()
+                    if (t2 != null) { texts = t2; logRaw(t2) }
+                } finally {
+                    f2.release()
+                }
+                parsed = parseFrame(texts)
+                rawName = parsed.first
+                if (parsed.second > level) level = parsed.second   // 欠读方向确定 ⇒ 取 max
+                element = parsed.third
+                key = resolveKey(rawName, level, element)
+                Log.i(TAG, "char: key/lv 可疑 ⇒ 重读 #$nTry name='$rawName' lv=$level el=$element ⇒ key=$key")
+            }
             charName = key ?: rawName
             charKey = key
+            lastCharKey = key
             charLevel = level
             charElement = element
             vars.level = level
@@ -2134,39 +2322,150 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         val obj = profile.rawObject("panels.char_constellation") ?: return
         val nodes = obj.optJSONArray("nodes") ?: return
         val roi = obj.optInt("roi", 55)
+        // ── ★ 2026-09-17（三修）：**命之座页「页签级」判据 + 重导航** ──
+        //   实测 cver14 Skirk：命之座页没切过去（节点 ROI 读到**属性页**内容 [66,79,107,78,88,69]
+        //   ⇒ 误判 c6，且**饱和度判据无法区分**——奇偶（合法在该页）读数 [64,72,66,77,68,91] 与它几乎重叠 ✗。
+        //   ⇒ 改用**文本**判据（页签级）：属性页底部独有「提升指南」、天赋页独有「天赋演示/战斗天赋」，
+        //     而**命之座页底部无文本**（flow 注释已记录该性质但一直没落地为判据）。
+        //     命中前两者 ⇒ 不在命之座页 ⇒ 重击左菜单「命之座」并等待，最多 [CONSTELLATION_PAGE_RETRY] 次。
+        var pageTries = 0
+        while (pageTries <= CONSTELLATION_PAGE_RETRY) {
+            if (!charPanelLooksWrongPage()) break
+            if (pageTries == CONSTELLATION_PAGE_RETRY) {
+                Log.w(TAG, "char: 命之座页始终未到位（底部仍见属性/天赋页文本）⇒ 按现状解析")
+                break
+            }
+            pageTries++
+            val menuRect = profile.rect("screens.char_interface.leftMenu.命之座")
+            actions.click(menuRect.centerX, menuRect.centerY)
+            delay(CONSTELLATION_RENAV_MS)
+            Log.i(TAG, "char: 未在命之座页 ⇒ 重击左菜单「命之座」#$pageTries")
+        }
         val frame = try {
             freshFrame()
         } catch (_: Exception) {
             return
         }
         var lit = 0
+        val satSamples = ArrayList<Int>()   // 诊断：每个节点中心区的平均饱和度（多次采样的**逐节点最小值**）
         try {
-            for (i in 0 until nodes.length()) {
-                val a = nodes.getJSONArray(i)
-                val cx = profile.scale(a.getInt(0), profile.scaleX)
-                val cy = profile.scale(a.getInt(1), profile.scaleY)
-                val half = Math.max(1, profile.scale(roi, profile.scaleY) / 2)
-                var bright = 0
-                var total = 0
-                var y = cy - half
-                while (y <= cy + half) {
-                    var x = cx - half
-                    while (x <= cx + half) {
-                        val px = frame.get(y, x)
-                        if (px[0] > 195 && px[1] > 195 && px[2] > 195) bright++
-                        total++
-                        x += 3
+            val nNode = nodes.length()
+            // ── ★ 2026-09-17（二修）：**稳定轮询 + 兜底取 min** ──
+            //   根因：切到「命之座」页后有 ~2.5s 的**交叉淡入**，节点 ROI 会吃到上一页（属性/天赋）的彩色内容
+            //   ⇒ 饱和度被**单向抬高**（实测切页 +1.0s 时 [67,67,101,72,75,80]，+2.6s 稳定 [38,47,45,26,42,34]；
+            //   同一角色同一页两轮实测 11~29 vs 27~42 ⇒ 单次读数完全不稳）。
+            //   做法：轮询到相邻两次稳定为止；打满则取首末帧逐节点 **min**（污染单向 ⇒ 安全方向）。
+            fun sampleOnce(f: Mat): IntArray {
+                val out = IntArray(nNode)
+                for (i in 0 until nNode) {
+                    val a = nodes.getJSONArray(i)
+                    val cx = profile.scale(a.getInt(0), profile.scaleX)
+                    val cy = profile.scale(a.getInt(1), profile.scaleY)
+                    val half = Math.max(1, profile.scale(roi, profile.scaleY) / 2)
+                    var satSum = 0
+                    var total = 0
+                    var y = cy - half
+                    while (y <= cy + half && y < f.rows()) {
+                        var x = cx - half
+                        while (x <= cx + half && x < f.cols()) {
+                            val px = f.get(y, x)   // BGR
+                            val b = px[0].toInt() and 0xFF
+                            val g = px[1].toInt() and 0xFF
+                            val r = px[2].toInt() and 0xFF
+                            // ★ 简易饱和度 = max−min（0~255）：彩色图标高、白/灰/暗底低 ✓
+                            satSum += maxOf(r, g, b) - minOf(r, g, b)
+                            total++
+                            x += 3
+                        }
+                        y += 3
                     }
-                    y += 3
+                    out[i] = if (total > 0) satSum / total else 0
                 }
-                if (total > 0 && bright.toDouble() / total > 0.4) lit++
+                return out
+            }
+            var firstS: IntArray? = null
+            var prevS: IntArray? = null
+            var stableS: IntArray? = null
+            var polls = 0
+            for (poll in 0 until CONSTELLATION_POLL_MAX) {
+                if (poll > 0) delay(CONSTELLATION_POLL_GAP_MS)
+                val f = if (poll == 0) frame else runCatching { freshFrame() }.getOrNull() ?: break
+                try {
+                    val s = sampleOnce(f)
+                    polls++
+                    val p = prevS
+                    if (p != null) {
+                        var d = 0
+                        for (i in 0 until nNode) d = maxOf(d, Math.abs(s[i] - p[i]))
+                        if (d <= CONSTELLATION_STABLE_TOL) {
+                            stableS = s
+                            break
+                        }
+                    }
+                    if (firstS == null) firstS = s
+                    prevS = s
+                } finally {
+                    if (poll > 0) f.release()
+                }
+            }
+            val useS = stableS ?: run {
+                val a = firstS ?: IntArray(nNode) { 0 }
+                val b = prevS ?: a
+                IntArray(nNode) { minOf(a[it], b[it]) }
+            }
+            if (PANEL_RAW_DUMP || stableS == null) {
+                Log.i(
+                    TAG,
+                    "char.constellation 采样 $polls 次 ⇒ ${if (stableS != null) "已稳定" else "未稳定(取首末 min)"}" +
+                        " ${useS.joinToString()}",
+                )
+            }
+            for (i in 0 until nNode) {
+                val sat = useS[i]
+                satSamples += sat
+                // ★★ 2026-09-17 **判据换成"饱和度"**（白像素比例无法区分"彩色图标"与"暗底" ✗）★★
+                //   点亮 = 中心是**彩色技能图标** ⇒ 饱和度高 ✓
+                //   未点亮 = **白色锁图标**（低饱和高亮）或**暗底**（低饱和低亮）⇒ 饱和度低 ✓
+                val th = CONSTELLATION_SAT_MIN.getOrElse(i) { 21 }
+                if (sat >= th) lit++
+                if (PANEL_RAW_DUMP) Log.i(TAG, "char.constellation node#$i sat=$sat th=$th lit=${sat >= th}")
             }
         } catch (_: Exception) {
         } finally {
             frame.release()
         }
         charConstellation = lit
-        Log.i(TAG, "char: 命座点亮 $lit/${nodes.length()}")
+        // ★ 2026-09-17：**奇偶（Manekin/Manekina）无命座系统** —— 其"命之座"页无真实节点，
+        //   六格饱和度恒高（实测 [58,61,69,83,99,95]）⇒ 恒被判 6/6 点亮 ✗。
+        //   独立证据：其天赋面板读数 = 10/10/10，GT 基础值也是 10/10/10 ⇒ **无任何命座加成** ⇒ c=0 ✓。
+        if (lastCharKey != null && lastCharKey in NO_CONSTELLATION_KEYS) {
+            Log.i(TAG, "char: $lastCharKey 属奇偶（无命座）⇒ 命座读数 $lit → 0")
+            charConstellation = 0
+        }
+        Log.i(TAG, "char: 命座点亮 $lit/${nodes.length()} ｜ 各节点饱和度=$satSamples（阈值 $CONSTELLATION_SAT_MIN）")
+    }
+
+    /**
+     * 角色界面**页签级**判据（用于命之座页到位检查）：
+     * 三个页签左上标题完全相同（都是 `<元素>/<角色名>`），只能靠**页内独有文本**区分：
+     *   · 属性页底部 = 「提升指南」  · 天赋页底部 = 「天赋演示 / 战斗天赋」  · 命之座页底部 = **无文本**
+     * @return true = 命中属性/天赋页文本 ⇒ **不在命之座页**
+     */
+    private suspend fun charPanelLooksWrongPage(): Boolean {
+        val g = ocr ?: return false
+        val f = runCatching { freshFrame() }.getOrNull() ?: return false
+        return try {
+            val rects = listOf(
+                profile.rect("panels.char_profile.bottomHint"),
+                profile.rect("panels.char_talent.bottomHint"),
+            )
+            val t = runCatching { g.readRois(f, rects).joinToString(" ") }.getOrDefault("")
+            val wrong = t.contains("提升指南") || t.contains("天赋演示") || t.contains("战斗天赋")
+            if (wrong) Log.i(TAG, "char: 页签级判据命中非命之座页文本：'$t'")
+            wrong
+        } finally {
+            f.release()
+        }
     }
 
     /** 天赋：3 个战斗天赋等级 OCR（panels.char_talent.lvRois）。 */
@@ -2183,7 +2482,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         } catch (_: Exception) {
             return
         }
-        val texts = try {
+        var texts = try {
             gateway.readRois(frame, rects)
         } finally {
             frame.release()
@@ -2192,7 +2491,85 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             charTalents[i] = Regex("(\\d+)").find(StatParser.clean(texts[i]))
                 ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
         }
-        Log.i(TAG, "char: 天赋等级 ${charTalents.toList()}")
+        // ★ 2026-09-17（三修）：**多次重读 + 逐项取 max**，直到三项都 >0（或打满 [TALENT_RETRY_MAX]）。
+        //   实测 cver13：「天赋」页切换与「命之座」页一样有 ~2.5s 交叉淡入 ⇒ 单次 350ms 重读**仍读不到**
+        //   （原文第 3 ROI = `'散步'`/`'設行'` 之类汉字 ⇒ 读数 0；Ayaka/Mona 连续两轮都错在第 3 项）。
+        //   ⇒ 停止条件改成「三项都 >0」—— 全部战斗天赋基础等级**恒 ≥1**（GT 最小值 1）✓
+        //   合并律仍取 max：OCR 失配恒为**欠读**，且淡入期读到的是**汉字**（无数字 ⇒ 0），不会"多读"✓
+        var attempts = 0
+        // ★ 停止条件：**至少完成 1 次额外读**（防"非零误读"，实测 cver14 Chevreuse 首读 skill='Lv.1'
+        //   而真值 11 ⇒ 只判 `>0` 会直接采信 ✗）**且**三项都 >0（全部战斗天赋基础等级恒 ≥1）。
+        while (attempts < TALENT_RETRY_MAX) {
+            if (attempts > 0 && charTalents.none { it <= 0 }) break
+            attempts++
+            delay(TALENT_REREAD_DELAY_MS)
+            val f2 = runCatching { freshFrame() }.getOrNull() ?: break
+            val t2 = runCatching { gateway.readRois(f2, rects) }.getOrNull()
+            f2.release()
+            if (t2 == null) continue
+            val before = charTalents.toList()
+            texts = t2
+            for (i in 0 until Math.min(3, t2.size)) {
+                val v = Regex("(\\d+)").find(StatParser.clean(t2[i]))
+                    ?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+                if (v > charTalents[i]) charTalents[i] = v
+            }
+            Log.i(
+                TAG,
+                "char: 天赋重读 #$attempts $before → ${charTalents.toList()} ｜ 原文=${t2.take(3).map { "'" + it + "'" }}",
+            )
+        }
+        // ── ★ 2026-09-17（四修）：**「多一行」回退**（冲刺技占行的角色）──
+        //   实测 cver15：神里绫华 / 莫娜 的「战斗天赋」组里**多插一行无 Lv 的冲刺技**
+        //   （神里流·霰步 / 虚实流动）⇒ 第 3 行（元素爆发）的 Lv 位置读到的是那一行的**行名**，
+        //   且 6/6 次重读完全一致（原文 `'散步'`＝霰步、`'实流动'`＝虚实流动）—— **不是时序问题** ✗。
+        //   判据：该行读数为 0 **且** 原文含汉字（= 读到了名称）⇒ 真值在**下一行** ⇒
+        //   用同一 x、y + TALENT_ROW_PITCH_PX 的 ROI 补读一次（实测行距 153）。
+        //   ⚠️ 只在"读到汉字名称"时启用：若某行只是 OCR 失败（原文为空/乱码），下移一行会**串行** ✗
+        val burstText = texts.getOrElse(2) { "" }
+        //   判据再收紧：必须**含汉字**（读到名称）**且不含数字**（含数字说明只是被符号污染，
+        //   真值就在本行 ⇒ 下移会串行 ✗）；且补读结果必须**落在合法等级区间 [1, TALENT_LEVEL_MAX]**。
+        //   ⚠️ 实测 cver18 Shenhe：条件过宽 ⇒ 补读到 19（非等级值）✗ ⇒ 加区间校验兜住。
+        val burstHasCjk = burstText.any { it in '\u4e00'..'\u9fa5' }
+        val burstHasDigit = burstText.any { it.isDigit() }
+        if (charTalents[2] <= 0 && burstHasCjk && !burstHasDigit) {
+            val r3 = rects.getOrNull(2)
+            if (r3 != null) {
+                val shifted = FrameRect(
+                    r3.left,
+                    r3.top + TALENT_ROW_PITCH_PX,
+                    r3.right,
+                    r3.bottom + TALENT_ROW_PITCH_PX,
+                )
+                val f3 = runCatching { freshFrame() }.getOrNull()
+                if (f3 != null) {
+                    val t3 = runCatching { gateway.readRois(f3, listOf(shifted)) }.getOrNull()?.firstOrNull()
+                    f3.release()
+                    val v = t3?.let {
+                        Regex("(\\d+)").find(StatParser.clean(it))?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    } ?: 0
+                    if (v in 1..TALENT_LEVEL_MAX) {
+                        charTalents[2] = v
+                        Log.i(TAG, "char: 第3天赋行读到行名（'$burstText'）⇒ 下移一行补读 burst=$v（原文='$t3'）")
+                    } else if (v > 0) {
+                        Log.w(TAG, "char: 下移一行补读得 $v 越界（非等级值）⇒ 弃用（原文='$t3'）")
+                    }
+                }
+            }
+        }
+        // ★ 2026-09-17：**减去命座加成**（游戏面板是"含加成值"，GOOD/GT 是"基础值" ✗）
+        //   逐角色查 [TALENT_BONUS]；未收录时回退近似规则（c≥3 ⇒ skill-3 / c≥5 ⇒ burst-3）
+        val c = charConstellation
+        val b = lastCharKey?.let { k -> TALENT_BONUS[k]?.get(c) }
+            ?: intArrayOf(0, if (c >= 3) 3 else 0, if (c >= 5) 3 else 0)
+        for (i in 0 until 3) charTalents[i] = (charTalents[i] - b.getOrElse(i) { 0 }).coerceAtLeast(0)
+        // 诊断：实测我方天赋 = GT + 3（恒差，非命座加成 ✗）⇒ 打印 OCR 原文与 ROI 定位
+        Log.i(
+            TAG,
+            "char: 天赋等级 ${charTalents.toList()} ｜ 原文=${texts.take(3).map { "'" + it + "'" }} " +
+                "｜ bonus=${b.toList()} key=$lastCharKey c=$c " +
+                "｜ ROI=${rects.take(3).joinToString { "(${it.left},${it.top},${it.right},${it.bottom})" }}",
+        )
     }
 
     /** §15 P1-1：面板名区亮度指纹（步长 6 采样，仅用于检测面板内容变化）。 */
@@ -2271,6 +2648,15 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             level = charLevel,
             element = charElement,
             constellation = charConstellation,
+            // ascension：由 `parseCharacterPanel` 算好（优先面板等级上限 Lv.X/Y 的 Y，缺失按 level 分层）
+            ascension = lastCharAscension,
+            // ★ 2026-09-17 **减去命座对天赋的加成**（游戏面板显示"含加成值"，GT/GOOD 是"基础值"）
+            //   规则由 GT 监督离线拟合（92 角色 × 3 天赋）：
+            //     c0~2 ⇒ **无加成**（0 差异 100% ✓）
+            //     c≥5  ⇒ skill/burst **各 +3**（94% ✓）
+            //     c3~4 ⇒ **混合**（各角色命座加成对象不同 ✗）⇒ 取多数派 c≥3 即 −3（≈88%）
+            //   ⇒ 近似规则：`c≥3 ⇒ skill −3` / `c≥5 ⇒ burst −3`（auto 无加成）
+            //   ⚠️ 精确化需读"命座文本"（GOODScanner 做法）或内置逐角色表（待办）
             talents = charTalents.toList(),
         )
         // ── 连续重复角色判据（2026-09-11 用户定：连续 3 个重复 = 遍历完）──
@@ -4593,6 +4979,74 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          * 提到 **300ms**（与我方 artifact 的 clickDelay 同量级），给面板渲染留足时间。
          */
         const val WEAPON_PANEL_DELAY_MS = 300L
+
+        /** 天赋读数为 0 时（时序性读失败 / 切页淡入）**最多重读次数**与间隔（ms）。 */
+        const val TALENT_RETRY_MAX = 6
+        const val TALENT_REREAD_DELAY_MS = 700L
+
+        /**
+         * 天赋面板**行距**（帧 px，3200 档实测 153：Lv 行中心 301/455/607；2244 档会按 scaleY 缩放）。
+         * 用于「读到行名 ⇒ 下移一行补读」的回退（神里绫华 / 莫娜 的冲刺技占行）。
+         */
+        const val TALENT_ROW_PITCH_PX = 153
+
+        /**
+         * 命之座页**重导航**次数与等待（ms）：页签级判据认定"不在命之座页"时，重击左菜单「命之座」。
+         * 实测 cver14 Skirk 命之座页没切过去（读到属性页 ⇒ 误判 c6）。
+         */
+        const val CONSTELLATION_PAGE_RETRY = 2
+        const val CONSTELLATION_RENAV_MS = 1300L
+
+        /**
+         * 角色名**未命中**（词典+别名+旅行者规则全落空）时的重读次数与间隔。
+         * 实测（cver12）鹿野院平藏的 name ROI 首读为 `'.'`（level 也读成 `'.'` ⇒ 0）⇒ 直接判失败 ⇒ 重读救回。
+         */
+        const val CHAR_NAME_MAX_TRIES = 3
+        const val CHAR_NAME_REREAD_MS = 400L
+
+        /** 等级读数**可信下限**：低于此值视为"丢位欠读"⇒ 触发重读（不参与取值，取值只走 max）。 */
+        const val CHAR_LEVEL_MIN_PLAUSIBLE = 10
+
+        /** 天赋等级**合法上界**（基础 10 + 命座 3 = 13）—— 用于「下移一行」补读结果校验。 */
+        const val TALENT_LEVEL_MAX = 13
+
+        /**
+         * 命座页**稳定轮询**参数：切到「命之座」后有 ~2.5s 交叉淡入（节点 ROI 会吃到上一页彩色内容
+         * ⇒ 饱和度被单向抬高）⇒ 每 [CONSTELLATION_POLL_GAP_MS] 采一次，相邻两次**逐节点差
+         * ≤ [CONSTELLATION_STABLE_TOL]** 即认定已稳定并采用；打满 [CONSTELLATION_POLL_MAX] 次
+         * 仍未稳定 ⇒ 兜底取「首帧 vs 末帧」的**逐节点 min**（污染单向 ⇒ min 是安全方向）。
+         * 成本：稳定时仅 2 次采样（+400ms），未稳定时最多 8 次（+2.8s）。
+         */
+        const val CONSTELLATION_POLL_MAX = 8
+        const val CONSTELLATION_POLL_GAP_MS = 400L
+        const val CONSTELLATION_STABLE_TOL = 4
+
+        /**
+         * 命座节点**点亮判据**：节点中心区**平均饱和度**（max−min，0~255）的**逐节点阈值**。
+         * 点亮 = 彩色技能图标（S 高）；未点亮 = 白色锁图标或暗底（S 低）。
+         *
+         * ★ 2026-09-17 **最终（五轮合并 + 最大余量）GT 监督拟合** —— 样本 = cver13~17 五轮稳定读数
+         *   （首读优先；剔奇偶 Manekin/Manekina；剔 Skirk 错页离群 max>80 且 GTc=0）共 **448** 个：
+         * | 节点 | 阈值 | 点亮范围 | 未点亮范围 | 余量(下/上) |
+         * |---|---|---|---|---|
+         * | #0 | **16** | 20-57 | 2-12 | 4 / 4 |
+         * | #1 | **19** | 22-60 | 3-17 | 2 / 3 |
+         * | #2 | **31** | 33-76 | 9-30 | 1 / 2 ⚠️ |
+         * | #3 | **16** | 20-61 | 2-12 | 4 / 4 |
+         * | #4 | **14** | 16-65 | 3-12 | 2 / 2 |
+         * | #5 | **19** | 25-72 | 4-14 | 5 / 6 |
+         * ⇒ 节点级 **2688/2688 = 100%**，角色级 **448/448 = 100%**（五轮各自 0 错，唯一例外 = Skirk 错页）
+         * 🔴 **阈值取「间隙中点」而非「任一最优值」**：同样是 100% 准确率，取中点 = **最大余量**。
+         *   实测教训：旧法（取第一个达最大准确率的 t）把 #5 定成 15 ⇒ cver17 Skirk 的未亮点读到 **14** 就翻判 ✗；
+         *   取中点 19 后余量 5/6 ⇒ 抗跨轮抖动（|Δ| 中位 2）。
+         * ⚠️ **样本轮数决定可信度**：2 轮拟合 → cver15/16 冒出"未亮点=12" ⇒ 误判；**必须 ≥4~5 轮**。
+         * ⚠️ #2 余量仅 1/2（未亮 30 / 亮 33）：该特征对 #2 最弱 —— 若要再加固需换特征
+         *   （饱和度受**元素背景色**影响：同为 c6 全亮，火元素 34-49、冰元素 58-99）⇒ 待办：
+         *   改"节点环的红度 / 环带亮度中位"。
+         * ⚠️ 单阈值（曾试 40）不可行：各节点"点亮"下界低至 16~25 ✗（漏判）—— 必须**逐节点**阈值
+         *   （GOODScanner 同做法）✓
+         */
+        val CONSTELLATION_SAT_MIN = intArrayOf(16, 19, 31, 16, 14, 19)
 
         /** 翻页后、**抓卡格帧**前的固定等待（让列表惯性停稳；仅影响跨页指纹，不影响点击）。 */
         const val CROSS_PAGE_SETTLE_MS = 250L

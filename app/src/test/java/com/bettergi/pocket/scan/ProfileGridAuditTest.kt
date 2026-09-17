@@ -97,7 +97,7 @@ class ProfileGridAuditTest {
     // ---- 3) n−1 规则 + 4) advance 定律 ----
 
     @Test
-    fun `grid traverseRows is visibleRows minus one`() {
+    fun `grid traverseRows is visibleRows minus one or all rows`() {
         for ((file, _, _) in profiles) {
             val grids = raw(file).getJSONObject("grids")
             for (key in grids.keys()) {
@@ -105,13 +105,21 @@ class ProfileGridAuditTest {
                 if (!g.has("visibleRows") || !g.has("traverseRows")) continue
                 val vis = g.getInt("visibleRows")
                 val trv = g.getInt("traverseRows")
-                assertTrue("$file::$key traverseRows=$trv != visibleRows-1=${vis - 1}", trv == vis - 1)
+                // ★ 2026-09-17 放宽（旧断言 == visibleRows-1 已作废）：
+                //   n−1 规则的**目的**是避开边界行（末行可能被裁）；但 `char_strip` 必须**点满**可见行——
+                //   列表**到底**时最后一窗口是 `E−5..E`，只点 r0..r4 会永漏列表**末件**（实测 cver12
+                //   覆盖 0..90 共 91 件、GT 差集里剩下的正好是末位的 Amber）⇒ 改成 6/6。
+                //   不变量：`visibleRows-1 ≤ traverseRows ≤ visibleRows`（既避开边界、又允许点满这一必要例外）。
+                assertTrue(
+                    "$file::$key traverseRows=$trv 越界（应 ∈ [${vis - 1}, $vis]）",
+                    trv >= vis - 1 && trv <= vis,
+                )
             }
         }
     }
 
     @Test
-    fun `swipe advance distance equals rows times pitch`() {
+    fun `swipe advance distance is between n-1 and n rows`() {
         for ((file, _, _) in profiles) {
             val grids = raw(file).getJSONObject("grids")
             for (key in grids.keys()) {
@@ -124,10 +132,21 @@ class ProfileGridAuditTest {
                 if (trv < 1) continue
                 val pitch = (rowY.getInt(rowY.length() - 1) - rowY.getInt(0)).toDouble() / (rowY.length() - 1)
                 val dist = adv.optInt("distance", -1)
-                val expect = trv * pitch
+                // ★ 2026-09-17 定稿不变量（旧断言「恰好 trv×pitch」已作废）：
+                //   上界 `trv×pitch` = **结构性免跳行的充要条件**：前进量 > 本页遍历跨度 ⇒
+                //     相邻页之间会漏掉整行（静默无日志）。
+                //   下界 `1×pitch` = 至少要真前进一整行，否则跨页指纹几乎不变、引擎会误判「到底」提前收尾。
+                //   · 多数网格取上界（恰好 n 行，无重叠、吞吐最高）；
+                //   · `char_strip` 取 **4 行 / 遍历 6 行**（640px）：实测单次滑动落地量不可控
+                //     （目标 800 时实际落 4~6 行、平均 4.55 ⇒ 相位漂移 ⇒ 点落邻卡 ⇒ 漏件）
+                //     ⇒ 刻意留 2 行重叠，把「跳行」变成结构性不可能。
+                //   ⚠️ 且 `char_strip.traverseRows` 已 = visibleRows = 6（不再遵守 n−1）：
+                //     列表**到底**时最后一窗口是 `E−5..E`，漏点末行会**永漏列表末件**。
+                val lo = pitch
+                val hi = trv * pitch
                 assertTrue(
-                    "$file::$key advance.distance=$dist ≠ traverseRows($trv)×pitch($pitch)=${expect.toInt()}",
-                    abs(dist - expect) <= expect * 0.03,
+                    "$file::$key advance.distance=$dist 越界（应 ∈ [${lo.toInt()}, ${hi.toInt()}] = [1, trv]×pitch$pitch）",
+                    dist >= lo - 1 && dist <= hi + 1,
                 )
                 // from→to 净位移亦须与 distance 自洽
                 val f = adv.optJSONArray("from"); val t = adv.optJSONArray("to")

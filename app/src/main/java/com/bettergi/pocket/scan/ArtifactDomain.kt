@@ -76,6 +76,8 @@ data class GoodCharacter(
     val element: String?,
     val favor: Int = 0,
     val constellation: Int = 0,
+    /** 突破阶 0-6（GOOD `ascension`）：由**等级上限**（面板 "Lv.X/Y" 的 Y）推导，同武器做法。 */
+    val ascension: Int = 0,
     val talents: List<Int> = emptyList(),
     val talentLocked: List<Boolean> = emptyList(),
     /** OCR 原文（未匹配词典时保留，便于人工核对）。 */
@@ -156,6 +158,7 @@ object GoodExporter {
                 put("name", c.name)
                 put("level", c.level)
                 c.element?.let { put("element", it) }
+                put("ascension", c.ascension)
                 put("constellation", c.constellation)
                 put("favor", c.favor)
                 // GOOD 口径：talent = { auto, skill, burst }

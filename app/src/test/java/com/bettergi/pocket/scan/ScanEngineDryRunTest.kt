@@ -408,7 +408,16 @@ class ScanEngineDryRunTest {
         //    ⇒ 结构性免跳行。故本期望由 302 改为 452（1178-726）。
         // （2026-09-14 定案：旧起点 x=1858 贴住详情面板左缘 ⇒ 拖拽被面板吃掉（2560 实测 0px）；
         //   2026-09-16 定稿：**命令不加增益**（恒 gain=1.0）+ 封顶 = target ⇒ 恒 876）
-        assertEquals((638 to 1178) to (638 to 452), h.swipes[0])
+        // 翻页滑动 = **profile 字面 from/to**（2026-09-17 期望同步）。
+        // ⚠️ 引擎有两条 advance 路径，走哪条取决于 `geoAdvance`（默认 **false**）：
+        //   · geoAdvance=false（现状）⇒ `ScanEngine.pagedGrid` 走 `else` 分支：**直接用
+        //     profile 的 `advance.from/to` 写死坐标**（`dist`/`extra` 在该分支**被忽略**，
+        //     pageDrift 记账也不启用）⇒ 净位移 = 1150−274 = **876 = 3×292（恰 3 行）** ✓
+        //   · geoAdvance=true ⇒ 几何起点 `advanceStart`（最左卡缝中点 (638,1178)）+ 目标
+        //     `advanceDistance − extra`（876−292=584 ≈2 行，刻意重叠）—— 该路径曾因"几何起点
+        //     致滚动截断"被默认关闭。故旧期望 (638,1178)→(638,452) 只在 geoAdvance=true 下成立。
+        // 本断言只校验「字面路径的坐标接线」；要测几何路径需显式打开 geoAdvance。
+        assertEquals((1614 to 1150) to (1614 to 274), h.swipes[0])
     }
 
     @Test
