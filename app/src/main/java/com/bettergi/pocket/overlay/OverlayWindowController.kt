@@ -48,10 +48,6 @@ import com.bettergi.pocket.genshin.GenshinPackages
 import com.bettergi.pocket.input.AccessibilityServiceHealth
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.input.SwipeMethod
-import com.bettergi.pocket.dsl.repo.RepoChannel
-import com.bettergi.pocket.dsl.repo.RepoManager
-import com.bettergi.pocket.dsl.repo.Subscription
-import com.bettergi.pocket.dsl.repo.SubscribeSpec
 import com.bettergi.pocket.log.RecognitionLog
 import com.bettergi.pocket.settings.TriggerSettings
 import com.bettergi.pocket.settings.TriggerSettingsRepository
@@ -150,13 +146,7 @@ class OverlayWindowController(
     private var scriptsExtras: View? = null
     private var scriptsChevron: ImageView? = null
     private var scriptsSubtitle: TextView? = null
-    private var subsUrlEdit: EditText? = null
-    private var subscribeBtn: TextView? = null
-    private var updateAllBtn: TextView? = null
-    private var subsListContainer: View? = null
     private var scriptsMenuExpanded = false
-    private val repoManager = RepoManager(context.applicationContext)
-    private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var logHandleView: View? = null
     private var logBodyView: View? = null
     private var logTitle: TextView? = null
@@ -381,22 +371,16 @@ class OverlayWindowController(
             // 双击语义冲突防护：chevron 与开关并排，点击行体展开；开关自身事件不冒泡
         }
 
-        // §16.3 S4 脚本管理：订阅仓库 / 已订阅列表 / 手动更新
+        // 脚本管理行：订阅功能已移除（见 P1），P4 起改由 DSL 脚本驱动 ⇒ 先隐藏
         scriptsRow = root.findViewById(R.id.overlay_row_scripts)
+        scriptsRow?.visibility = View.GONE
         scriptsExtras = root.findViewById(R.id.overlay_scripts_extras)
         scriptsChevron = root.findViewById(R.id.overlay_scripts_chevron)
         scriptsSubtitle = root.findViewById(R.id.overlay_scripts_subtitle)
-        subsUrlEdit = root.findViewById<EditText>(R.id.overlay_subs_url).apply {
-            setOnFocusChangeListener { _, has -> setPanelFocusable(has) }
-        }
-        subscribeBtn = root.findViewById<TextView>(R.id.overlay_subscribe).also { btn ->
-            btn.setOnClickListener { doSubscribe() }
-        }
-        updateAllBtn = root.findViewById<TextView>(R.id.overlay_update_all).also { btn ->
-            btn.setOnClickListener { doUpdateAll() }
-        }
-        subsListContainer = root.findViewById(R.id.overlay_subs_list)
-        scriptsRow?.setOnClickListener { setScriptsMenuExpanded(!scriptsMenuExpanded) }
+        // 其余订阅控件（URL 输入、订阅/更新按钮、订阅列表）随订阅功能一并移除
+        scriptsExtras = root.findViewById(R.id.overlay_scripts_extras)
+        scriptsChevron = root.findViewById(R.id.overlay_scripts_chevron)
+        scriptsSubtitle = root.findViewById(R.id.overlay_scripts_subtitle)
 
         enabledSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (updatingUi) return@setOnCheckedChangeListener
@@ -447,7 +431,6 @@ class OverlayWindowController(
         setAutoSkipMenuExpanded(prefs.getBoolean(KEY_AUTO_SKIP_EXPANDED, false), persist = false)
         setLaunchMenuExpanded(prefs.getBoolean(KEY_LAUNCH_EXPANDED, false), persist = false)
         setScanMenuExpanded(prefs.getBoolean(KEY_SCAN_EXPANDED, false), persist = false)
-        setScriptsMenuExpanded(prefs.getBoolean(KEY_SCRIPTS_EXPANDED, false), persist = false)
         applyFlowSelection(settingsRepository.get().scanFlow)
         settingsRepository.addListener(settingsListener)
         startScreenWatch()
@@ -1024,163 +1007,6 @@ class OverlayWindowController(
         }
         launchExtras?.visibility = if (expanded) View.VISIBLE else View.GONE
         launchChevron?.animate()?.rotation(if (expanded) 90f else 0f)?.setDuration(160)?.start()
-    }
-
-    // ---- §16.3 S4 脚本管理：订阅 / 列表渲染 / 更新 / 退订 ----
-
-    /**
-     * 操作反馈：副文本为主通道 + Toast 辅助。
-     * EMUI/Android 10+ 会拦截后台 app 的 Toast（真机实测 ToastInterrupt DENY），
-     * 悬浮窗操作时 app 常处后台 → 副文本是唯一可靠反馈面。
-     */
-    private fun reportScriptsResult(msg: String) {
-        scriptsSubtitle?.text = msg
-        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-    }
-
-    private fun setScriptsMenuExpanded(expanded: Boolean, persist: Boolean = true) {
-        scriptsMenuExpanded = expanded
-        if (persist) {
-            prefs.edit().putBoolean(KEY_SCRIPTS_EXPANDED, expanded).apply()
-        }
-        scriptsExtras?.visibility = if (expanded) View.VISIBLE else View.GONE
-        scriptsChevron?.animate()?.rotation(if (expanded) 90f else 0f)?.setDuration(160)?.start()
-        if (expanded) renderSubscriptions() else setPanelFocusable(false)
-    }
-
-    private fun renderSubscriptions() {
-        val container = subsListContainer as? LinearLayout ?: return
-        container.removeAllViews()
-        val subs = repoManager.listSubscriptions()
-        if (subs.isEmpty()) {
-            container.addView(
-                TextView(themedContext).apply {
-                    text = "未订阅任何仓库"
-                    setTextColor(ContextCompat.getColor(themedContext, R.color.overlay_text_muted))
-                    textSize = 11f
-                },
-            )
-            return
-        }
-        subs.forEach { container.addView(buildSubsRow(it)) }
-    }
-
-    private fun buildSubsRow(sub: Subscription): View {
-        val row = LinearLayout(themedContext).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 4, 0, 4)
-        }
-        val name = TextView(themedContext).apply {
-            text = "${sub.name} (${sub.channel.id})"
-            setTextColor(ContextCompat.getColor(themedContext, R.color.overlay_text))
-            textSize = 12f
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        val update = TextView(themedContext).apply {
-            text = "更新"
-            setTextColor(ContextCompat.getColor(themedContext, R.color.overlay_text_muted))
-            textSize = 11f
-            setBackgroundResource(R.drawable.bg_overlay_row_selectable)
-            gravity = Gravity.CENTER
-            minHeight = dp(40)
-            minWidth = dp(48)
-            setPadding(dp(12), 0, dp(12), 0)
-            contentDescription = "更新 ${sub.name}"
-            setOnClickListener { doUpdate(sub.name) }
-        }
-        val unsub = TextView(themedContext).apply {
-            text = "退订"
-            setTextColor(ContextCompat.getColor(themedContext, R.color.overlay_text_muted))
-            textSize = 11f
-            setBackgroundResource(R.drawable.bg_overlay_row_selectable)
-            gravity = Gravity.CENTER
-            minHeight = dp(40)
-            minWidth = dp(48)
-            setPadding(dp(12), 0, dp(12), 0)
-            contentDescription = "退订 ${sub.name}"
-            setOnClickListener { doUnsubscribe(sub.name) }
-        }
-        row.addView(name)
-        row.addView(update)
-        row.addView(unsub)
-        return row
-    }
-
-    private fun doSubscribe() {
-        val spec = parseSubscribeInput(subsUrlEdit?.text?.toString().orEmpty())
-        if (spec == null) {
-            Toast.makeText(context, "格式无效：请用 owner/repo 或完整 URL", Toast.LENGTH_SHORT).show()
-            return
-        }
-        setPanelFocusable(false)
-        subsUrlEdit?.setText("")
-        repoScope.launch {
-            val res = withContext(Dispatchers.IO) { repoManager.subscribe(spec) }
-            mainHandler.post {
-                res.onSuccess {
-                    reportScriptsResult("订阅成功：${spec.owner}/${spec.repo}")
-                    renderSubscriptions()
-                }.onFailure { e ->
-                    reportScriptsResult("订阅失败：${e.message}")
-                }
-            }
-        }
-    }
-
-    private fun doUpdateAll() {
-        repoScope.launch {
-            val results = withContext(Dispatchers.IO) { repoManager.updateAll() }
-            mainHandler.post {
-                val ok = results.count { it.second.isSuccess }
-                val msg = if (results.isEmpty()) "无订阅仓库" else "更新 ${ok} 成功 / ${results.size - ok} 失败"
-                reportScriptsResult(msg)
-                renderSubscriptions()
-            }
-        }
-    }
-
-    private fun doUpdate(name: String) {
-        repoScope.launch {
-            val res = withContext(Dispatchers.IO) { repoManager.update(name) }
-            mainHandler.post {
-                res.onSuccess { reportScriptsResult("已更新：$name") }
-                    .onFailure { e -> reportScriptsResult("更新失败 $name：${e.message}") }
-                renderSubscriptions()
-            }
-        }
-    }
-
-    private fun doUnsubscribe(name: String) {
-        repoManager.unsubscribe(name)
-        reportScriptsResult("已退订：$name")
-        renderSubscriptions()
-    }
-
-    /** 解析订阅输入：owner/repo、完整 github URL、ghproxy: 前缀。@ref 暂不支持（默认 main）。 */
-    private fun parseSubscribeInput(raw: String): SubscribeSpec? {
-        var t = raw.trim()
-        if (t.isEmpty()) return null
-        var channel = RepoChannel.GITHUB
-        if (t.startsWith("ghproxy:", true)) {
-            channel = RepoChannel.GHPROXY
-            t = t.removePrefix("ghproxy:")
-        }
-        if (t.startsWith("http", true)) {
-            t = t.substringAfter("github.com/")
-                .substringBefore("/archive")
-                .substringBefore("/tree")
-                .substringBefore("/blob")
-            if (t.isEmpty() || !t.contains("/")) return null
-        }
-        val parts = t.trim('/').split("/").filter { it.isNotEmpty() }
-        if (parts.size < 2) return null
-        return SubscribeSpec(
-            owner = parts[0],
-            repo = parts[1].removeSuffix(".git"),
-            ref = parts.getOrNull(2) ?: "main",
-            channel = channel,
-        )
     }
 
     private fun isTalking(): Boolean = System.currentTimeMillis() < talkingUntilMs

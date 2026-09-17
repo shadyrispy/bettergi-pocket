@@ -134,8 +134,6 @@ class TriggerForegroundService : Service() {
         )
         settingsRepository.addListener(settingsListener)
         genshinLaunchMonitor.start()
-        // §16.3 S4：启动自动更新订阅仓库（后台协程，断网降级用已装副本）
-        scriptRunner.triggerRepoUpdateAtStartup()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
