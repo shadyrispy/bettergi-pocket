@@ -118,7 +118,8 @@ class ScanEngine(
      */
     private val clickDelayMs: Long = 500L,
     /** §12.1 起点规范化开关：true=用几何推导落点，false=用 profiles 写死坐标（实机 A/B 用）。 */
-    private val useGeometryAdvance: Boolean = true,
+    /** ⚠️ 2026-09-17 默认 false（几何起点致滚动截断，见 TriggerForegroundService 注释）。 */
+    private val useGeometryAdvance: Boolean = false,
     /**
      * §12.2 距离自适应开关：true=每页按相位误差校正翻页距离。
      *
@@ -998,12 +999,20 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             //   同一页里 21 张卡**都在同一帧上** ⇒ 逐格 `freshFrame()`（1300+ 次 × ~60ms ≈ 80s/轮）纯属浪费；
             //   页首抓一帧，之后逐格只是从这一帧里切 72×72 小片（纯内存 copy，微秒级）。
             //   ⚠️ Mat 必须释放（页末 finally）—— 否则每页泄漏一张 3200×1440 BGR（约 13.8MB）⇒ OOM。
+            // ★ 2026-09-17：**跨页指纹前先让列表停稳** —— 此前页首"立即抓帧"，
+            //   若滑动惯性未停 ⇒ 帧里是"运动中"的卡面 ⇒ 与上页同列指纹**永不相等**（实测 `判定跳过 0/21` ✗）
+            //   ⇒ 抓帧前固定等待（只影响帧内容，不影响点击时序；76 页 × 250ms ≈ +19s）
+            if (pageNo > 0 && gridKey == "weapon_backpack") delay(CROSS_PAGE_SETTLE_MS)
             val pageCellFrame = runCatching { freshFrame() }.getOrNull()
             // ★ 页级看门狗起点（挂死时中止并保留已入库结果）
             val pageWall0 = clock()
             // ★ 翻页后**清空面板指纹快照**（GOODScanner `reset_panel_fingerprint`）★
             //   保证**新页第一格必被当作"新的"** ⇒ 必然等待面板变化 ⇒ 不会解析到上一页遗留的面板 ✓
             //   （此前只在 pageNo==0 清 ⇒ 页首格容易读到上一页遗留 ✗，实测页首格重复现象支持这一点）
+            curPageNo = pageNo
+            curCols = cols
+            curTraverseRows = traverseRows
+            curPageIds.clear()
             panelFpSnapshot = null
             if (pageNo == 0) {
                 rowCheckGlobalStart = 0
@@ -1011,6 +1020,42 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             }
             // ★ 行级闭环（方案 C）：本页键序列必须在**页级作用域**（skip 页也要留序列占位）
             val pageKeys = ArrayList<String>(cols * traverseRows)
+            // ★ 跨页重叠对齐（武器）：新页 row0 各列指纹 vs 上页末行同列 ⇒ 相同即跳过
+            skipCellsThisPage = run {
+                val prev = prevAllCellFps
+                if (gridKey != "weapon_backpack" || pageNo == 0 || prev == null || pageCellFrame == null) {
+                    emptySet()
+                } else {
+                    // ★ 新页**全部格**（r×c）的指纹，与上页**同列任意行**的指纹比 ⇒ 命中即重叠 ⇒ 跳过
+                    //   （不限"末两行/整行对齐"——实测实际前进 2 行，与整数行对不齐 ✗；
+                    //    但**同一件必在同一列**（只纵向滚动）⇒ 按"同列 + 指纹相同"判定最稳 ✓）
+                    val skip = HashSet<Int>()
+                    for (r in 0 until traverseRows) {
+                        for (c in 0 until cols) {
+                            val rect = cellFingerprintRect(gridKey, profile, c, r, profile) ?: continue
+                            val fp = PanelFingerprint.capture(pageCellFrame, listOf(rect))
+                            for (pr in 0 until traverseRows) {
+                                if (PanelFingerprint.same(fp, prev.getOrNull(pr * cols + c))) {
+                                    skip.add(r * cols + c)
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    // 诊断：打印指纹 hash（新页 row0 各列 vs 上页全页同列）⇒ 直接看"值不等"还是"取值失败"
+                    val newH = (0 until cols).joinToString(",") { c ->
+                        val rr = cellFingerprintRect(gridKey, profile, c, 0, profile)
+                        val fp = if (rr != null) PanelFingerprint.capture(pageCellFrame, listOf(rr)) else null
+                        fp?.let { "%04x".format(java.util.Arrays.hashCode(it) and 0xFFFF) } ?: "----"
+                    }
+                    val oldH = (0 until cols * traverseRows).joinToString(",") { i ->
+                        prev.getOrNull(i)?.let { "%04x".format(java.util.Arrays.hashCode(it) and 0xFFFF) } ?: "----"
+                    }
+                    Log.i(TAG, "跨页指纹: page=$pageNo 新row0=[$newH] 上页=[$oldH]")
+                    Log.i(TAG, "跨页重叠: page=$pageNo 判定跳过 ${skip.size}/${cols * traverseRows} 格")
+                    skip
+                }
+            }
             // ⚠️ 2026-09-17 修：本序列**必须与 pageKeys 同为页内局部**！
             //   此前误声明为类字段（跨页累积、与 pageKeys 长度不齐）⇒ 格级日志取错件
             //   ⇒ 凭空造出"同页同一件被读两次"112 次 ✗（已由手动点击实测推翻：r0c0/r1c0 是不同件）
@@ -1102,7 +1147,15 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                         if (col == 0 && row == 0) tmPages++
                         tmCells++
                         Log.i(TAG, "pagedGrid[$gridKey] page=$pageNo start cell($col,$row) idx=$idx")
+                        if (gridKey == "weapon_backpack" && idx in skipCellsThisPage) {
+                            Log.i(TAG, "跨页重叠跳过: page=$pageNo idx=$idx (r${row} c$col)")
+                        } else {
+                        curCellRow = row
+                        curCellCol = col
+                        curCellIdx = idx
+                        curGlobalPos = rowCheckGlobalStart + idx
                         runVisit(visit, gridKey, col, row, idx, pageProfile)
+                        }
                         pageKeys += (lastCellKey ?: "")
                         pageIdentities += (lastCellIdentity ?: "")
                         pageAppeared += lastPanelAppeared
@@ -1144,6 +1197,24 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             if (added > 0) {
                 dupPageStreak = 0
                 dupPageStopConfirmed = false
+            }
+            // ★ 保存本页**末行各列**卡格指纹，供下一页做跨页重叠比对（必须在释放帧之前）
+            if (gridKey == "weapon_backpack" && pageCellFrame != null) {
+                // 保存**全页** 21 格指纹（索引 r*cols+c），供下一页做跨页重叠比对
+                val all = ArrayList<ByteArray?>(cols * traverseRows)
+                for (r in 0 until traverseRows) {
+                    for (c in 0 until cols) {
+                        val rect = cellFingerprintRect(gridKey, profile, c, r, profile)
+                        all.add(if (rect != null) PanelFingerprint.capture(pageCellFrame, listOf(rect)) else null)
+                    }
+                }
+                prevAllCellFps = all
+                // 跨页 identity 对齐：从 **idx 表**取本页 row1/row2 各列身份串（与 (row,col) 严格对应 ✓）
+                val ids = ArrayList<String>(2 * cols)
+                for (r in (traverseRows - 2) until traverseRows) {
+                    for (c in 0 until cols) ids.add(curPageIds[r * cols + c] ?: "")
+                }
+                prevRowIds = ids
             }
             runCatching { pageCellFrame?.release() } // 页级卡格帧用完即释放（防 Mat 泄漏）
             pageNo++
@@ -1868,6 +1939,61 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      * 用途：跑完把"漏件所在格"与 appeared=false 的格对照 ⇒ 一次区分"点击没生效" vs "读了但错"。
      */
     private var lastPanelAppeared: Boolean = false
+
+    /**
+     * 当前格的**列表位置估计**（= `rowCheckGlobalStart + idx`）。**武器去重按它**：
+     * 跨页重叠时同一件的该值相同 ⇒ 跳过；列表里同款同级的真·多把位置不同 ⇒ **都保留** ✓
+     */
+    private var curGlobalPos: Int = -1
+
+    /** 武器已入库的列表位置集合（见 [curGlobalPos]）。 */
+    private val weaponSeenPositions = HashSet<Int>()
+
+    /**
+     * ★★ 2026-09-17 跨页重叠对齐（deepwiki 方案，武器专用）★★
+     * 上一页**末行（row = traverseRows-1）各列**的卡格指纹。
+     * 起因：`advance 584px = 2.0 行` ⇒ 新页 `row0` 与上页末行**内容重叠**（同列同件）
+     * ⇒ 不去重会让同款多把/同件被重复入库（实测 `Slingshot/1/1` ×22 ✗）。
+     * 判据：**卡格位置在屏幕上固定**（只有内容随滚动变）⇒ 新页 `row0` 各列指纹
+     * 与上页末行**同列**指纹相同 ⇒ 判为重叠重复 ⇒ 跳过该格 ✓
+     * （不能用内容键 —— 武器同款多把是常态；也不能用 `global` 估计 —— 实测累计漂移 ✗）
+     */
+    private var prevLastRowCellFps: List<ByteArray?>? = null
+    /** 上页**末两行**（row = traverseRows-2 .. traverseRows-1）各列指纹，长度 2*cols。
+     *  ⚠️ 只用末行不够：落地有 φ 偏差（实测 φ=33~73 ⇒ 实际滚动 2.0 行 ± φ）
+     *  ⇒ 重叠量非精确 1 行 ⇒ 新页 row0 未必对应上页末行（首轮实测**跳过 0 次** ✗）
+     *  ⇒ 扩到末两行 + 同列比对，覆盖 ±1 行偏差 ✓ */
+    private var prevTwoRowsCellFps: List<ByteArray?>? = null
+    /** 上页**全页**（traverseRows × cols）指纹，索引 r*cols+c。 */
+    private var prevAllCellFps: List<ByteArray?>? = null
+
+    /**
+     * ★★ 跨页判据（定论版）：**用 identity（内容）而非像素** ★★
+     * 上页 `row1`/`row2` 各列的身份串（14 项，索引 `(r-1)*cols+c`）。
+     * 依据（真机 + 指纹 hash 实测）：**像素指纹跨页零命中** ✗（同件在两页的卡面渲染不同），
+     * 而 identity（名字/等级/精炼/装备者，皆为 OCR 结果）稳定 ✓
+     */
+    private var prevRowIds: List<String>? = null
+    /** 当前格的行/列（供跨页 identity 比对）。 */
+    private var curCellRow: Int = -1
+    private var curCellCol: Int = -1
+    /**
+     * ★★ 本页 **idx → identity** 表（定长语义，每页清空）★★
+     * ⚠️ 2026-09-17 修 bug：此前用 `pageIdentities`（**可变长**收集数组）保存跨页比对用的身份串，
+     * 而**被跨页丢弃的格 `return` 早于收集** ⇒ 索引错位 ⇒ 保存的数组与 `(row,col)` 不再对应
+     * ⇒ 后续比对**全部失配**（实测 `Slingshot` 同列出现 2 次未被去重 ✗）
+     * ⇒ 改为按 idx **无条件**写入（早于任何判重），与 `(row,col)` 严格对应 ✓
+     */
+    private val curPageIds = HashMap<Int, String>()
+    private var curCellIdx: Int = -1
+
+    /** 页参数镜像（`pagedGrid` 的局部变量对 `parseWeaponPanel` 不可见 ⇒ 用字段传递）。 */
+    private var curPageNo: Int = 0
+    private var curCols: Int = 7
+    private var curTraverseRows: Int = 3
+
+    /** 本页需跳过的格 idx（= 与上页末行同列指纹相同的重叠格）。 */
+    private var skipCellsThisPage: Set<Int> = emptySet()
 
     /** ★ 面板指纹快照（GOODScanner `panel_snapshot`）：上次**稳定**面板的原始像素（仅作加载闸门）。 */
     private var panelFpSnapshot: ByteArray? = null
@@ -3367,11 +3493,17 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   翻页后 `reset_panel_fingerprint()` 清空快照 ⇒ 新页首格必等。
         //   ⚠️ 触发本次对齐的"实测 118 个重复读事件"**是我的日志工具 bug 造成的假象**（已推翻 ✗，
         //      见 pageIdentities 处的注释）—— 但上述对齐**结论本身与权威实现一致，故保留**。
-        val fpRects = if (PANEL_FP_GATE_ENABLED) {
+        // ★★ 2026-09-17（对齐 GOODScanner `GoodWeaponScanner`）：**武器面板用 FixedDelay，不用指纹闸门** ★★
+        //   原因（deepwiki 查证）：同款武器的详情面板**完全相同** ⇒ 指纹检测不到"变化" ⇒
+        //   指纹模式会一直等到超时（浪费且无意义）⇒ GOODScanner 对武器用 `PanelWaitMode::FixedDelay`
+        //   且延时极短（`DEFAULT_WEAPON_PANEL_DELAY = 50ms`）✓
+        val isWeaponPanel = panelKey == "weapon_backpack"
+        val fpRects = if (PANEL_FP_GATE_ENABLED && !isWeaponPanel) {
             PanelFingerprint.regions(profile, panelKey)
         } else {
             emptyList()
         }
+        if (isWeaponPanel) delay(WEAPON_PANEL_DELAY_MS)
         val fpWaitMs = if (gridCellChanged) PANEL_FP_WAIT_MS else PANEL_FP_DUP_WAIT_MS
         // 每格先按"未出现"处理；检测到指纹变化/新快照即置 true（见下）
         lastPanelAppeared = fpRects.isEmpty()
@@ -3430,12 +3562,25 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             profile.rect("$base.name"),
             profile.rect("$base.level"),
             profile.rect("$base.refine"),
+            // ★ 2026-09-17 对齐 GOODScanner（`WeaponOcrRegions.equip`）：**读装备者**
+            //   真机核对：`panels.weapon_backpack.equipped`=[2305,1163,2685,1217] 精确套住「珐露珊已装备」✓
+            profile.rect("$base.equipped"),
         )
         val texts = ocr.readRois(frame, rects)
         fun at(i: Int): String? = texts.getOrNull(i)?.takeIf { it.isNotBlank() }
         val pieceName = at(0)?.let { StatParser.clean(it) }
         val levelText = at(1)
         val refineText = at(2)
+        val equipText = at(3)
+        // ★ 2026-09-17 武器面板原文 dump（诊断）：打印 4 槽 OCR 原文
+        //   用途：验证"点击不同格却录到同一件"——看那几格的**原文是否逐字相同**（相同 ⇒ 读到同一张面板 = 陈旧帧 ✗）
+        if (PANEL_RAW_DUMP) {
+            Log.i(
+                TAG,
+                "武器面板原文: " + listOf(pieceName ?: "-", levelText ?: "-", refineText ?: "-", equipText ?: "-")
+                    .joinToString(" | "),
+            )
+        }
         // 词典/模糊开关取自 flow 的 dict.name / dict.fuzzy（weapon_scan 已声明 mappings.weapons + fuzzy=1）
         val nameDict = dict?.optString("name")?.takeIf { it.isNotEmpty() }
         val key = pieceName?.let {
@@ -3449,7 +3594,10 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             Log.w(TAG, "weapon name '$pieceName' not found in mappings.weapons")
         }
         val level = levelText?.let { StatParser.extractValue(it)?.toInt() } ?: 0
-        val refine = refineText?.let { StatParser.extractValue(it)?.toInt() }
+        // ★ 2026-09-17 对齐 GT：**`refine` 读不到时视作 1**
+        //   3★ 及以下武器**没有精炼机制** ⇒ 面板无「精炼N阶」⇒ OCR 读空 ⇒ null ✗
+        //   而 GT 对这类写 `refinement: 1` ✓ ⇒ 否则键 `(DebateClub,1,null)` ≠ GT `(DebateClub,1,1)`
+        val refine = refineText?.let { StatParser.extractValue(it)?.toInt() } ?: 1
         val rarity = vars.rarity  // vote zone weapon.card.starStrip 已设
         if (rarity < 1 || rarity > 5) return
         if (key == null) return
@@ -3457,16 +3605,71 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         if (noteDupAndMaybeStop("$key|L$level|R$refine",
                 resultsWeapons.map { "${it.key}|L${it.level}|R${it.refine}" })) return
         // 去重：key + level + refine 唯一
-        if (dedupe && resultsWeapons.any { it.key == key && it.level == level && it.refine == refine }) {
-            Log.d(TAG, "duplicate weapon skipped: $key L$level R$refine")
-            return
+        // ★ 2026-09-17：**`refine` 读不到（null）时不参与去重** ——
+        //   否则同款同级的低星武器（如 8 件 Lv.1 的 DebateClub）键全同 `key|L1|null`
+        //   ⇒ 被误判重复合并成 1 件 ⇒ 只漏不多（首轮实测漏 100 件，其中 3★ 为主）✗
+        //   保守策略：读不到 refinement 就**照常入库**（宁可多存，后处理可再按 location/其它字段区分）
+        // ★★ 武器去重按「列表位置」而非内容 ★★
+        //   GT 实证：同款同级的真·多把是常态（`DebateClub` 有 8 件）⇒ 内容键会把它们合并 ✗
+        //   正确语义：重叠重复扫到 ⇒ **位置相同** ⇒ 跳过；两把同款 ⇒ **位置不同** ⇒ 都保留 ✓
+        // ⚠️ 2026-09-17 **删除位置去重**：实测它把 `page1` **整页 21 格误挡**（`global` 漂移 ⇒ 判"已扫过"）
+        //    ⇒ 21 件被整页丢弃 = "漏"的真因 ✗。
+        //    GOODScanner **不做跨页去重** ✓（靠"滚整页 ⇒ 零重叠"）；我方重叠由**跨页卡格指纹**处理 ✓
+        // ★ 装备者（GOODScanner `equip` 槽语义）：「珐露珊已装备」⇒ 取「已装备」前的内容 ⇒ 匹配角色词典得 key；
+        //   未装备时该区为空（或文案不含「已装备」）⇒ 置空串（GT 中 117/209 件为空 ✓）
+        val location = equipText
+            ?.takeIf { it.contains("已装备") }
+            ?.substringBefore("已装备")
+            ?.let { StatParser.clean(it) }
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { raw ->
+                // ★ 2026-09-17：**旅行者的名字是玩家自定义**（GT 里统一写作 `Traveler`）
+                //   实测 `SkywardBlade` 我方读到"崽崽"（玩家昵称）而 GT 是 `Traveler` ✗
+                //   ⇒ 词典匹配失败时**若疑似旅行者**（2-4 字且非词典名）不臆断，仍保留原文；
+                //     真正的 Traveler 映射由 GOODScanner 的 `traveler` 别名表处理 —— 先按原文保留 + 日志
+                val key = names?.match(raw, GoodNames.Kind.CHARACTER, dictFuzzyOf(dict))?.key
+                if (key == null) Log.i(TAG, "weapon equip 未匹配角色词典: '$raw'（可能是旅行者昵称）")
+                key ?: raw
+            }
+            ?: ""
+        // ★ 突破阶：面板不显示 ⇒ 由等级推导（表见 GoodWeapon.ascension 注释，GT 208/209 命中）
+        val ascension = when {
+            level <= 20 -> 0
+            level <= 40 -> 1
+            level <= 50 -> 2
+            level <= 60 -> 3
+            level <= 70 -> 4
+            level <= 80 -> 5
+            else -> 6
+        }
+        // ★ 2026-09-17 诊断埋点（武器版）：与圣遗物同格式 ⇒ 离线可看"**每格读到了哪把**"序列，
+        //   用于验证"翻页/点击是否造成重复或漏点"（此前武器路径不写 identity ⇒ 格级日志 `item` 全是 `-` ✗）
+        lastCellIdentity = "$key/$level/$rarity#R$refine" + (if (location.isNotEmpty()) "@$location" else "")
+        if (curCellIdx >= 0) curPageIds[curCellIdx] = lastCellIdentity ?: ""
+        // ★ 跨页重叠判定（identity 版）：新页 **row0** 的格若与上页 **row2/row1 同列**身份相同 ⇒ 重叠 ⇒ 丢弃
+        //   （实测像素指纹跨页零命中 ✗；identity 为 OCR 内容、稳定 ✓；**只比同列** ⇒ 不伤同款多把）
+        // ★ 2026-09-17 扩到**全部行**：实测跨页前进量可为 0~2 行（滑不动时整页 3 行全重叠）
+        //   安全性：上页前进 2 行时，新页 row1/row2 对应上页 row3/row4 —— **不在 prevRowIds（只存 row1/row2）里**
+        //   ⇒ 不会误判真·多把 ✓
+        if (curCellRow >= 0 && curCellCol >= 0) {
+            val prev = prevRowIds
+            val sameAsPrev = prev != null && (
+                prev.getOrNull((curTraverseRows - 2) * curCols + curCellCol) == lastCellIdentity ||
+                    prev.getOrNull((curTraverseRows - 1) * curCols + curCellCol) == lastCellIdentity
+                )
+            if (sameAsPrev) {
+                Log.i(TAG, "跨页重复(identity) 丢弃: page=$curPageNo r0c$curCellCol $lastCellIdentity")
+                return
+            }
         }
         val weapon = GoodWeapon(
             key = key,
             level = level,
             rarity = rarity,
             refine = refine,
-            lock = vars.locked == true,
+            lock = VoteJudges.weaponLock(frame, profile).matched,
+            location = location,
+            ascension = ascension,
         )
         resultsWeapons.add(weapon)
         listener.onProgress("weapon", vars.snapshot() + ("piece" to pieceName) + ("idx" to resultsWeapons.size))
@@ -4380,6 +4583,19 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          * GOODScanner `PANEL_LOAD_FAST_TIMEOUT_MS = 100ms`（重复件只缩短超时、**不跳过 OCR**）✓
          */
         const val PANEL_FP_DUP_WAIT_MS = 100L
+
+        /** 武器面板**固定延迟**（GOODScanner `DEFAULT_WEAPON_PANEL_DELAY = 50ms`）：同款武器面板全同 ⇒ 指纹无效。 */
+        /**
+         * 武器面板**固定延迟**。GOODScanner 用 `DEFAULT_WEAPON_PANEL_DELAY = 50ms`，
+         * ⚠️ 但**真机实测 50ms 不够**：面板动画未完成就抓帧 ⇒ 精炼/等级行读到空
+         * （首轮 209 件里 57 条的 `refine` 读成 `null` ⇒ 同款 3★ 键全同 ⇒ 大量误判重复
+         *  ⇒ 触发 `duplicateStreak` 早停 ⇒ 3★ 区被截断 ⇒ 漏 100 件 ✗✗）。
+         * 提到 **300ms**（与我方 artifact 的 clickDelay 同量级），给面板渲染留足时间。
+         */
+        const val WEAPON_PANEL_DELAY_MS = 300L
+
+        /** 翻页后、**抓卡格帧**前的固定等待（让列表惯性停稳；仅影响跨页指纹，不影响点击）。 */
+        const val CROSS_PAGE_SETTLE_MS = 250L
         const val PANEL_FP_POLL_MS = 120L
 
         /**

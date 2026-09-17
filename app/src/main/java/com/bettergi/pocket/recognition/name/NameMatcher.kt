@@ -90,6 +90,13 @@ object NameMatcher {
     /** LCS 唯一性最短公共子串（≥3：irminsul 口径，实测负样本零误配）。 */
     private const val LCS_MIN = 3
     /** 单字 Dice 兜底阈值。 */
+    /**
+     * 字集合 Dice 兜底阈值。
+     * ⚠️ 2026-09-17 曾试收紧到 0.80 以排查武器 `LionsRoar` 异常 —— **已回退**：
+     * 实测那 22 条是"**同一把武器跨页重复入库**"（level/refine/lock/location 全同），
+     * **不是名字误匹配** ✗；且收紧后 `NameMatcherTest` 的"单字混淆/扰动准确率"用例挂掉
+     * ⇒ Dice 层是被单测守护的有效能力，保持 0.55。
+     */
     private const val DICE_MIN = 0.55
     /** 短于此长度不参与子串/编辑/LCS（防误配）。 */
     private const val MIN_LEN_FOR_FUZZY = 2

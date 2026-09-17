@@ -507,15 +507,16 @@
       "advance": {
         "type": "swipe",
         "from": [
-          1248,
+          1614,
           1150
         ],
         "to": [
-          1248,
+          1614,
           274
         ],
         "distance": 876,
-        "settle": 2956
+        "settle": 2956,
+        "note": "2026-09-17 收官：**去掉 extra**（回归 distance=876 → 落地目标 **876px = 3.0 行**）——与 `traverseRows=3` **完全配平** ⇒ 理论无重叠、无漏 ✓。配合 `geoAdvance=false`（几何起点会截断滚动）。实测参考：命令 584 ⇒ 落地 804（超出 1.38×，故系统会自适应压小命令 ⇒ 实际落地会逐步逼近 876）。"
       },
       "rowYSyncNote": "2026-09-13：**不同步** `rowY` —— 由 2244 缩放得到的行距与**本档实测** `advance.distance`（876 = 3×292）冲突（ProfileGridAuditTest 拦下）。本档以实测 advance.distance 为准；若要用 rowY 驱动几何，须先在本档实测行距再写入。",
       "landingBand": {

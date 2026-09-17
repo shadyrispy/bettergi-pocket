@@ -58,6 +58,18 @@ object VoteJudges {
      */
     val PURPLE_BANNER = RgbPredicate(110, 200, 50, 130, 150, 235, requireBG = 60)
 
+    /** **武器**面板锁图标色域（真机抓图：红/橙实心锁，**与圣遗物金色不同** ✗）。 */
+    val RED_LOCK = RgbPredicate(140, 255, 30, 140, 30, 140)
+
+    /** 武器面板锁判据：`GOLD ∪ RED_LOCK` 任一命中（阈值同 `PANEL_LOCK_GOLD`）。 */
+    fun weaponLock(frame: Mat, profile: ScreenProfile): Result {
+        val rect = profile.rect("panels.weapon_backpack.lock")
+        val gold = countMatches(frame, rect, GOLD)
+        val red = countMatches(frame, rect, RED_LOCK)
+        val best = maxOf(gold, red)
+        return Result(best >= Thresholds.PANEL_LOCK_GOLD, best)
+    }
+
     object Thresholds {
         const val CARD_LOCK_PINK = 60      // pink>60=已锁
         const val PANEL_LOCK_GOLD = 40     // gold>=40=已锁

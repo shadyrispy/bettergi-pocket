@@ -49,7 +49,18 @@ data class GoodWeapon(
     val rarity: Int,      // 1-5
     val refine: Int?,     // 精炼 1-5
     val lock: Boolean,
+    /**
+     * 装备者（GOOD `location`）。空串 = 未装备。
+     * 面板文案形如「珐露珊已装备」（`panels.weapon_backpack.equipped` 槽，2026-09-17 真机核对套准 ✓）。
+     */
     val location: String = "",
+    /**
+     * 突破阶 0-6（GOOD `ascension`）。
+     * ⚠️ **面板不显示突破阶** ⇒ 由等级推导（对齐 GT 口径，2026-09-17 用 Irminsul weapons 209 件反推验证）：
+     * `≤20→0 / ≤40→1 / ≤50→2 / ≤60→3 / ≤70→4 / ≤80→5 / else→6` ⇒ 命中 208/209
+     * （唯一例外：level=20 时 GT 有 asc=0 与 1 两种，面板无法区分）。
+     */
+    val ascension: Int = 0,
 )
 
 /**
@@ -130,6 +141,7 @@ object GoodExporter {
             warr.put(JSONObject().apply {
                 put("key", w.key ?: "")
                 put("level", w.level)
+                put("ascension", w.ascension)
                 put("rarity", w.rarity)
                 w.refine?.let { put("refinement", it) }
                 put("location", w.location)

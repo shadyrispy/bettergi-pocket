@@ -186,7 +186,8 @@ class ScriptRunner(
     fun startScan(
         flowName: String = "artifact_scan",
         maxPages: Int = Int.MAX_VALUE,
-        useGeometryAdvance: Boolean = true,
+        /** ⚠️ 2026-09-17 默认 false（几何起点致滚动截断）。 */
+        useGeometryAdvance: Boolean = false,
         // §12.2 默认关：待真机 err 序列标定后再开（adb --ez adaptiveDist true 可开）
         useAdaptiveDistance: Boolean = false,
         /** 外部任务计划（P4 规则层注入）：artifact_lock 的 targets / auto_equip 的 plan。 */

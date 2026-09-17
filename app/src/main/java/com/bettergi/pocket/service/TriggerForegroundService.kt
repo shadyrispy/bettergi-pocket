@@ -330,7 +330,10 @@ class TriggerForegroundService : Service() {
             ACTION_DEBUG_SCAN_FLOW -> {
                 val flow = intent.getStringExtra(EXTRA_FLOW) ?: "artifact_scan"
                 val maxPages = intent.getIntExtra(EXTRA_MAX_PAGES, Int.MAX_VALUE)
-                val geoAdvance = intent.getBooleanExtra(EXTRA_GEO_ADVANCE, true)
+                // ⚠️ 2026-09-17 默认改为 **false**：几何起点（x=638，两卡缝隙）实测让 BS 的滚动**被截断**
+            // （落地条带 L 仅 501~516px = **1.7 行**，而遍历 3 行 ⇒ 重叠 1.3 行 ⇒ 同件大量重复，
+            //  武器扫描"多 126"）；改用 profile 坐标（x=1614）后落地 **777~812px = 2.7 行** ✓ 稳定。
+            val geoAdvance = intent.getBooleanExtra(EXTRA_GEO_ADVANCE, false)
                 val adaptive = intent.getBooleanExtra(EXTRA_ADAPTIVE_DIST, true)
                 // §16.4 标定/调试用 plan 注入：EXTRA_PLAN 直接 JSON（adb shell 会吞双引号→失效），
                 // EXTRA_PLAN_B64 为 base64(JSON)（仅 [A-Za-z0-9+/=]，device sh 不吞，标定稳定通道）。
