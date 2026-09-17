@@ -104,6 +104,11 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+        <activity
+            android:name=".debug.BalProbeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance" />
         <receiver
             android:name=".debug.DebugControlReceiver"
             android:exported="true">

@@ -227,7 +227,17 @@ class TriggerForegroundService : Service() {
             }
             ACTION_DEBUG_SET_PROBE -> {
                 // 切换 :a11y Overlay 探针（桥模式：服务侧 toggle 调用即 :a11y 进程内执行）
-                InputAccessibilityService.toggleProbe(this)
+                // ★ 2026-09-18 扩展：`--ez bal true` ⇒ 走 BAL 探针（挂**可点击**的 a11y overlay +
+                //   立即/点击两条 startActivity 路径），用于核实「长按浮窗 → 启动 MainActivity」是否被拦。
+                //   `--ez mount false` ⇒ 对照组（不挂 overlay，只为对比 BAL 判定差异）。
+                val bal = intent.getBooleanExtra("bal", false)
+                if (bal) {
+                    val mount = intent.getBooleanExtra("mount", true)
+                    Log.i(TAG, "debug: BAL probe 触发 mount=$mount")
+                    InputAccessibilityService.probeBal(this, mount)
+                } else {
+                    InputAccessibilityService.toggleProbe(this)
+                }
             }
             ACTION_DEBUG_SET_VERBOSE -> {
                 // §13：识别日志 D 级开关（逐格/逐次明细，默认关闭以免一页 21 行刷屏）
