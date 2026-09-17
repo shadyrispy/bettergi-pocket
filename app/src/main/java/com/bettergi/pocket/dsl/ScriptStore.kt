@@ -1,6 +1,7 @@
 package com.bettergi.pocket.dsl
 
 import android.content.Context
+import android.content.Intent
 import org.json.JSONObject
 import java.io.File
 
@@ -18,6 +19,17 @@ object ScriptStore {
 
     const val ENABLED_FILE = "scripts/enabled.json"
     private const val FLOWS_DIR = "dsl/flows"
+
+    /**
+     * 清单变更广播（导入 / 开关 / 恢复内置）。
+     * 用**显式包名广播**而非进程内回调：悬浮窗宿主在 P4b 会迁到 `:a11y`（另一个进程），
+     * 同 UID 跨进程仍可送达；接收侧用 `RECEIVER_NOT_EXPORTED` 保持不对外暴露。
+     */
+    const val ACTION_SCRIPTS_CHANGED = "com.bettergi.pocket.action.SCRIPTS_CHANGED"
+
+    private fun notifyChanged(context: Context) {
+        runCatching { context.sendBroadcast(Intent(ACTION_SCRIPTS_CHANGED).setPackage(context.packageName)) }
+    }
 
     data class Entry(
         val key: String,
@@ -77,11 +89,8 @@ object ScriptStore {
         val map = readEnabled(context).toMutableMap()
         map[key] = enabled
         writeEnabled(context, map)
-        android.util.Log.i(
-            "BetterGI.Scripts",
-            "setEnabled key=$key enabled=$enabled → " + java.io.File(context.filesDir, ENABLED_FILE).absolutePath +
-                " exists=" + java.io.File(context.filesDir, ENABLED_FILE).exists(),
-        )
+        android.util.Log.i("BetterGI.Scripts", "setEnabled key=$key enabled=$enabled")
+        notifyChanged(context)
     }
 
     /** 导入：写入 override 目录；返回 (ok, message)。 */
@@ -96,13 +105,16 @@ object ScriptStore {
         if (!dir.exists() && !dir.mkdirs()) return false to "无法创建目录：${dir.path}"
         val target = File(dir, "$key.json")
         runCatching { target.writeText(text) }.getOrElse { return false to "写入失败：${it.message}" }
+        notifyChanged(context)
         return true to "已导入：$key.json"
     }
 
     /** 恢复内置：删除 override 副本。 */
     fun resetFlow(context: Context, key: String): Boolean {
         val f = File(context.filesDir, "${FlowSource.OVERRIDE_ROOT}/$FLOWS_DIR/$key.json")
-        return if (f.exists()) f.delete() else false
+        val deleted = if (f.exists()) f.delete() else false
+        if (deleted) notifyChanged(context)
+        return deleted
     }
 
     fun readEnabled(context: Context): Map<String, Boolean> {

@@ -3,14 +3,20 @@ package com.bettergi.pocket
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.widget.Button
+import android.widget.EditText
+import android.widget.RadioButton
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.bettergi.pocket.capture.CapturePermissionActivity
+import com.bettergi.pocket.input.SwipeMethod
+import com.bettergi.pocket.input.SwipeTestRunner
 import com.bettergi.pocket.service.TriggerForegroundService
 
 /**
@@ -32,6 +38,9 @@ class MainActivity : AppCompatActivity() {
 
         private const val PREFS = "pocket"
         private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
+
+        /** 滑动测试：退到后台到注入手势之间的等待（等系统把前台还给游戏）。 */
+        private const val SWIPE_TEST_BACK_DELAY_MS = 700L
     }
 
     private val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
@@ -179,6 +188,49 @@ class MainActivity : AppCompatActivity() {
         }
         findViewById<Button>(R.id.btn_back_overlay).setOnClickListener { launchOverlayAndExit() }
         renderScriptRows()
+        bindSwipeTest()
+    }
+
+    // ---- 滑动测试（2026-09-18 由悬浮窗迁入：用户需求③「滑动测试功能也移动到 MainActivity」）----
+
+    /**
+     * 绑定滑动测试卡片。参数落在 `swipe_test` SharedPreferences（与旧悬浮窗同源 ⇒ 旧值沿用）。
+     *
+     * ⚠️ 与悬浮窗版的差异：旧版靠「缩球」让手势落到游戏；管理器是**前台 Activity**，会吃掉手势 ⇒
+     * 点击后先把本 Activity 退到后台，再延迟注入滑动。
+     */
+    private fun bindSwipeTest() {
+        val startYEdit = findViewById<EditText>(R.id.swipe_start_y) ?: return
+        val distEdit = findViewById<EditText>(R.id.swipe_dist) ?: return
+        val three = findViewById<RadioButton>(R.id.swipe_method_three) ?: return
+        val chain = findViewById<RadioButton>(R.id.swipe_method_chain) ?: return
+
+        val saved = SwipeTestRunner.load(this)
+        startYEdit.setText(saved.startY.toString())
+        distEdit.setText(saved.dist.toString())
+        if (saved.method == SwipeMethod.THREE_SEGMENT) three.isChecked = true else chain.isChecked = true
+
+        findViewById<Button>(R.id.btn_swipe_start).setOnClickListener {
+            val startY = startYEdit.text.toString().toIntOrNull()
+            val dist = distEdit.text.toString().toIntOrNull()
+            if (startY == null || dist == null || dist <= 0) {
+                Toast.makeText(this, "参数无效：起点Y/距离须为正数", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            val method = if (three.isChecked) SwipeMethod.THREE_SEGMENT else SwipeMethod.WAYPOINT_CHAIN
+            SwipeTestRunner.save(this, startY, dist, method)
+            val params = SwipeTestRunner.Params(startY, dist, method)
+            Toast.makeText(
+                this,
+                "退到后台，700ms 后执行：${SwipeTestRunner.methodLabel(method)} ${SwipeTestRunner.describe(params)}",
+                Toast.LENGTH_SHORT,
+            ).show()
+            moveTaskToBack(true)
+            Handler(Looper.getMainLooper()).postDelayed(
+                { SwipeTestRunner.run(this, params) },
+                SWIPE_TEST_BACK_DELAY_MS,
+            )
+        }
     }
 
     private fun renderScriptRows() {

@@ -455,59 +455,18 @@
                     android:text="流程"
                     android:textColor="@color/overlay_text"
                     android:textSize="12sp" />
-
-                <!-- 流程三选（点选式）：选中项文字金色，未选中灰色。悬浮窗内不用系统 PopupMenu
-                     （overlay 类型窗口无 Activity token → BadTokenException 风险）→ 平铺点选。 -->
-                <LinearLayout
-                    android:id="@+id/overlay_scan_flow_group"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
-                    android:layout_weight="1"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        android:id="@+id/overlay_flow_artifact"
-                        android:contentDescription="选择流程：圣遗物扫描"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:background="@drawable/bg_overlay_row_selectable"
-                        android:gravity="center"
-                        android:minHeight="40dp"
-                        android:text="圣遗物"
-                        android:textColor="@color/overlay_gold"
-                        android:textSize="12sp" />
-
-                    <TextView
-                        android:id="@+id/overlay_flow_weapon"
-                        android:contentDescription="选择流程：武器扫描"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="4dp"
-                        android:layout_weight="1"
-                        android:background="@drawable/bg_overlay_row_selectable"
-                        android:gravity="center"
-                        android:minHeight="40dp"
-                        android:text="武器"
-                        android:textColor="@color/overlay_text"
-                        android:textSize="12sp" />
-
-                    <TextView
-                        android:id="@+id/overlay_flow_character"
-                        android:contentDescription="选择流程：角色扫描"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_marginStart="4dp"
-                        android:layout_weight="1"
-                        android:background="@drawable/bg_overlay_row_selectable"
-                        android:gravity="center"
-                        android:minHeight="40dp"
-                        android:text="角色"
-                        android:textColor="@color/overlay_text"
-                        android:textSize="12sp" />
-                </LinearLayout>
             </LinearLayout>
+
+            <!-- 流程按钮**由脚本驱动**（DSL flow 的 `ui` 段）——见 OverlayWindowController.renderFlowButtons()。
+                 悬浮窗内不用系统 PopupMenu（overlay 类型窗口无 Activity token → BadTokenException 风险）⇒ 平铺纵列。 -->
+            <LinearLayout
+                android:id="@+id/overlay_scan_flow_group"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingStart="10dp"
+                android:paddingTop="2dp"
+                android:paddingEnd="10dp" />
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -568,194 +527,8 @@
                 android:textColor="@color/overlay_text"
                 android:textSize="12sp" />
 
-            <TextView
-                android:id="@+id/overlay_scan_share"
-                android:contentDescription="分享 GOOD 文件"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="10dp"
-                android:layout_marginEnd="10dp"
-                android:layout_marginBottom="4dp"
-                android:background="@drawable/bg_overlay_row_selectable"
-                android:gravity="center"
-                android:minHeight="40dp"
-                android:text="分享 GOOD"
-                android:textColor="@color/overlay_text_muted"
-                android:textSize="11sp" />
         </LinearLayout>
 
-        <LinearLayout
-            android:id="@+id/overlay_row_swipe_test"
-            android:contentDescription="展开或收起滑动测试"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:background="@drawable/bg_overlay_row_selectable"
-            android:gravity="center_vertical"
-            android:minHeight="48dp"
-            android:orientation="horizontal"
-            android:paddingStart="10dp"
-            android:paddingTop="4dp"
-            android:paddingEnd="4dp"
-            android:paddingBottom="4dp">
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="滑动测试"
-                    android:textColor="@color/overlay_text"
-                    android:textSize="14sp" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="1dp"
-                    android:text="调翻页滑动参数（真机工具）"
-                    android:textColor="@color/overlay_text_muted"
-                    android:textSize="11sp" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/overlay_swipe_extras"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:visibility="gone">
-
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:layout_marginStart="10dp"
-                android:layout_marginEnd="10dp"
-                android:background="@color/overlay_row_divider" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:paddingStart="10dp"
-                android:paddingTop="4dp"
-                android:paddingEnd="10dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="方式"
-                    android:textColor="@color/overlay_text"
-                    android:textSize="12sp" />
-
-                <TextView
-                    android:id="@+id/overlay_swipe_method_three"
-                    android:contentDescription="三段式滑动"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_overlay_launch_selectable"
-                    android:gravity="center"
-                    android:minHeight="40dp"
-                    android:text="三段式"
-                    android:textColor="@color/overlay_gold"
-                    android:textSize="12sp" />
-
-                <TextView
-                    android:id="@+id/overlay_swipe_method_chain"
-                    android:contentDescription="路标链滑动"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_overlay_row_selectable"
-                    android:gravity="center"
-                    android:minHeight="40dp"
-                    android:text="路标链"
-                    android:textColor="@color/overlay_text_muted"
-                    android:textSize="12sp" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingStart="10dp"
-                android:paddingTop="4dp"
-                android:paddingEnd="10dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="起点Y"
-                    android:textColor="@color/overlay_text"
-                    android:textSize="12sp" />
-
-                <EditText
-                    android:id="@+id/overlay_swipe_start_y"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
-                    android:layout_weight="1"
-                    android:inputType="number"
-                    android:textColor="@color/overlay_text"
-                    android:textSize="12sp" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
-                    android:text="距离"
-                    android:textColor="@color/overlay_text"
-                    android:textSize="12sp" />
-
-                <EditText
-                    android:id="@+id/overlay_swipe_dist"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="10dp"
-                    android:layout_weight="1"
-                    android:inputType="number"
-                    android:textColor="@color/overlay_text"
-                    android:textSize="12sp" />
-            </LinearLayout>
-
-            <TextView
-                android:id="@+id/overlay_swipe_start"
-                android:contentDescription="开始滑动测试"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="10dp"
-                android:layout_marginTop="4dp"
-                android:layout_marginEnd="10dp"
-                android:layout_marginBottom="4dp"
-                android:background="@drawable/bg_overlay_launch_selectable"
-                android:gravity="center"
-                android:minHeight="44dp"
-                android:text="开始测试（缩球执行）"
-                android:textColor="@color/overlay_gold"
-                android:textSize="12sp" />
-
-            <TextView
-                android:id="@+id/overlay_swipe_probe"
-                android:contentDescription="切换无障碍悬浮窗探针"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="10dp"
-                android:layout_marginEnd="10dp"
-                android:layout_marginBottom="4dp"
-                android:background="@drawable/bg_overlay_row_selectable"
-                android:gravity="center"
-                android:minHeight="40dp"
-                android:text="A11y Overlay 探针（挂/卸）"
-                android:textColor="@color/overlay_text_muted"
-                android:textSize="11sp" />
-        </LinearLayout>
 
         <LinearLayout
             android:id="@+id/overlay_group_launch"
@@ -906,136 +679,43 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- §16.3 S4 脚本管理：订阅仓库 / 已订阅列表 / 手动更新 -->
+
+        <!-- 底部内置区（**不写进脚本、不可关、不占 order**；用户 2026-09-18 裁定④/§9.1）：
+             「开始导出」= 复用 GOOD 导出链（TriggerForegroundService → FileProvider 分享）；
+             「设置」= 长按进入脚本管理器（MainActivity，EXTRA_FROM_OVERLAY）。 -->
         <LinearLayout
-            android:id="@+id/overlay_row_scripts"
-            android:contentDescription="展开或收起脚本管理"
+            android:id="@+id/overlay_bottom_bar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
-            android:background="@drawable/bg_overlay_row_selectable"
-            android:gravity="center_vertical"
-            android:minHeight="48dp"
-            android:orientation="horizontal"
-            android:paddingStart="10dp"
-            android:paddingTop="4dp"
-            android:paddingEnd="4dp"
-            android:paddingBottom="4dp">
-
-            <ImageView
-                android:id="@+id/overlay_scripts_chevron"
-                android:layout_width="14dp"
-                android:layout_height="14dp"
-                android:importantForAccessibility="no"
-                android:src="@drawable/ic_overlay_chevron" />
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="脚本管理"
-                    android:textColor="@color/overlay_text"
-                    android:textSize="14sp" />
-
-                <TextView
-                    android:id="@+id/overlay_scripts_subtitle"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="1dp"
-                    android:text="订阅/更新脚本仓库"
-                    android:textColor="@color/overlay_text_muted"
-                    android:textSize="11sp" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/overlay_scripts_extras"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:visibility="gone">
-
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:layout_marginStart="10dp"
-                android:layout_marginEnd="10dp"
-                android:background="@color/overlay_row_divider" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal"
-                android:paddingStart="10dp"
-                android:paddingTop="4dp"
-                android:paddingEnd="10dp">
-
-                <EditText
-                    android:id="@+id/overlay_subs_url"
-                    android:contentDescription="脚本仓库地址"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:hint="owner/repo 或 完整 URL"
-                    android:inputType="textUri"
-                    android:textColor="@color/overlay_text"
-                    android:textSize="12sp" />
-
-                <TextView
-                    android:id="@+id/overlay_subscribe"
-                    android:contentDescription="订阅脚本仓库"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:background="@drawable/bg_overlay_launch_selectable"
-                    android:gravity="center"
-                    android:minHeight="40dp"
-                    android:minWidth="48dp"
-                    android:paddingStart="10dp"
-                    android:paddingEnd="10dp"
-                    android:text="订阅"
-                    android:textColor="@color/overlay_gold"
-                    android:textSize="12sp" />
-            </LinearLayout>
-
-            <View
-                android:layout_width="match_parent"
-                android:layout_height="1dp"
-                android:layout_marginStart="10dp"
-                android:layout_marginTop="4dp"
-                android:layout_marginEnd="10dp"
-                android:background="@color/overlay_row_divider" />
-
-            <LinearLayout
-                android:id="@+id/overlay_subs_list"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:paddingStart="10dp"
-                android:paddingEnd="10dp" />
+            android:orientation="horizontal">
 
             <TextView
-                android:id="@+id/overlay_update_all"
-                android:contentDescription="检查脚本更新"
-                android:layout_width="match_parent"
+                android:id="@+id/overlay_scan_export"
+                android:contentDescription="开始导出 GOOD 文件"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="10dp"
-                android:layout_marginTop="4dp"
-                android:layout_marginEnd="10dp"
-                android:layout_marginBottom="4dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_overlay_launch_selectable"
+                android:gravity="center"
+                android:minHeight="40dp"
+                android:text="开始导出"
+                android:textColor="@color/overlay_gold"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/overlay_settings"
+                android:contentDescription="脚本管理器（长按进入）"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:layout_weight="1"
                 android:background="@drawable/bg_overlay_row_selectable"
                 android:gravity="center"
                 android:minHeight="40dp"
-                android:text="检查更新"
+                android:text="设置"
                 android:textColor="@color/overlay_text"
-                android:textSize="11sp" />
+                android:textSize="12sp" />
         </LinearLayout>
 
         <LinearLayout

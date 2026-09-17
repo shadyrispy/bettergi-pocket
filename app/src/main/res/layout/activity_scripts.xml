@@ -38,6 +38,76 @@
             android:orientation="vertical" />
     </ScrollView>
 
+    <!-- 滑动测试（2026-09-18 由悬浮窗迁入，用户需求③）：真机调翻页滑动参数。
+         管理器在前台会吃掉注入的手势 ⇒ 点「开始测试」先退到后台把前台让回游戏，再注入（见 MainActivity）。 -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="滑动测试（调翻页参数）"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <RadioGroup
+        android:id="@+id/swipe_method_group"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal">
+
+        <RadioButton
+            android:id="@+id/swipe_method_three"
+            android:contentDescription="三段式滑动"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="三段式"
+            android:textSize="13sp" />
+
+        <RadioButton
+            android:id="@+id/swipe_method_chain"
+            android:contentDescription="路标链滑动"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="路标链"
+            android:textSize="13sp" />
+    </RadioGroup>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <EditText
+            android:id="@+id/swipe_start_y"
+            android:contentDescription="滑动起点 Y"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="起点Y"
+            android:inputType="number"
+            android:textSize="13sp" />
+
+        <EditText
+            android:id="@+id/swipe_dist"
+            android:contentDescription="滑动距离"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:hint="距离"
+            android:inputType="number"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/btn_swipe_start"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:text="开始测试" />
+    </LinearLayout>
+
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
