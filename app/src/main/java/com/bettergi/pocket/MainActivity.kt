@@ -43,7 +43,12 @@ class MainActivity : AppCompatActivity() {
         const val EXTRA_PICK_GOOD = "pick_good"
 
         private const val PREFS = "pocket"
-        private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
+
+        /** 引导是否走完（走完之前每次打开 App 都回到引导页）。 */
+        private const val KEY_ONBOARD_DONE = "onboarding_done"
+
+        /** ②「屏幕共享」是否已知晓（纯粹是让用户读完再往下走）。 */
+        private const val KEY_SHARE_ACK = "share_ack"
 
         /** 滑动测试：退到后台到注入手势之间的等待（等系统把前台还给游戏）。 */
         private const val SWIPE_TEST_BACK_DELAY_MS = 700L
@@ -98,16 +103,25 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handleIntent(intent)
-        val firstLaunch = !prefs.getBoolean(KEY_FIRST_LAUNCH_DONE, false)
-        // 需求（用户 2026-09-18）：MainActivity **首次启动 app 时出现**；之后经悬浮窗长按设置进入。
-        if (firstLaunch || pendingFromOverlay) {
-            prefs.edit().putBoolean(KEY_FIRST_LAUNCH_DONE, true).apply()
+        // 1) 从悬浮窗进来（长按日志按钮 / 脚本的「导入」动作）⇒ 一律进管理器
+        if (pendingFromOverlay) {
             pendingFromOverlay = false
             showScriptManager()
             return
         }
+        // 2) 引导没走完，或无障碍没开 ⇒ 回引导页。
+        //    ⚠️ 这一条修的是「打开 App 一闪就没了」：悬浮窗只活在无障碍服务里，
+        //    无障碍没开时点开本 App 什么都看不到，原先也没有任何指引。
+        if (needsOnboarding()) {
+            showOnboarding()
+            return
+        }
         continueLaunch()
     }
+
+    /** 需要引导的条件：**引导未完成 或 无障碍未开**（后者保证关掉无障碍后再开 App 还能找到路）。 */
+    private fun needsOnboarding(): Boolean =
+        !prefs.getBoolean(KEY_ONBOARD_DONE, false) || !InputAccessibilityService.isConnected()
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -135,6 +149,11 @@ class MainActivity : AppCompatActivity() {
         if (isFinishing) return
         // 管理器在前台 ⇒ 提醒显示在本页横幅（而不是再弹一份到悬浮窗）
         com.bettergi.pocket.notice.NoticeRouter.attachManager(noticeSink)
+        // 引导页：从系统设置返回时刷新（开了无障碍就该立刻打勾），不参与下面的中转分支
+        if (onboardingShown) {
+            renderOnboarding()
+            return
+        }
         // 管理器界面优先，不能被下面两个中转分支顶掉（曾实测被覆盖 ⇒ 首启仍显示别的界面 ✗）
         if (managerShown) return
         // ⚠️ 2026-09-18：这里原先还有一个「显示在上层」授权分支 —— 悬浮窗搬到无障碍进程后
@@ -256,6 +275,66 @@ class MainActivity : AppCompatActivity() {
             android.content.res.ColorStateList.valueOf(
                 ContextCompat.getColor(this, if (connected) R.color.pocket_ok else R.color.pocket_warn),
             )
+    }
+
+    // ---- 首次启动引导（只做竖屏：走到这里说明还没启动原神，设备是竖持的）----
+
+    private var onboardingShown = false
+
+    private fun showOnboarding() {
+        onboardingShown = true
+        setContentView(R.layout.activity_onboarding)
+
+        findViewById<TextView>(R.id.step1_action).setOnClickListener { openA11yIfNeeded() }
+        findViewById<TextView>(R.id.step2_action).setOnClickListener {
+            prefs.edit().putBoolean(KEY_SHARE_ACK, true).apply()
+            renderOnboarding()
+        }
+        findViewById<TextView>(R.id.onboarding_next).setOnClickListener {
+            if (!onboardingReady()) return@setOnClickListener
+            prefs.edit().putBoolean(KEY_ONBOARD_DONE, true).apply()
+            launchOverlayAndExit()
+        }
+        renderOnboarding()
+    }
+
+    /** ① 无障碍已开；② 屏幕共享已知晓。两条都满足才允许「完成」。 */
+    private fun onboardingReady(): Boolean =
+        InputAccessibilityService.isConnected() && prefs.getBoolean(KEY_SHARE_ACK, false)
+
+    private fun renderOnboarding() {
+        val a11y = InputAccessibilityService.isConnected()
+        val ack = prefs.getBoolean(KEY_SHARE_ACK, false)
+        val ok = ContextCompat.getColor(this, R.color.pocket_ok)
+        val muted = ContextCompat.getColor(this, R.color.pocket_text_muted)
+
+        findViewById<TextView>(R.id.step1_mark).apply {
+            text = if (a11y) "✓" else "○"
+            setTextColor(if (a11y) ok else muted)
+        }
+        findViewById<TextView>(R.id.step1_action).apply {
+            text = if (a11y) "已完成" else "去开启"
+            visibility = if (a11y) android.view.View.GONE else android.view.View.VISIBLE
+        }
+        findViewById<TextView>(R.id.step2_mark).apply {
+            text = if (ack) "✓" else "○"
+            setTextColor(if (ack) ok else muted)
+        }
+        findViewById<TextView>(R.id.step2_action).visibility =
+            if (ack) android.view.View.GONE else android.view.View.VISIBLE
+        findViewById<TextView>(R.id.step3_mark).apply {
+            text = if (onboardingReady()) "✓" else "○"
+            setTextColor(if (onboardingReady()) ok else muted)
+        }
+
+        val next = findViewById<TextView>(R.id.onboarding_next)
+        next.alpha = if (onboardingReady()) 1f else 0.4f
+        next.isEnabled = onboardingReady()
+        findViewById<TextView>(R.id.onboarding_hint).text = when {
+            onboardingReady() -> ""
+            !a11y -> "先在①里开启无障碍，再回到本页"
+            else -> "看完第 2 步并点「知道了」，就能进悬浮窗"
+        }
     }
 
     private fun openA11yIfNeeded() {
