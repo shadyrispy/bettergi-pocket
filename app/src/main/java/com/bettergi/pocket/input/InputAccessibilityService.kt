@@ -23,7 +23,6 @@ import android.view.accessibility.AccessibilityEvent
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
 import com.bettergi.pocket.genshin.GenshinPackages
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -206,7 +205,12 @@ class InputAccessibilityService : AccessibilityService() {
         fun ensureEnabled(context: Context, message: String = DEFAULT_PROMPT): Boolean {
             if (isConnected()) return true
             val prompt = if (isEnabledInSettings(context)) CRASHED_PROMPT else message
-            Toast.makeText(context, prompt, Toast.LENGTH_LONG).show()
+            // 提醒走唯一通路；无障碍未配好时什么都用不了，但也不该反复弹 ⇒ 用 onceKey 只提示一次
+            com.bettergi.pocket.notice.NoticeCenter.post(
+                com.bettergi.pocket.notice.NoticeCenter.Level.WARN,
+                prompt,
+                onceKey = "a11y_enable_hint",
+            )
             openSettings(context)
             return false
         }

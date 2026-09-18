@@ -26,6 +26,9 @@ object FlowValidator {
      */
     val ACTION_KINDS: Set<String> = setOf("run", "stop", "export", "import", "config", "open")
 
+    /** `notify` 原语的级别白名单（P4）。 */
+    val NOTICE_LEVELS: Set<String> = setOf("info", "warn", "error")
+
     /** 行内动作渲染上限；超出的部分由界面放进「更多」子行（面板只有 248dp 宽，放不下第 3 个）。 */
     const val MAX_ACTIONS = 2
 
@@ -158,6 +161,21 @@ object FlowValidator {
                 }
                 if (!step.has("do")) {
                     issues.add(Issue(i, "steps[$i].do", "missing primitive name 'do'"))
+                } else if (step.optString("do") == "notify") {
+                    // P4：notify 的 level 白名单（非法 ⇒ 报错，落到展示层会是 info）
+                    val level = step.optString("level", "info")
+                    if (level !in NOTICE_LEVELS) {
+                        issues.add(
+                            Issue(
+                                i,
+                                "steps[$i].level",
+                                "unknown notify level '$level'; allowed: " + NOTICE_LEVELS.joinToString("|"),
+                            ),
+                        )
+                    }
+                    if (step.optString("text", "").isBlank()) {
+                        issues.add(Issue(i, "steps[$i].text", "notify requires non-blank 'text'"))
+                    }
                 }
             }
         }

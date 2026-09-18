@@ -2,7 +2,6 @@ package com.bettergi.pocket.input
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.widget.Toast
 
 /**
  * 滑动测试（真机调翻页参数）——**2026-09-18 由悬浮窗迁入脚本管理器**（用户需求③）。
@@ -71,15 +70,13 @@ object SwipeTestRunner {
             params.startY - params.dist,
             method = params.method,
         )
-        Toast.makeText(
-            context,
-            if (ok) {
-                "滑动已执行（${methodLabel(params.method)}）${describe(params)}"
-            } else {
-                "滑动失败：无障碍未连接"
-            },
-            Toast.LENGTH_SHORT,
-        ).show()
+        if (ok) {
+            com.bettergi.pocket.notice.NoticeCenter.info(
+                "滑动已执行（${methodLabel(params.method)}）${describe(params)}",
+            )
+        } else {
+            com.bettergi.pocket.notice.NoticeCenter.error("滑动失败：无障碍未连接")
+        }
         return ok
     }
 }

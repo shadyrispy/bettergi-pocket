@@ -34,7 +34,6 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
@@ -228,7 +227,7 @@ class OverlayWindowController(
             putExtra(MainActivity.EXTRA_FROM_OVERLAY, true)
         }
         runCatching { context.startActivity(intent) }.onFailure {
-            Toast.makeText(context, "无法打开管理器：${it.message}", Toast.LENGTH_SHORT).show()
+            A11yOverlayRuntime.notice("error", "无法打开管理器：${it.message}")
         }
     }
 
@@ -324,6 +323,9 @@ class OverlayWindowController(
             }
         }
         chatBadge = root.findViewById(R.id.overlay_chat_badge)
+        noticeView = root.findViewById(R.id.overlay_notice)
+        noticeAccent = root.findViewById(R.id.overlay_notice_bar)
+        noticeLabel = root.findViewById(R.id.overlay_notice_text)
         switchEnabled = enabledSwitch
         switchAutoSkip = autoSkipSwitch
         switchQuickSkip = quickSkipSwitch
@@ -373,19 +375,9 @@ class OverlayWindowController(
         // 扫描进行中禁点 —— 避免导出半截数据（用户 2026-09-18 裁定④/§9.1）。
         root.findViewById<View>(R.id.overlay_scan_export).setOnClickListener {
             if (settingsRepository.get().scanEnabled) {
-                Toast.makeText(context, "扫描进行中，导出请等本轮结束", Toast.LENGTH_SHORT).show()
+                A11yOverlayRuntime.notice("warn", "扫描进行中，导出请等本轮结束")
             } else {
                 onShareGoodRequested()
-            }
-        }
-        // 「设置」（内置）：**长按**进入脚本管理器；单击给提示（用户 2026-09-18 需求②）。
-        root.findViewById<View>(R.id.overlay_settings).also { settings ->
-            settings.setOnClickListener {
-                Toast.makeText(context, "长按「设置」进入脚本管理器", Toast.LENGTH_SHORT).show()
-            }
-            settings.setOnLongClickListener {
-                openScriptManager()
-                true
             }
         }
 
@@ -422,6 +414,11 @@ class OverlayWindowController(
             }
         }
         logToggle.setOnClickListener { setLogWindowVisible(!logWindowVisible) }
+        // 长按日志按钮进脚本管理器（原「设置 · 长按」行已删除；教学只出现在首启引导页）
+        logToggle.setOnLongClickListener {
+            openScriptManager()
+            true
+        }
         rowAutoSkip?.setOnClickListener { setAutoSkipMenuExpanded(!autoSkipMenuExpanded) }
         rowLaunch?.setOnClickListener { setLaunchMenuExpanded(!launchMenuExpanded) }
         root.findViewById<View>(R.id.overlay_launch).setOnClickListener { launchGenshinFromButton() }
@@ -567,6 +564,37 @@ class OverlayWindowController(
     /** 日志窗是否可见（无障碍进程的运行时据此决定要不要拉取主进程的日志镜像）。 */
     fun isLogWindowVisible(): Boolean = logWindowVisible
 
+    // ---- 通用提醒条（NoticeCenter 的悬浮窗展位）----
+
+    private var noticeView: View? = null
+    private var noticeAccent: View? = null
+    private var noticeLabel: TextView? = null
+    private var noticeHide: Runnable? = null
+
+    /**
+     * 显示一条提醒。**同一时间最多 1 条**（新的顶掉旧的）—— 面板只有 248dp 宽，堆叠会挤掉脚本区。
+     * 收成球时面板整体 GONE，所以提醒自然不可见（信息不丢：已落识别日志）。
+     */
+    fun showNotice(level: String, text: String) {
+        val container = noticeView ?: return
+        val accent = noticeAccent ?: return
+        val label = noticeLabel ?: return
+        if (text.isBlank()) return
+        val (accentColor, bgColor, holdMs) = when (level.uppercase()) {
+            "ERROR" -> Triple(R.color.overlay_notice_bar_error, R.color.overlay_notice_bg_error, 12_000L)
+            "WARN" -> Triple(R.color.overlay_notice_bar_warn, R.color.overlay_notice_bg_warn, 6_000L)
+            else -> Triple(R.color.overlay_notice_bar_info, R.color.overlay_notice_bg_info, 3_000L)
+        }
+        accent.setBackgroundColor(context.getColor(accentColor))
+        container.setBackgroundColor(context.getColor(bgColor))
+        label.text = text
+        container.visibility = View.VISIBLE
+        noticeHide?.let { mainHandler.removeCallbacks(it) }
+        val hide = Runnable { noticeView?.visibility = View.GONE }
+        noticeHide = hide
+        mainHandler.postDelayed(hide, holdMs)
+    }
+
     /** 扫描进度副文本（主线程调用；P1-c 悬浮窗入口）。 */
     fun updateScanProgress(text: String) {
         scanProgress?.text = text
@@ -684,11 +712,11 @@ class OverlayWindowController(
         when (genshinLauncher.launch()) {
             is GenshinLaunchResult.Started -> setExpanded(false)
             GenshinLaunchResult.NotInstalled -> {
-                Toast.makeText(themedContext, "未安装原神", Toast.LENGTH_SHORT).show()
+                A11yOverlayRuntime.notice("warn", "未安装原神")
                 refreshLaunchHint()
             }
             is GenshinLaunchResult.Failed -> {
-                Toast.makeText(themedContext, "无法启动原神", Toast.LENGTH_SHORT).show()
+                A11yOverlayRuntime.notice("error", "无法启动原神")
             }
         }
     }

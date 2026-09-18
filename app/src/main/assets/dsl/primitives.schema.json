@@ -144,7 +144,8 @@
             "verify",
             "exit",
             "clicks",
-            "rosterFind"
+            "rosterFind",
+            "notify"
           ]
         },
         "fast": {

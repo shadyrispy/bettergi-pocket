@@ -146,6 +146,38 @@
                 android:src="@drawable/ic_overlay_close" />
         </LinearLayout>
 
+        <!-- 通用提醒条（NoticeCenter）：header 之下、常驻区之上；同一时间最多 1 条 -->
+        <LinearLayout
+            android:id="@+id/overlay_notice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_marginTop="6dp"
+            android:layout_marginEnd="8dp"
+            android:background="@drawable/bg_overlay_row"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <View
+                android:id="@+id/overlay_notice_bar"
+                android:layout_width="3dp"
+                android:layout_height="match_parent"
+                android:background="@color/overlay_notice_bar_info" />
+
+            <TextView
+                android:id="@+id/overlay_notice_text"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:paddingStart="9dp"
+                android:paddingTop="7dp"
+                android:paddingEnd="9dp"
+                android:paddingBottom="7dp"
+                android:textColor="@color/overlay_text"
+                android:textSize="12sp" />
+        </LinearLayout>
+
         <LinearLayout
             android:id="@+id/overlay_row_enabled"
             android:layout_width="match_parent"

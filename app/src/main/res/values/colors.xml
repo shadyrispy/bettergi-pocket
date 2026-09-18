@@ -23,6 +23,13 @@
     <color name="overlay_log_char">#FFFFA8C8</color>
     <!-- 应用级提醒（NoticeCenter，Tag=APP）：暖砂色，与五流程主色区分 -->
     <color name="overlay_log_app">#FFE6D3AE</color>
+    <!-- 提醒条三档（悬浮窗恒为深色底，故写死不随系统主题变的颜色） -->
+    <color name="overlay_notice_bar_info">#FFC9A36A</color>
+    <color name="overlay_notice_bar_warn">#FFE8A45A</color>
+    <color name="overlay_notice_bar_error">#FFE24B4A</color>
+    <color name="overlay_notice_bg_info">#1FC9A36A</color>
+    <color name="overlay_notice_bg_warn">#1FE8A45A</color>
+    <color name="overlay_notice_bg_error">#1FE24B4A</color>
     <color name="overlay_log_warn">#FFFF8A5C</color>
     <color name="overlay_bilibili">#FFFB7299</color>
 

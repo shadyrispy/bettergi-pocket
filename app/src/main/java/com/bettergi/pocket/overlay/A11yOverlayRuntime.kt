@@ -139,6 +139,13 @@ object A11yOverlayRuntime {
             val hidden = extras?.getBoolean(K_HIDDEN, false) == true
             putBoolean(K_OK, onMain { controller?.setScanClickThrough(enabled, hidden); true } ?: false)
         }
+        M_NOTICE -> {
+            val level = extras?.getString(K_LEVEL).orEmpty()
+            val text = extras?.getString(K_TEXT).orEmpty()
+            Bundle().apply {
+                putBoolean(K_OK, onMain { controller?.showNotice(level, text); true } ?: false)
+            }
+        }
         M_EVENT -> {
             val kind = extras?.getString(K_KIND).orEmpty()
             Bundle().apply {
@@ -170,6 +177,20 @@ object A11yOverlayRuntime {
             }
         }
         else -> Bundle()
+    }
+
+    /**
+     * **无障碍进程自产提醒**的统一出口。
+     *
+     * 为什么不能直接用 [com.bettergi.pocket.notice.NoticeCenter]：它在本进程是**另一个实例**，
+     * 既没有展位（悬浮窗展位在主进程的路由里），落下的日志也会被主进程的镜像整体覆盖。
+     * 所以这里：① 本地提醒条直接显示 ② 经**已有的 `log_append`** 把文本回流主进程落日志（单一源）。
+     */
+    fun notice(level: String, text: String) {
+        if (text.isBlank()) return
+        onMain { controller?.showNotice(level, text) }
+        val logLevel = if (level.equals("info", ignoreCase = true)) "I" else "W"
+        settings?.appendLog(RecognitionLog.Tag.APP.name, logLevel, text)
     }
 
     // ---- 内部 ----
@@ -221,6 +242,7 @@ object A11yOverlayRuntime {
     const val M_PT_RESTORE = "overlay_pt_restore"
     const val M_CLICK_THROUGH = "overlay_click_through"
     const val M_EVENT = "overlay_event"
+    const val M_NOTICE = "notice_push"
 
     const val K_OK = "ok"
     const val K_TEXT = "text"
@@ -230,6 +252,7 @@ object A11yOverlayRuntime {
     const val K_HIDDEN = "hidden"
     const val K_KIND = "kind"
     const val K_COUNT = "count"
+    const val K_LEVEL = "level"
 
     const val EVENT_TALK = "talk"
     const val EVENT_CHAT_ICONS = "chat_icons"

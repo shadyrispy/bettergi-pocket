@@ -8,7 +8,8 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.TextView
-import android.widget.Toast
+import com.bettergi.pocket.notice.NoticeCenter
+import com.bettergi.pocket.notice.NoticeRouter
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
@@ -52,13 +53,13 @@ class MainActivity : AppCompatActivity() {
             contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
         }.getOrNull()
         if (text.isNullOrBlank()) {
-            Toast.makeText(this, "读取失败", Toast.LENGTH_SHORT).show()
+            NoticeCenter.error("读取失败")
             return@registerForActivityResult
         }
         val key = runCatching { org.json.JSONObject(text).optString("flow", "") }.getOrDefault("")
             .ifBlank { uri.lastPathSegment?.substringAfterLast('/')?.removeSuffix(".json") ?: "imported" }
         val (ok, msg) = com.bettergi.pocket.dsl.ScriptStore.importFlow(this, key, text)
-        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+        NoticeCenter.post(if (ok) NoticeCenter.Level.INFO else NoticeCenter.Level.ERROR, msg)
         if (ok) renderScriptRows()
     }
 
@@ -106,6 +107,8 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (isFinishing) return
+        // 管理器在前台 ⇒ 提醒显示在本页横幅（而不是再弹一份到悬浮窗）
+        com.bettergi.pocket.notice.NoticeRouter.attachManager(noticeSink)
         // 管理器界面优先，不能被下面两个中转分支顶掉（曾实测被覆盖 ⇒ 首启仍显示别的界面 ✗）
         if (managerShown) return
         // ⚠️ 2026-09-18：这里原先还有一个「显示在上层」授权分支 —— 悬浮窗搬到无障碍进程后
@@ -135,7 +138,7 @@ class MainActivity : AppCompatActivity() {
     private fun shareGood(fileName: String) {
         val file = java.io.File(filesDir, fileName)
         if (!file.exists()) {
-            Toast.makeText(this, "GOOD 文件不存在：$fileName", Toast.LENGTH_SHORT).show()
+            NoticeCenter.error("GOOD 文件不存在：$fileName")
             launchOverlayAndExit()
             return
         }
@@ -156,12 +159,36 @@ class MainActivity : AppCompatActivity() {
 
     // ---- P3 脚本管理器：列表 + 开关（本地导入，不联网）----
 
+    // ---- 提醒横幅（NoticeCenter 的管理器展位）----
+
+    private val noticeSink = object : com.bettergi.pocket.notice.NoticeCenter.Sink {
+        override fun show(notice: com.bettergi.pocket.notice.NoticeCenter.Notice) {
+            val banner = findViewById<TextView>(R.id.notice_banner) ?: return
+            val (bg, fg) = when (notice.level) {
+                com.bettergi.pocket.notice.NoticeCenter.Level.ERROR ->
+                    R.color.pocket_danger to R.color.pocket_text
+                com.bettergi.pocket.notice.NoticeCenter.Level.WARN ->
+                    R.color.pocket_warn to R.color.pocket_text
+                else ->
+                    R.color.pocket_accent to R.color.pocket_text
+            }
+            banner.text = notice.text
+            banner.setBackgroundColor(androidx.core.content.ContextCompat.getColor(this@MainActivity, bg))
+            banner.setTextColor(androidx.core.content.ContextCompat.getColor(this@MainActivity, fg))
+            banner.visibility = android.view.View.VISIBLE
+            banner.removeCallbacks(hideNotice)
+            banner.postDelayed(hideNotice, if (notice.level == com.bettergi.pocket.notice.NoticeCenter.Level.INFO) 3_000L else 6_000L)
+        }
+    }
+
+    private val hideNotice = Runnable { findViewById<TextView>(R.id.notice_banner)?.visibility = android.view.View.GONE }
+
     private fun showScriptManager() {
         managerShown = true
         setContentView(R.layout.activity_scripts)
         findViewById<Button>(R.id.btn_import).setOnClickListener {
             runCatching { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }
-                .onFailure { Toast.makeText(this, "无文件选择器：${it.message}", Toast.LENGTH_LONG).show() }
+                .onFailure { NoticeCenter.error("无文件选择器：${it.message}") }
         }
         findViewById<Button>(R.id.btn_back_overlay).setOnClickListener { launchOverlayAndExit() }
         renderScriptRows()
@@ -191,17 +218,15 @@ class MainActivity : AppCompatActivity() {
             val startY = startYEdit.text.toString().toIntOrNull()
             val dist = distEdit.text.toString().toIntOrNull()
             if (startY == null || dist == null || dist <= 0) {
-                Toast.makeText(this, "参数无效：起点Y/距离须为正数", Toast.LENGTH_SHORT).show()
+                NoticeCenter.warn("参数无效：起点Y/距离须为正数")
                 return@setOnClickListener
             }
             val method = if (three.isChecked) SwipeMethod.THREE_SEGMENT else SwipeMethod.WAYPOINT_CHAIN
             SwipeTestRunner.save(this, startY, dist, method)
             val params = SwipeTestRunner.Params(startY, dist, method)
-            Toast.makeText(
-                this,
+            NoticeCenter.info(
                 "退到后台，700ms 后执行：${SwipeTestRunner.methodLabel(method)} ${SwipeTestRunner.describe(params)}",
-                Toast.LENGTH_SHORT,
-            ).show()
+            )
             moveTaskToBack(true)
             Handler(Looper.getMainLooper()).postDelayed(
                 { SwipeTestRunner.run(this, params) },
@@ -257,7 +282,7 @@ class MainActivity : AppCompatActivity() {
                 row.isLongClickable = true
                 row.setOnLongClickListener {
                     val ok = com.bettergi.pocket.dsl.ScriptStore.resetFlow(this, e.key)
-                    Toast.makeText(this, if (ok) "已恢复内置：${e.key}" else "无导入副本", Toast.LENGTH_SHORT).show()
+                    if (ok) NoticeCenter.info("已恢复内置：${e.key}") else NoticeCenter.warn("无导入副本")
                     renderScriptRows()
                     true
                 }
@@ -280,6 +305,11 @@ class MainActivity : AppCompatActivity() {
      * 悬浮窗现由无障碍服务承载（零权限）⇒ 这里不再做任何「显示在上层」检查；
      * 无障碍未开时由服务侧提示一次（`InputAccessibilityService.promptIfDisconnected`）。
      */
+    override fun onPause() {
+        super.onPause()
+        com.bettergi.pocket.notice.NoticeRouter.detachManager(noticeSink)
+    }
+
     private fun launchOverlayAndExit() {
         if (isFinishing) return
         val intent = Intent(this, TriggerForegroundService::class.java).apply {

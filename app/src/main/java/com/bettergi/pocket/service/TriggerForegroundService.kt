@@ -16,7 +16,6 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
-import android.widget.Toast
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
@@ -104,11 +103,7 @@ class TriggerForegroundService : Service() {
         captureController = ScreenCaptureController(applicationContext) {
             if (settingsRepository.get().screenShareEnabled) {
                 settingsRepository.setScreenShareEnabled(false)
-                Toast.makeText(
-                    applicationContext,
-                    "屏幕共享已停止，可能被其他录制应用占用",
-                    Toast.LENGTH_SHORT,
-                ).show()
+                NoticeCenter.warn("屏幕共享已停止，可能被其他录制应用占用")
             }
         }
         genshinLauncher = GenshinLauncher(applicationContext)
@@ -462,6 +457,18 @@ class TriggerForegroundService : Service() {
             }
         }
 
+        override fun onNotice(level: String, text: String) {
+            // 脚本推的重点信息 → 全应用唯一提醒通路
+            NoticeCenter.post(
+                when (level.lowercase()) {
+                    "error" -> NoticeCenter.Level.ERROR
+                    "warn" -> NoticeCenter.Level.WARN
+                    else -> NoticeCenter.Level.INFO
+                },
+                text,
+            )
+        }
+
         override fun onFinished(reason: String) {
             mainHandler.post {
                 val doneText = if (reason.startsWith("error")) "失败：$reason" else "已结束（$reason）"
@@ -487,7 +494,7 @@ class TriggerForegroundService : Service() {
     private fun shareGood() {
         val file = lastGoodFile
         if (file == null) {
-            Toast.makeText(this, "还没有 GOOD 导出，先完成一次扫描", Toast.LENGTH_SHORT).show()
+            NoticeCenter.warn("还没有 GOOD 导出，先完成一次扫描")
             return
         }
         val intent = Intent(this, MainActivity::class.java)
