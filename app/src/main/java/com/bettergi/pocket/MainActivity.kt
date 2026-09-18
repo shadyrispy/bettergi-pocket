@@ -8,12 +8,16 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.RadioButton
 import android.widget.TextView
+import com.bettergi.pocket.dsl.ScriptIcons
+import com.bettergi.pocket.dsl.ScriptStore
+import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.notice.NoticeCenter
 import com.bettergi.pocket.notice.NoticeRouter
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.bettergi.pocket.capture.CapturePermissionActivity
+import com.bettergi.pocket.scan.GoodRepository
 import com.bettergi.pocket.input.SwipeMethod
 import com.bettergi.pocket.input.SwipeTestRunner
 import com.bettergi.pocket.service.TriggerForegroundService
@@ -63,7 +67,7 @@ class MainActivity : AppCompatActivity() {
             .ifBlank { uri.lastPathSegment?.substringAfterLast('/')?.removeSuffix(".json") ?: "imported" }
         val (ok, msg) = com.bettergi.pocket.dsl.ScriptStore.importFlow(this, key, text)
         NoticeCenter.post(if (ok) NoticeCenter.Level.INFO else NoticeCenter.Level.ERROR, msg)
-        if (ok) renderScriptRows()
+        if (ok) renderAll()
     }
 
     /** 输入文件（GOOD / 配装计划）选择器——SAF 只能由 Activity 发起，所以悬浮窗只能"拉起本页再选"。 */
@@ -208,13 +212,17 @@ class MainActivity : AppCompatActivity() {
     private fun showScriptManager() {
         managerShown = true
         setContentView(R.layout.activity_scripts)
-        findViewById<Button>(R.id.btn_import).setOnClickListener {
+        findViewById<TextView>(R.id.btn_import).setOnClickListener {
             runCatching { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }
                 .onFailure { NoticeCenter.error("无文件选择器：${it.message}") }
         }
-        findViewById<Button>(R.id.btn_back_overlay).setOnClickListener { launchOverlayAndExit() }
-        renderScriptRows()
+        findViewById<TextView>(R.id.btn_back_overlay).setOnClickListener { launchOverlayAndExit() }
+        findViewById<android.view.View>(R.id.status_card).setOnClickListener { openA11yIfNeeded() }
+        bindCalibrateRow()
+        bindGoodSection()
+        bindSwipeRow()
         bindSwipeTest()
+        renderAll()
         // 悬浮窗点了某个脚本的「导入」动作 ⇒ 进管理器后立刻开选择器
         if (pendingPickGood) {
             pendingPickGood = false
@@ -222,10 +230,180 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ---- 渲染（全部由脚本清单驱动；界面不写死"哪条脚本有什么"）----
+
+    private fun renderAll() {
+        renderStatus()
+        val all = ScriptStore.list(this)
+        val main = all.filter { it.hasUi }
+        val calibrate = all.filter { !it.hasUi }
+        renderScriptRows(main, findViewById(R.id.scripts_list))
+        renderScriptRows(calibrate, findViewById(R.id.calibrate_list))
+        findViewById<TextView>(R.id.scripts_count).text =
+            "共 ${main.size} · 启用 ${main.count { it.enabled }}"
+        findViewById<TextView>(R.id.calibrate_subtitle).text = "${calibrate.size} 条 · 开发用"
+        renderGoodSection()
+    }
+
+    /** 状态卡：无障碍是否就绪（未就绪时给出「去开启」）。 */
+    private fun renderStatus() {
+        val connected = InputAccessibilityService.isConnected()
+        findViewById<TextView>(R.id.status_text).text =
+            if (connected) "无障碍已开启" else "无障碍未开启"
+        findViewById<TextView>(R.id.status_action).visibility =
+            if (connected) android.view.View.GONE else android.view.View.VISIBLE
+        findViewById<android.view.View>(R.id.status_dot).backgroundTintList =
+            android.content.res.ColorStateList.valueOf(
+                ContextCompat.getColor(this, if (connected) R.color.pocket_ok else R.color.pocket_warn),
+            )
+    }
+
+    private fun openA11yIfNeeded() {
+        if (InputAccessibilityService.isConnected()) return
+        InputAccessibilityService.ensureEnabled(this)
+    }
+
+    private fun bindCalibrateRow() {
+        val list = findViewById<android.widget.LinearLayout>(R.id.calibrate_list)
+        val chevron = findViewById<TextView>(R.id.calibrate_chevron)
+        findViewById<android.view.View>(R.id.calibrate_row).setOnClickListener {
+            val show = list.visibility != android.view.View.VISIBLE
+            list.visibility = if (show) android.view.View.VISIBLE else android.view.View.GONE
+            chevron.text = if (show) "▴" else "▾"
+        }
+    }
+
+    private fun bindSwipeRow() {
+        val card = findViewById<android.view.View>(R.id.swipe_card)
+        val chevron = findViewById<TextView>(R.id.swipe_chevron)
+        findViewById<android.view.View>(R.id.swipe_row).setOnClickListener {
+            val show = card.visibility != android.view.View.VISIBLE
+            card.visibility = if (show) android.view.View.VISIBLE else android.view.View.GONE
+            chevron.text = if (show) "▴" else "▾"
+        }
+    }
+
+    /**
+     * 脚本行：`[图标] 名称 / 动作摘要 · 来源` + 开关。长按「已导入」的行恢复内置。
+     * 图标与动作摘要都来自脚本自己的声明（`ui.icon` / `ui.actions`）。
+     */
+    private fun renderScriptRows(entries: List<ScriptStore.Entry>, container: android.widget.LinearLayout?) {
+        container ?: return
+        container.removeAllViews()
+        for (e in entries) container.addView(scriptRow(e))
+    }
+
+    private fun scriptRow(e: ScriptStore.Entry): android.view.View {
+        val row = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            minimumHeight = dp(56)
+            setPadding(dp(14), dp(10), dp(10), dp(10))
+            background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_pocket_card_outline)
+            layoutParams = android.widget.LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) }
+        }
+        row.addView(android.widget.ImageView(this).apply {
+            setImageResource(ScriptIcons.script(e.icon))
+            imageTintList = android.content.res.ColorStateList.valueOf(
+                ContextCompat.getColor(this@MainActivity, R.color.pocket_text),
+            )
+            layoutParams = android.widget.LinearLayout.LayoutParams(dp(20), dp(20)).apply { marginEnd = dp(12) }
+        })
+        row.addView(android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            layoutParams = android.widget.LinearLayout.LayoutParams(0, -2, 1f)
+            addView(TextView(this@MainActivity).apply {
+                text = e.label
+                textSize = 16f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.pocket_text))
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = subtitleOf(e)
+                textSize = 12f
+                maxLines = 2
+                setTextColor(
+                    ContextCompat.getColor(
+                        this@MainActivity,
+                        if (e.issues.isEmpty()) R.color.pocket_text_muted else R.color.pocket_warn,
+                    ),
+                )
+            })
+        })
+        row.addView(android.widget.Switch(this).apply {
+            isChecked = e.enabled
+            setOnCheckedChangeListener { _, checked ->
+                ScriptStore.setEnabled(this@MainActivity, e.key, checked)
+                renderAll()
+            }
+        })
+        if (e.imported) {
+            row.isLongClickable = true
+            row.setOnLongClickListener {
+                val ok = ScriptStore.resetFlow(this, e.key)
+                if (ok) NoticeCenter.info("已恢复内置：${e.label}") else NoticeCenter.warn("无导入副本")
+                renderAll()
+                true
+            }
+        }
+        return row
+    }
+
+    /** 副标题 = 该脚本声明的动作 + 来源 + 校验问题（问题必须显示出来，不能静默丢）。 */
+    private fun subtitleOf(e: ScriptStore.Entry): String {
+        val parts = ArrayList<String>()
+        parts.addAll(e.actions.map { it.label })
+        parts.add(if (e.imported) "已导入" else "内置")
+        if (e.issues.isNotEmpty()) parts.add("⚠ " + e.issues.joinToString("; ").take(70))
+        return parts.joinToString(" · ")
+    }
+
+    // ---- GOOD 数据区：扫描结果的导出 + 执行输入的导入 ----
+
+    private fun bindGoodSection() {
+        findViewById<android.widget.ImageView>(R.id.btn_good_export).setOnClickListener { shareLastGood() }
+        findViewById<android.widget.ImageView>(R.id.btn_good_pick).setOnClickListener { launchGoodPicker() }
+        findViewById<android.widget.ImageView>(R.id.btn_good_clear).setOnClickListener {
+            GoodRepository.clear(this)
+            NoticeCenter.info("已清除输入文件")
+            renderGoodSection()
+        }
+    }
+
+    private fun renderGoodSection() {
+        val state = GoodRepository.state(this)
+        findViewById<TextView>(R.id.good_input_name).text = state?.sourceName ?: "未选择"
+        findViewById<android.widget.ImageView>(R.id.btn_good_clear).visibility =
+            if (state != null) android.view.View.VISIBLE else android.view.View.GONE
+
+        val export = GoodRepository.lastExport(this)
+        findViewById<TextView>(R.id.good_export_name).text = export ?: "还没有导出"
+
+        // 可用性逐条列出：需要输入的脚本能不能被这份文件驱动
+        val parts = ArrayList<String>()
+        for (e in ScriptStore.list(this)) {
+            if (!GoodRepository.needsInput(this, e.key)) continue
+            val ok = GoodRepository.planFor(this, e.key) != null
+            parts.add("${e.label} " + if (ok) "✓" else "✗")
+        }
+        val caps = findViewById<TextView>(R.id.good_caps)
+        caps.visibility = if (parts.isEmpty()) android.view.View.GONE else android.view.View.VISIBLE
+        caps.text = if (parts.isEmpty()) "" else "可驱动：" + parts.joinToString(" · ")
+    }
+
+    /** 导出最近一次扫描结果：交给前台服务走既有导出链（它才知道文件名）。 */
+    private fun shareLastGood() {
+        val intent = Intent(this, TriggerForegroundService::class.java).apply {
+            action = TriggerForegroundService.ACTION_SHARE_GOOD
+        }
+        ContextCompat.startForegroundService(this, intent)
+    }
+
     private fun launchGoodPicker() {
         runCatching { goodImportLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }
             .onFailure { NoticeCenter.error("无文件选择器：${it.message}") }
     }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     // ---- 滑动测试（2026-09-18 由悬浮窗迁入：用户需求③「滑动测试功能也移动到 MainActivity」）----
 
@@ -265,71 +443,6 @@ class MainActivity : AppCompatActivity() {
                 SWIPE_TEST_BACK_DELAY_MS,
             )
         }
-    }
-
-    private fun renderScriptRows() {
-        val container = findViewById<android.widget.LinearLayout>(R.id.scripts_list) ?: return
-        container.removeAllViews()
-        val entries = com.bettergi.pocket.dsl.ScriptStore.list(this)
-        if (entries.isEmpty()) {
-            container.addView(TextView(this).apply { text = "（无脚本）" })
-            return
-        }
-        for (e in entries) {
-            val row = android.widget.LinearLayout(this).apply {
-                orientation = android.widget.LinearLayout.HORIZONTAL
-                setPadding(0, 18, 0, 18)
-                gravity = android.view.Gravity.CENTER_VERTICAL
-            }
-            row.addView(TextView(this).apply {
-                text = iconGlyph(e.icon)
-                textSize = 20f
-                width = 64
-            })
-            row.addView(android.widget.LinearLayout(this).apply {
-                orientation = android.widget.LinearLayout.VERTICAL
-                layoutParams = android.widget.LinearLayout.LayoutParams(0, -2, 1f)
-                addView(TextView(this@MainActivity).apply {
-                    text = e.label
-                    textSize = 17f
-                })
-                val note = buildString {
-                    append(e.key)
-                    if (e.imported) append("　· 已导入（长按恢复内置）")
-                    if (e.issues.isNotEmpty()) append("　· ⚠ ").append(e.issues.joinToString("; ").take(80))
-                }
-                addView(TextView(this@MainActivity).apply {
-                    text = note
-                    textSize = 11f
-                    alpha = 0.7f
-                })
-            })
-            row.addView(android.widget.Switch(this).apply {
-                isChecked = e.enabled
-                setOnCheckedChangeListener { _, checked ->
-                    com.bettergi.pocket.dsl.ScriptStore.setEnabled(this@MainActivity, e.key, checked)
-                }
-            })
-            if (e.imported) {
-                row.isLongClickable = true
-                row.setOnLongClickListener {
-                    val ok = com.bettergi.pocket.dsl.ScriptStore.resetFlow(this, e.key)
-                    if (ok) NoticeCenter.info("已恢复内置：${e.key}") else NoticeCenter.warn("无导入副本")
-                    renderScriptRows()
-                    true
-                }
-            }
-            container.addView(row)
-        }
-    }
-
-    private fun iconGlyph(icon: String): String = when (icon) {
-        "artifact" -> "遗"
-        "weapon" -> "武"
-        "character" -> "角"
-        "lock" -> "锁"
-        "equip" -> "装"
-        else -> "⚙"
     }
 
     /**

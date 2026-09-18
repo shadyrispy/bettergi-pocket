@@ -43,6 +43,7 @@ import com.bettergi.pocket.MainActivity
 import com.bettergi.pocket.R
 import com.bettergi.pocket.bilibili.BilibiliSpaceOpener
 import com.bettergi.pocket.dsl.FlowValidator
+import com.bettergi.pocket.dsl.ScriptIcons
 import com.bettergi.pocket.dsl.ScriptStore
 import com.bettergi.pocket.feature.autopick.AutoPickFeature
 import com.bettergi.pocket.feature.autoskip.AutoSkipEvents
@@ -234,7 +235,7 @@ class OverlayWindowController(
             }
             row.addView(
                 ImageView(themedContext).apply {
-                    setImageResource(scriptIconRes(e.icon))
+                    setImageResource(ScriptIcons.script(e.icon))
                     setColorFilter(context.getColor(R.color.overlay_text))
                     layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(8) }
                 },
@@ -269,8 +270,8 @@ class OverlayWindowController(
     /** 行内一个动作（图标按钮，视觉 32dp / 触控撑满 48dp 行高）。 */
     private fun actionView(a: FlowValidator.OverlayAction, flowKey: String): ImageView =
         ImageView(themedContext).apply {
-            setImageResource(actionIconRes(a.kind))
-            setColorFilter(context.getColor(actionTintRes(a.kind)))
+            setImageResource(ScriptIcons.action(a.kind))
+            setColorFilter(context.getColor(ScriptIcons.actionTint(a.kind)))
             contentDescription = a.label // 无障碍名 + 长按提示（按钮本身只画图标）
             scaleType = ImageView.ScaleType.CENTER
             layoutParams = LinearLayout.LayoutParams(dp(40), LinearLayout.LayoutParams.MATCH_PARENT)
@@ -323,31 +324,6 @@ class OverlayWindowController(
             "open" -> openScriptManager()
             else -> Log.w(TAG_OVERLAY, "unknown action kind '$kind'")
         }
-    }
-
-    private fun scriptIconRes(icon: String): Int = when (icon) {
-        "artifact" -> R.drawable.ic_script_artifact
-        "weapon" -> R.drawable.ic_script_weapon
-        "character" -> R.drawable.ic_script_character
-        "lock" -> R.drawable.ic_script_lock
-        "equip" -> R.drawable.ic_script_equip
-        else -> R.drawable.ic_script_gear
-    }
-
-    private fun actionIconRes(kind: String): Int = when (kind) {
-        "stop" -> R.drawable.ic_action_stop
-        "export" -> R.drawable.ic_action_export
-        "import" -> R.drawable.ic_action_import
-        "config" -> R.drawable.ic_action_config
-        "open" -> R.drawable.ic_action_open
-        else -> R.drawable.ic_action_run
-    }
-
-    /** 「破坏性」动作用红/琥珀，其余用金色或常态色。 */
-    private fun actionTintRes(kind: String): Int = when (kind) {
-        "stop" -> R.color.overlay_notice_bar_error
-        "export", "run" -> R.color.overlay_gold
-        else -> R.color.overlay_text
     }
 
     /**

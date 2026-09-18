@@ -452,7 +452,10 @@ class TriggerForegroundService : Service() {
                 // :a11y 探针挂载时同步进度（跨进程状态桥，P2 机制验证）
                 InputAccessibilityService.pushScanProgress(text)
                 updateForegroundNotification(text)
-                (vars["file"] as? String)?.let { lastGoodFile = it }
+                (vars["file"] as? String)?.let {
+                    lastGoodFile = it
+                    GoodRepository.setLastExport(applicationContext, it)
+                }
                 Log.i("BetterGI.Scan", "progress[$stage]: $vars")
             }
         }

@@ -25,6 +25,7 @@ object GoodRepository {
     private const val PREFS = "good_import"
     private const val KEY_SOURCE = "source_name"
     private const val KEY_AT = "imported_at"
+    private const val KEY_LAST_EXPORT = "last_export"
 
     /** 当前输入的状态（管理器/悬浮窗用来显示"已选：xxx"）。 */
     data class State(val sourceName: String, val importedAt: Long, val bytes: Long)
@@ -70,6 +71,16 @@ object GoodRepository {
             return false to "读取失败（${it.javaClass.simpleName}）：请把文件放到 Android/data/<包名>/files/ 下"
         }
         return save(context, src.name, text)
+    }
+
+    /** 最近一次扫描导出的文件名（由前台服务在收到 `vars["file"]` 时写入）。 */
+    fun lastExport(context: Context): String? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_LAST_EXPORT, null)
+
+    fun setLastExport(context: Context, name: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(KEY_LAST_EXPORT, name)
+            .apply()
     }
 
     fun clear(context: Context): Boolean {

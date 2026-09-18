@@ -1,145 +1,440 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  脚本管理器（P3，2026-09-18）：本地导入 JSON + 启用开关。
-  入口：首次启动 app 自动出现；之后由悬浮窗「设置」长按进入（P4）。
+  脚本管理器（2026-09-18 重写）。
+  设计原则：**动作贴近它作用的对象** —— 脚本列表的动作（导入脚本）在脚本区；GOOD 数据的动作
+  （导出/选择）在 GOOD 数据区；只有作用于整个应用的动作（回到悬浮窗）才放页面底部。
+  颜色全部走 `pocket_*` token（浅色在 values、深色在 values-night，跟随系统深浅色）。
+  入口：首次启动自动出现；之后**长按悬浮窗的日志按钮**进入。
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="?android:attr/colorBackground"
+    android:background="@color/pocket_bg"
     android:orientation="vertical"
-    android:padding="20dp">
+    android:paddingStart="16dp"
+    android:paddingTop="16dp"
+    android:paddingEnd="16dp"
+    android:paddingBottom="12dp">
 
     <TextView
         android:id="@+id/scripts_title"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="脚本管理"
-        android:textSize="22sp"
-        android:textStyle="bold" />
+        android:textColor="@color/pocket_text"
+        android:textSize="24sp" />
 
-    <TextView
-        android:id="@+id/scripts_hint"
+    <LinearLayout
+        android:id="@+id/status_card"
+        android:contentDescription="无障碍与悬浮窗状态，点击去开启无障碍"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:textSize="12sp"
-        android:text="导入本地 JSON 脚本（写入应用私有目录，不联网）；开关控制是否在悬浮窗显示。长按某行可恢复内置。" />
+        android:layout_marginTop="16dp"
+        android:background="@drawable/bg_pocket_card_outline"
+        android:gravity="center_vertical"
+        android:minHeight="52dp"
+        android:orientation="horizontal"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp">
+
+        <View
+            android:id="@+id/status_dot"
+            android:layout_width="8dp"
+            android:layout_height="8dp"
+            android:background="@drawable/bg_overlay_status_dot" />
+
+        <TextView
+            android:id="@+id/status_text"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="10dp"
+            android:layout_weight="1"
+            android:textColor="@color/pocket_text"
+            android:textSize="14sp" />
+
+        <TextView
+            android:id="@+id/status_action"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="去开启"
+            android:textColor="@color/pocket_accent"
+            android:textSize="14sp"
+            android:visibility="gone" />
+    </LinearLayout>
 
     <ScrollView
         android:layout_width="match_parent"
         android:layout_height="0dp"
+        android:layout_marginTop="4dp"
         android:layout_weight="1"
-        android:layout_marginTop="12dp">
+        android:scrollbars="none">
 
         <LinearLayout
-            android:id="@+id/scripts_list"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical" />
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="脚本"
+                    android:textColor="@color/pocket_text"
+                    android:textSize="16sp" />
+
+                <TextView
+                    android:id="@+id/scripts_count"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:textColor="@color/pocket_text_muted"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/scripts_list"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="vertical" />
+
+            <LinearLayout
+                android:id="@+id/calibrate_row"
+                android:contentDescription="展开或收起标定流程"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_pocket_card_outline"
+                android:gravity="center_vertical"
+                android:minHeight="52dp"
+                android:orientation="horizontal"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="标定流程"
+                    android:textColor="@color/pocket_text"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/calibrate_subtitle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="开发用"
+                    android:textColor="@color/pocket_text_muted"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/calibrate_chevron"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="▾"
+                    android:textColor="@color/pocket_text_muted"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/calibrate_list"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/btn_import"
+                android:contentDescription="导入脚本 JSON 文件"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_pocket_dashed"
+                android:gravity="center"
+                android:minHeight="48dp"
+                android:text="+ 导入脚本 JSON"
+                android:textColor="@color/pocket_accent"
+                android:textSize="14sp" />
+
+            <LinearLayout
+                android:id="@+id/good_section"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="GOOD 数据"
+                    android:textColor="@color/pocket_text"
+                    android:textSize="16sp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_pocket_card_outline"
+                    android:gravity="center_vertical"
+                    android:minHeight="56dp"
+                    android:orientation="horizontal"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="8dp">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical"
+                        android:paddingTop="8dp"
+                        android:paddingBottom="8dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="扫描结果"
+                            android:textColor="@color/pocket_text"
+                            android:textSize="14sp" />
+
+                        <TextView
+                            android:id="@+id/good_export_name"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:ellipsize="middle"
+                            android:maxLines="1"
+                            android:text="还没有导出"
+                            android:textColor="@color/pocket_text_muted"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:id="@+id/btn_good_export"
+                        android:contentDescription="导出最近一次扫描结果"
+                        android:layout_width="44dp"
+                        android:layout_height="48dp"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:padding="11dp"
+                        android:scaleType="fitCenter"
+                        android:src="@drawable/ic_action_export" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:background="@drawable/bg_pocket_card_outline"
+                    android:gravity="center_vertical"
+                    android:minHeight="56dp"
+                    android:orientation="horizontal"
+                    android:paddingStart="14dp"
+                    android:paddingEnd="8dp">
+
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:orientation="vertical"
+                        android:paddingTop="8dp"
+                        android:paddingBottom="8dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="执行输入"
+                            android:textColor="@color/pocket_text"
+                            android:textSize="14sp" />
+
+                        <TextView
+                            android:id="@+id/good_input_name"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:ellipsize="middle"
+                            android:maxLines="1"
+                            android:text="未选择"
+                            android:textColor="@color/pocket_text_muted"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
+                    <ImageView
+                        android:id="@+id/btn_good_pick"
+                        android:contentDescription="选择输入文件"
+                        android:layout_width="44dp"
+                        android:layout_height="48dp"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:padding="11dp"
+                        android:scaleType="fitCenter"
+                        android:src="@drawable/ic_action_import" />
+
+                    <ImageView
+                        android:id="@+id/btn_good_clear"
+                        android:contentDescription="清除已选输入"
+                        android:layout_width="44dp"
+                        android:layout_height="48dp"
+                        android:background="?attr/selectableItemBackgroundBorderless"
+                        android:padding="13dp"
+                        android:scaleType="fitCenter"
+                        android:src="@drawable/ic_action_stop"
+                        android:visibility="gone" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/good_caps"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:lineSpacingExtra="3dp"
+                    android:textColor="@color/pocket_text_muted"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/swipe_row"
+                android:contentDescription="展开或收起滑动测试"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:background="@drawable/bg_pocket_card_outline"
+                android:gravity="center_vertical"
+                android:minHeight="52dp"
+                android:orientation="horizontal"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="滑动测试"
+                    android:textColor="@color/pocket_text"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/swipe_chevron"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="▾"
+                    android:textColor="@color/pocket_text_muted"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/swipe_card"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp"
+                android:visibility="gone">
+
+                <RadioGroup
+                    android:id="@+id/swipe_method_group"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+
+                    <RadioButton
+                        android:id="@+id/swipe_method_three"
+                        android:contentDescription="三段式滑动"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="三段式"
+                        android:textColor="@color/pocket_text"
+                        android:textSize="13sp" />
+
+                    <RadioButton
+                        android:id="@+id/swipe_method_chain"
+                        android:contentDescription="路标链滑动"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="路标链"
+                        android:textColor="@color/pocket_text"
+                        android:textSize="13sp" />
+                </RadioGroup>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <EditText
+                        android:id="@+id/swipe_start_y"
+                        android:contentDescription="滑动起点 Y"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:hint="起点Y"
+                        android:inputType="number"
+                        android:textColor="@color/pocket_text"
+                        android:textColorHint="@color/pocket_text_muted"
+                        android:textSize="13sp" />
+
+                    <EditText
+                        android:id="@+id/swipe_dist"
+                        android:contentDescription="滑动距离"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:layout_weight="1"
+                        android:hint="距离"
+                        android:inputType="number"
+                        android:textColor="@color/pocket_text"
+                        android:textColorHint="@color/pocket_text_muted"
+                        android:textSize="13sp" />
+
+                    <Button
+                        android:id="@+id/btn_swipe_start"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="8dp"
+                        android:text="测试" />
+                </LinearLayout>
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/scripts_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="长按某行可恢复内置；开关控制是否出现在悬浮窗。"
+                android:textColor="@color/pocket_text_muted"
+                android:textSize="12sp" />
+        </LinearLayout>
     </ScrollView>
 
-    <!-- 滑动测试（2026-09-18 由悬浮窗迁入，用户需求③）：真机调翻页滑动参数。
-         管理器在前台会吃掉注入的手势 ⇒ 点「开始测试」先退到后台把前台让回游戏，再注入（见 MainActivity）。 -->
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:text="滑动测试（调翻页参数）"
-        android:textSize="14sp"
-        android:textStyle="bold" />
-
-    <RadioGroup
-        android:id="@+id/swipe_method_group"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal">
-
-        <RadioButton
-            android:id="@+id/swipe_method_three"
-            android:contentDescription="三段式滑动"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="三段式"
-            android:textSize="13sp" />
-
-        <RadioButton
-            android:id="@+id/swipe_method_chain"
-            android:contentDescription="路标链滑动"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="路标链"
-            android:textSize="13sp" />
-    </RadioGroup>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal">
-
-        <EditText
-            android:id="@+id/swipe_start_y"
-            android:contentDescription="滑动起点 Y"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:hint="起点Y"
-            android:inputType="number"
-            android:textSize="13sp" />
-
-        <EditText
-            android:id="@+id/swipe_dist"
-            android:contentDescription="滑动距离"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:layout_weight="1"
-            android:hint="距离"
-            android:inputType="number"
-            android:textSize="13sp" />
-
-        <Button
-            android:id="@+id/btn_swipe_start"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:text="开始测试" />
-    </LinearLayout>
-
-    <!-- 通用提醒横幅（NoticeCenter 的管理器展位）：管理器在前台时提醒显示在这里 -->
     <TextView
         android:id="@+id/notice_banner"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:paddingStart="12dp"
+        android:layout_marginTop="8dp"
+        android:paddingStart="14dp"
         android:paddingTop="10dp"
-        android:paddingEnd="12dp"
+        android:paddingEnd="14dp"
         android:paddingBottom="10dp"
         android:textSize="13sp"
         android:visibility="gone" />
 
-    <LinearLayout
+    <TextView
+        android:id="@+id/btn_back_overlay"
+        android:contentDescription="回到悬浮窗"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:orientation="horizontal">
-
-        <Button
-            android:id="@+id/btn_import"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="导入 JSON" />
-
-        <Button
-            android:id="@+id/btn_back_overlay"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="返回悬浮窗" />
-    </LinearLayout>
+        android:layout_marginTop="8dp"
+        android:gravity="center"
+        android:minHeight="44dp"
+        android:text="回到悬浮窗"
+        android:textColor="@color/pocket_text_muted"
+        android:textSize="14sp" />
 </LinearLayout>
