@@ -41,8 +41,8 @@ object ScriptStore {
         val issues: List<String>,
         /** 是否声明了 `ui` 段 ⇒ 是否**上悬浮窗**（未声明者只在管理器可见，如 2 个标定流程）。 */
         val hasUi: Boolean = false,
-        /** 该脚本声明的动作名（`ui.actions[].label`，按顺序）⇒ 管理器行副标题「导出 · 开始」。 */
-        val actionLabels: List<String> = emptyList(),
+        /** 该脚本声明的动作（`ui.actions`，按顺序）⇒ 悬浮窗行内按钮 / 管理器行副标题都由它派生。 */
+        val actions: List<FlowValidator.OverlayAction> = emptyList(),
     )
 
     /** 纯函数：由流程 JSON 解析清单条目（无 Android 依赖，单测可覆盖）。 */
@@ -58,7 +58,7 @@ object ScriptStore {
             imported = imported,
             issues = issues,
             hasUi = ui != null,
-            actionLabels = ui?.actions?.map { it.label } ?: emptyList(),
+            actions = ui?.actions ?: emptyList(),
         )
     }
 

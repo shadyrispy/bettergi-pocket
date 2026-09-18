@@ -27,11 +27,11 @@
         android:pathData="M4 17h16" />
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M9 5.4a1.6 1.6 0 110 3.2 1.6 1.6 0 010 -3.2Z" />
+        android:pathData="M9 5.4a1.6 1.6 0 1 1 0 3.2 1.6 1.6 0 0 1 0 -3.2Z" />
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M15 10.4a1.6 1.6 0 110 3.2 1.6 1.6 0 010 -3.2Z" />
+        android:pathData="M15 10.4a1.6 1.6 0 1 1 0 3.2 1.6 1.6 0 0 1 0 -3.2Z" />
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M9 15.4a1.6 1.6 0 110 3.2 1.6 1.6 0 010 -3.2Z" />
+        android:pathData="M9 15.4a1.6 1.6 0 1 1 0 3.2 1.6 1.6 0 0 1 0 -3.2Z" />
 </vector>

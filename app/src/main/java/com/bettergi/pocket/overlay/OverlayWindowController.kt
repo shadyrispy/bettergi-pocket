@@ -24,6 +24,7 @@ import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
@@ -41,6 +42,7 @@ import androidx.core.widget.ImageViewCompat
 import com.bettergi.pocket.MainActivity
 import com.bettergi.pocket.R
 import com.bettergi.pocket.bilibili.BilibiliSpaceOpener
+import com.bettergi.pocket.dsl.FlowValidator
 import com.bettergi.pocket.dsl.ScriptStore
 import com.bettergi.pocket.feature.autopick.AutoPickFeature
 import com.bettergi.pocket.feature.autoskip.AutoSkipEvents
@@ -113,7 +115,6 @@ class OverlayWindowController(
     private var switchQuickSkip: SwitchCompat? = null
     private var switchAutoPick: SwitchCompat? = null
     private var switchAutoLaunch: SwitchCompat? = null
-    private var switchScan: SwitchCompat? = null
     private var scanProgress: TextView? = null
     private var launchHint: TextView? = null
     private var launchSubtitle: TextView? = null
@@ -125,82 +126,228 @@ class OverlayWindowController(
     private var autoSkipExtras: View? = null
     private var autoSkipChevron: ImageView? = null
     private var autoSkipMenuExpanded = false
-    private var scanExtras: View? = null
-    private var scanChevron: ImageView? = null
-    /** 脚本按钮视图（flowKey → TextView）：**由 DSL `ui` 段驱动重建**，见 [renderFlowButtons]。 */
-    private val flowViews = LinkedHashMap<String, TextView>()
+    /** 脚本行容器（一脚本一行）。 */
+    private var scriptGroup: LinearLayout? = null
+    /** 脚本区「页数」徽标（点它展开输入行）。 */
+    private var scriptPagesBadge: TextView? = null
+    /** 页数输入行（默认收起）。 */
+    private var scriptPagesRow: View? = null
+    /** 脚本行（flowKey → 整行 View）：**由 DSL `ui` 段驱动重建**，见 [renderFlowButtons]。 */
+    private val flowViews = LinkedHashMap<String, View>()
+
+    /** flowKey → 行内名称（运行中态改色用）。 */
+    private val flowLabelViews = LinkedHashMap<String, TextView>()
+
+    /** flowKey → 该行的「运行/停止」按钮（运行中翻转图标用）。 */
+    private val flowRunButtons = LinkedHashMap<String, ImageView>()
+
+    /** flowKey → 该行的全部动作按钮（运行期统一禁点/压暗用）。 */
+    private val flowActions = LinkedHashMap<String, MutableList<View>>()
 
     /** flowKey → 脚本自报按钮文字（`ui.label`）：常态/运行中态文案切换复用。 */
     private val flowLabels = LinkedHashMap<String, String>()
 
-    /** 脚本按钮容器（`overlay_scan_flow_group`）。 */
+    /** 脚本行容器（`overlay_script_group`）。 */
     private var flowGroup: LinearLayout? = null
 
     /**
-     * 刷新脚本按钮态。
-     * - 选中（= 当前 `scanFlow`）→ 金色；其余常态灰。
-     * - 「运行中」态（用户 2026-09-18 裁定②）：**仅当前流程**转进行态（灰字 + 「▶ 运行中…」）；
-     *   运行期其余按钮一并禁点（避免扫描中途切流程），alpha 压暗。
+     * 刷新脚本行态。
+     * - 选中（= 当前 `scanFlow`）→ 整行金色底 + 名称金色；
+     * - 「运行中」态：**仅当前流程**的「运行」按钮翻转为「停止」（红色 ■），其余行的动作一律禁点并压暗
+     *   —— 避免扫描中途切流程。
      */
     private fun applyFlowSelection(flow: String) {
         if (flowViews.isEmpty()) return
-        val on = context.getColor(R.color.overlay_gold)
-        val off = context.getColor(R.color.overlay_text)
-        val muted = context.getColor(R.color.overlay_text_muted)
         val running = settingsRepository.get().scanEnabled
-        flowViews.forEach { (k, v) ->
-            val isRunning = running && k == flow
-            v.text = if (isRunning) "\u25b6 运行中…" else (flowLabels[k] ?: k)
-            v.setTextColor(if (isRunning) muted else if (k == flow) on else off)
-            v.isEnabled = !running
-            v.alpha = if (running && !isRunning) 0.45f else 1f
+        flowViews.forEach { (k, row) ->
+            val isCurrent = k == flow
+            val isRunning = running && isCurrent
+            row.setBackgroundResource(
+                if (isCurrent) R.drawable.bg_overlay_launch else R.drawable.bg_overlay_row,
+            )
+            flowLabelViews[k]?.setTextColor(
+                context.getColor(if (isCurrent) R.color.overlay_gold else R.color.overlay_text),
+            )
+            flowRunButtons[k]?.apply {
+                setImageResource(if (isRunning) R.drawable.ic_action_stop else R.drawable.ic_action_run)
+                setColorFilter(
+                    context.getColor(
+                        if (isRunning) R.color.overlay_notice_bar_error else R.color.overlay_gold,
+                    ),
+                )
+                contentDescription = if (isRunning) "停止" else "开始"
+                isEnabled = true // 运行中「停止」必须可点
+                alpha = 1f
+            }
+            row.alpha = if (running && !isCurrent) 0.55f else 1f
+        }
+        // 逐个动作按钮统一处理（含「更多」展开出来的）
+        flowActions.forEach { (key, list) ->
+            list.forEach { v ->
+                val isRunButton = flowRunButtons[key] === v
+                v.isEnabled = if (isRunButton) true else !running
+                if (!isRunButton) v.alpha = if (running) 0.45f else 1f
+            }
         }
     }
 
     /**
-     * 重建脚本按钮区（P4a）：**唯一来源是脚本自身** —— 只渲染「已启用 且 声明了 `ui`」的流程，
-     * 顺序取 `ui.order`（[ScriptStore.list] 已按 order 排好），文字取 `ui.label`。
-     * ⇒ 「悬浮窗显示哪些功能」完全由脚本（JSON）决定，改脚本即改 UI。
+     * 重建脚本区：**唯一来源是脚本自身** —— 只渲染「已启用 且 声明了 `ui`」的流程，顺序取 `ui.order`。
+     *
+     * 每行 = [图标] 名称 …… [动作图标…]，动作来自脚本的 `ui.actions`（kind 决定图标与行为）。
+     * 行内最多 [FlowValidator.MAX_ACTIONS] 个；超出的收进该行的「更多」（点一下就地展开，不用系统 PopupMenu）。
      */
     private fun renderFlowButtons() {
-        val container = flowGroup ?: return
+        val container = scriptGroup ?: return
         container.removeAllViews()
         flowViews.clear()
         flowLabels.clear()
+        flowLabelViews.clear()
+        flowRunButtons.clear()
+        flowActions.clear()
         val entries = runCatching { ScriptStore.list(context) }
             .getOrDefault(emptyList())
             .filter { it.enabled && it.hasUi }
-        // 证据日志：悬浮窗上到底挂了哪几条脚本（排障「按钮少了/顺序不对」的第一现场）
-        Log.i(TAG_OVERLAY, "flow buttons ← " + entries.joinToString { "${it.key}(${it.label})" })
+        Log.i(TAG_OVERLAY, "flow rows ← " + entries.joinToString { "${it.key}(${it.label})" })
         if (entries.isEmpty()) {
             container.addView(
                 TextView(themedContext).apply {
-                    text = "（无启用脚本——长按「设置」导入/开启）"
+                    text = "（无启用脚本——长按日志按钮进脚本管理）"
                     setTextColor(context.getColor(R.color.overlay_text_muted))
                     textSize = 11f
+                    setPadding(dp(2), dp(6), 0, dp(6))
                 },
             )
             return
         }
         for (e in entries) {
-            val button = TextView(themedContext).apply {
-                text = e.label
-                gravity = Gravity.CENTER
-                minHeight = dp(40)
-                textSize = 12f
-                setBackgroundResource(R.drawable.bg_overlay_row_selectable)
-                contentDescription = "脚本：${e.label}"
+            val row = LinearLayout(themedContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                minimumHeight = dp(52)
+                setBackgroundResource(R.drawable.bg_overlay_row)
+                setPadding(dp(10), 0, dp(4), 0)
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT,
-                ).apply { topMargin = dp(4) }
-                setOnClickListener { startScan(e.key) }
+                ).apply { topMargin = dp(6) }
             }
+            row.addView(
+                ImageView(themedContext).apply {
+                    setImageResource(scriptIconRes(e.icon))
+                    setColorFilter(context.getColor(R.color.overlay_text))
+                    layoutParams = LinearLayout.LayoutParams(dp(16), dp(16)).apply { marginEnd = dp(8) }
+                },
+            )
+            val label = TextView(themedContext).apply {
+                text = e.label
+                textSize = 12f
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setTextColor(context.getColor(R.color.overlay_text))
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            row.addView(label)
+            val actions = LinearLayout(themedContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val inline = e.actions.take(FlowValidator.MAX_ACTIONS)
+            inline.forEach { actions.addView(actionView(it, e.key)) }
+            if (e.actions.size > FlowValidator.MAX_ACTIONS) {
+                actions.addView(moreView(e.actions.drop(FlowValidator.MAX_ACTIONS), e.key, actions))
+            }
+            row.addView(actions)
+            container.addView(row)
+            flowViews[e.key] = row
             flowLabels[e.key] = e.label
-            flowViews[e.key] = button
-            container.addView(button)
+            flowLabelViews[e.key] = label
         }
         applyFlowSelection(settingsRepository.get().scanFlow)
+    }
+
+    /** 行内一个动作（图标按钮，视觉 32dp / 触控撑满 48dp 行高）。 */
+    private fun actionView(a: FlowValidator.OverlayAction, flowKey: String): ImageView =
+        ImageView(themedContext).apply {
+            setImageResource(actionIconRes(a.kind))
+            setColorFilter(context.getColor(actionTintRes(a.kind)))
+            contentDescription = a.label // 无障碍名 + 长按提示（按钮本身只画图标）
+            scaleType = ImageView.ScaleType.CENTER
+            layoutParams = LinearLayout.LayoutParams(dp(40), LinearLayout.LayoutParams.MATCH_PARENT)
+                .apply { marginStart = dp(2) }
+            isClickable = true
+            setOnClickListener { onFlowAction(a.kind, flowKey) }
+            flowActions.getOrPut(flowKey) { ArrayList() }.add(this)
+            if (a.kind == "run") flowRunButtons[flowKey] = this
+        }
+
+    /**
+     * 「更多」：脚本声明超过行内上限时，其余动作收在这里。
+     * 点击**就地展开**到同一行动作区（一次性展开，不做折叠）—— 悬浮窗内不能用系统 PopupMenu。
+     */
+    private fun moreView(
+        rest: List<FlowValidator.OverlayAction>,
+        flowKey: String,
+        host: LinearLayout,
+    ): ImageView = ImageView(themedContext).apply {
+        setImageResource(R.drawable.ic_action_config)
+        setColorFilter(context.getColor(R.color.overlay_text_muted))
+        contentDescription = "更多动作"
+        scaleType = ImageView.ScaleType.CENTER
+        layoutParams = LinearLayout.LayoutParams(dp(40), LinearLayout.LayoutParams.MATCH_PARENT)
+            .apply { marginStart = dp(2) }
+        isClickable = true
+        setOnClickListener {
+            host.removeView(this)
+            rest.forEach { host.addView(actionView(it, flowKey)) }
+            applyFlowSelection(settingsRepository.get().scanFlow)
+        }
+    }
+
+    /** 行内动作分发。`kind` 决定做什么，界面只认 kind。 */
+    private fun onFlowAction(kind: String, flowKey: String) {
+        val running = settingsRepository.get().scanEnabled
+        when (kind) {
+            // 「运行」在运行中翻转为「停止」：同一按钮位，省一格
+            "run" -> if (running) settingsRepository.setScanEnabled(false) else startScan(flowKey)
+            "stop" -> settingsRepository.setScanEnabled(false)
+            "export" ->
+                if (running) {
+                    A11yOverlayRuntime.notice("warn", "运行中，导出请等本轮结束")
+                } else {
+                    onShareGoodRequested()
+                }
+            // 选择输入文件必须由 Activity 发起（SAF）⇒ 拉起管理器
+            "import" -> openScriptManager(pickGood = true)
+            "config" -> togglePagesRow()
+            "open" -> openScriptManager()
+            else -> Log.w(TAG_OVERLAY, "unknown action kind '$kind'")
+        }
+    }
+
+    private fun scriptIconRes(icon: String): Int = when (icon) {
+        "artifact" -> R.drawable.ic_script_artifact
+        "weapon" -> R.drawable.ic_script_weapon
+        "character" -> R.drawable.ic_script_character
+        "lock" -> R.drawable.ic_script_lock
+        "equip" -> R.drawable.ic_script_equip
+        else -> R.drawable.ic_script_gear
+    }
+
+    private fun actionIconRes(kind: String): Int = when (kind) {
+        "stop" -> R.drawable.ic_action_stop
+        "export" -> R.drawable.ic_action_export
+        "import" -> R.drawable.ic_action_import
+        "config" -> R.drawable.ic_action_config
+        "open" -> R.drawable.ic_action_open
+        else -> R.drawable.ic_action_run
+    }
+
+    /** 「破坏性」动作用红/琥珀，其余用金色或常态色。 */
+    private fun actionTintRes(kind: String): Int = when (kind) {
+        "stop" -> R.color.overlay_notice_bar_error
+        "export", "run" -> R.color.overlay_gold
+        else -> R.color.overlay_text
     }
 
     /**
@@ -216,8 +363,11 @@ class OverlayWindowController(
         }
     }
 
-    /** 长按「设置」：拉起脚本管理器（MainActivity，[MainActivity.EXTRA_FROM_OVERLAY]）。 */
-    private fun openScriptManager() {
+    /**
+     * 拉起脚本管理器（MainActivity，[MainActivity.EXTRA_FROM_OVERLAY]）。
+     * @param pickGood true ⇒ 顺带打开输入文件选择器（`import` 动作走这条：SAF 必须由 Activity 发起）
+     */
+    private fun openScriptManager(pickGood: Boolean = false) {
         val intent = Intent(context, MainActivity::class.java).apply {
             addFlags(
                 Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -225,6 +375,7 @@ class OverlayWindowController(
                     Intent.FLAG_ACTIVITY_SINGLE_TOP,
             )
             putExtra(MainActivity.EXTRA_FROM_OVERLAY, true)
+            if (pickGood) putExtra(MainActivity.EXTRA_PICK_GOOD, true)
         }
         runCatching { context.startActivity(intent) }.onFailure {
             A11yOverlayRuntime.notice("error", "无法打开管理器：${it.message}")
@@ -232,7 +383,6 @@ class OverlayWindowController(
     }
 
     private var scanMaxPagesEdit: EditText? = null
-    private var scanMenuExpanded = false
     private var launchExtras: View? = null
     private var launchChevron: ImageView? = null
     private var launchMenuExpanded = false
@@ -280,10 +430,10 @@ class OverlayWindowController(
             switchQuickSkip?.isChecked = settings.quickSkipDialogueEnabled
             switchAutoPick?.isChecked = settings.autoPickEnabled
             switchAutoLaunch?.isChecked = settings.autoLaunchGenshinEnabled
-            switchScan?.isChecked = settings.scanEnabled
             applyFeatureEnabled(settings)
             // 运行中态：仅当前流程按钮转进行态（用户 2026-09-18 裁定②）
             applyFlowSelection(settings.scanFlow)
+            refreshPagesBadge()
             refreshLaunchHint()
             refreshStatus()
         } finally {
@@ -308,7 +458,6 @@ class OverlayWindowController(
         val quickSkipSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_quick_skip)
         val autoPickSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_auto_pick)
         val autoLaunchSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_auto_launch)
-        val scanSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_scan)
         val logToggle = root.findViewById<ImageButton>(R.id.overlay_log_toggle)
 
         bubbleView = bubble
@@ -331,7 +480,6 @@ class OverlayWindowController(
         switchQuickSkip = quickSkipSwitch
         switchAutoPick = autoPickSwitch
         switchAutoLaunch = autoLaunchSwitch
-        switchScan = scanSwitch
         scanProgress = root.findViewById(R.id.overlay_scan_progress)
         launchHint = root.findViewById(R.id.overlay_auto_launch_hint)
         launchSubtitle = root.findViewById(R.id.overlay_launch_subtitle)
@@ -350,12 +498,13 @@ class OverlayWindowController(
         launchExtras = root.findViewById(R.id.overlay_launch_extras)
         launchChevron = root.findViewById(R.id.overlay_launch_chevron)
 
-        // 扫描控制区（fix53：开始/停止/flow/maxPages/分享 GOOD 全部走悬浮窗，零通知依赖）
-        scanExtras = root.findViewById(R.id.overlay_scan_extras)
-        scanChevron = root.findViewById(R.id.overlay_scan_chevron)
-        // 脚本按钮区（P4a）：**由 DSL `ui` 段驱动**——只渲染「已启用且声明 ui」的流程，按 ui.order 排。
+        // 脚本区（2026-09-18 改造）：一脚本一行，行内动作由脚本的 `ui.actions` 决定。
         // ⚠️ 悬浮窗内不用系统 PopupMenu/Spinner（overlay 类型窗口无 Activity token → BadTokenException 风险）
-        flowGroup = root.findViewById(R.id.overlay_scan_flow_group)
+        scriptGroup = root.findViewById(R.id.overlay_script_group)
+        scriptPagesBadge = root.findViewById<TextView>(R.id.overlay_script_pages_badge).also { badge ->
+            badge.setOnClickListener { togglePagesRow() }
+        }
+        scriptPagesRow = root.findViewById(R.id.overlay_scan_pages_row)
         renderFlowButtons()
         scanMaxPagesEdit = root.findViewById<EditText>(R.id.overlay_scan_max_pages).apply {
             val saved = settingsRepository.get().scanMaxPages
@@ -364,22 +513,11 @@ class OverlayWindowController(
             setOnEditorActionListener { _, _, _ ->
                 persistMaxPages()
                 setPanelFocusable(false)
+                togglePagesRow() // 提交即收起
                 true
             }
         }
-        root.findViewById<View>(R.id.overlay_scan_start).setOnClickListener { startScan() }
-        root.findViewById<View>(R.id.overlay_scan_stop).setOnClickListener {
-            settingsRepository.setScanEnabled(false)
-        }
-        // 「开始导出」（内置，不写进脚本）：复用既有 GOOD 导出链（service → FileProvider 分享）。
-        // 扫描进行中禁点 —— 避免导出半截数据（用户 2026-09-18 裁定④/§9.1）。
-        root.findViewById<View>(R.id.overlay_scan_export).setOnClickListener {
-            if (settingsRepository.get().scanEnabled) {
-                A11yOverlayRuntime.notice("warn", "扫描进行中，导出请等本轮结束")
-            } else {
-                onShareGoodRequested()
-            }
-        }
+        refreshPagesBadge()
 
         val layoutParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -427,10 +565,6 @@ class OverlayWindowController(
             button.setOnClickListener { openBilibiliSpace() }
         }
         root.findViewById<View>(R.id.overlay_exit).setOnClickListener { exitAssistant() }
-        root.findViewById<View>(R.id.overlay_row_scan).also { row ->
-            row.setOnClickListener { setScanMenuExpanded(!scanMenuExpanded) }
-            // 双击语义冲突防护：chevron 与开关并排，点击行体展开；开关自身事件不冒泡
-        }
 
         enabledSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (updatingUi) return@setOnCheckedChangeListener
@@ -458,17 +592,6 @@ class OverlayWindowController(
             if (updatingUi) return@setOnCheckedChangeListener
             settingsRepository.setAutoLaunchGenshinEnabled(isChecked)
         }
-        scanSwitch.setOnCheckedChangeListener { _, isChecked ->
-            if (updatingUi) return@setOnCheckedChangeListener
-            settingsRepository.setScanEnabled(isChecked)
-            if (isChecked) {
-                InputAccessibilityService.ensureEnabled(themedContext, "请开启无障碍权限，才能模拟扫描点击")
-                if (!settingsRepository.get().screenShareEnabled) {
-                    // 扫描硬前提：投影（P0 设计，API 29+ 门控由入口保证）
-                    settingsRepository.setScreenShareEnabled(true)
-                }
-            }
-        }
         rootView = root
         params = layoutParams
         windowManager.addView(root, layoutParams)
@@ -480,7 +603,6 @@ class OverlayWindowController(
         setLogWindowVisible(prefs.getBoolean(KEY_LOG_VISIBLE, false), persist = false)
         setAutoSkipMenuExpanded(prefs.getBoolean(KEY_AUTO_SKIP_EXPANDED, false), persist = false)
         setLaunchMenuExpanded(prefs.getBoolean(KEY_LAUNCH_EXPANDED, false), persist = false)
-        setScanMenuExpanded(prefs.getBoolean(KEY_SCAN_EXPANDED, false), persist = false)
         applyFlowSelection(settingsRepository.get().scanFlow)
         settingsRepository.addListener(settingsListener)
         startScreenWatch()
@@ -597,7 +719,9 @@ class OverlayWindowController(
 
     /** 扫描进度副文本（主线程调用；P1-c 悬浮窗入口）。 */
     fun updateScanProgress(text: String) {
-        scanProgress?.text = text
+        val view = scanProgress ?: return
+        view.text = text
+        view.visibility = if (text.isBlank()) View.GONE else View.VISIBLE
     }
 
     private fun setPanelFocusable(focusable: Boolean) {
@@ -1016,20 +1140,34 @@ class OverlayWindowController(
         autoSkipChevron?.animate()?.rotation(if (expanded) 90f else 0f)?.setDuration(160)?.start()
     }
 
-    private fun setScanMenuExpanded(expanded: Boolean, persist: Boolean = true) {
-        scanMenuExpanded = expanded
-        if (persist) {
-            prefs.edit().putBoolean(KEY_SCAN_EXPANDED, expanded).apply()
-        }
-        scanExtras?.visibility = if (expanded) View.VISIBLE else View.GONE
-        scanChevron?.animate()?.rotation(if (expanded) 90f else 0f)?.setDuration(160)?.start()
-    }
-
     /** maxPages 输入提交：空/0 = 不限（service 侧转 Int.MAX_VALUE）。 */
     private fun persistMaxPages() {
         val raw = scanMaxPagesEdit?.text?.toString()?.trim().orEmpty()
         val pages = raw.toIntOrNull()?.coerceAtLeast(0) ?: 0
         settingsRepository.setScanMaxPages(pages)
+        refreshPagesBadge()
+    }
+
+    /** 页数徽标：0（默认）时只写"页数"且用弱色，非默认时写"页数 N"并用金色。 */
+    private fun refreshPagesBadge() {
+        val pages = settingsRepository.get().scanMaxPages
+        val badge = scriptPagesBadge ?: return
+        badge.text = if (pages > 0) "页数 $pages" else "页数"
+        badge.setTextColor(
+            context.getColor(if (pages > 0) R.color.overlay_gold else R.color.overlay_text_muted),
+        )
+    }
+
+    /** 展开/收起页数输入行（默认收起；没有 PopupMenu 可用，所以就地展开）。 */
+    private fun togglePagesRow() {
+        val row = scriptPagesRow ?: return
+        val show = row.visibility != View.VISIBLE
+        row.visibility = if (show) View.VISIBLE else View.GONE
+        if (show) {
+            scanMaxPagesEdit?.requestFocus()
+        } else {
+            setPanelFocusable(false)
+        }
     }
 
     private fun setLaunchMenuExpanded(expanded: Boolean, persist: Boolean = true) {
@@ -1627,7 +1765,6 @@ class OverlayWindowController(
         private const val KEY_LOG_VISIBLE = "log_visible"
         private const val KEY_AUTO_SKIP_EXPANDED = "auto_skip_expanded"
         private const val KEY_LAUNCH_EXPANDED = "launch_expanded"
-        private const val KEY_SCAN_EXPANDED = "scan_expanded"
         private const val LOG_WIDTH_DP = 260
         private const val LOG_DEFAULT_HEIGHT_DP = 148
         private const val IDLE_ALPHA = 0.62f

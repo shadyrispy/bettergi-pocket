@@ -35,6 +35,9 @@ class MainActivity : AppCompatActivity() {
         /** 悬浮窗「设置」长按进入管理器时置 true（P3/P4）。 */
         const val EXTRA_FROM_OVERLAY = "from_overlay"
 
+        /** 悬浮窗的 `import` 动作：进入管理器的同时打开输入文件选择器（SAF 必须由 Activity 发起）。 */
+        const val EXTRA_PICK_GOOD = "pick_good"
+
         private const val PREFS = "pocket"
         private const val KEY_FIRST_LAUNCH_DONE = "first_launch_done"
 
@@ -63,7 +66,25 @@ class MainActivity : AppCompatActivity() {
         if (ok) renderScriptRows()
     }
 
+    /** 输入文件（GOOD / 配装计划）选择器——SAF 只能由 Activity 发起，所以悬浮窗只能"拉起本页再选"。 */
+    private val goodImportLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@registerForActivityResult
+        val text = runCatching {
+            contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+        }.getOrNull()
+        if (text.isNullOrBlank()) {
+            NoticeCenter.error("读取失败")
+            return@registerForActivityResult
+        }
+        val name = uri.lastPathSegment?.substringAfterLast('/') ?: "input.json"
+        val (ok, msg) = com.bettergi.pocket.scan.GoodRepository.save(this, name, text)
+        NoticeCenter.post(if (ok) NoticeCenter.Level.INFO else NoticeCenter.Level.ERROR, msg)
+    }
+
     private var pendingFromOverlay = false
+    private var pendingPickGood = false
 
     /** P3：管理器界面已展示 ⇒ onResume 不得再用旧的「悬浮窗授权」分支覆盖它。 */
     private var managerShown = false
@@ -98,6 +119,7 @@ class MainActivity : AppCompatActivity() {
     private fun handleIntent(intent: Intent?) {
         if (intent == null) return
         if (intent.getBooleanExtra(EXTRA_FROM_OVERLAY, false)) pendingFromOverlay = true
+        if (intent.getBooleanExtra(EXTRA_PICK_GOOD, false)) pendingPickGood = true
         if (intent.getBooleanExtra(EXTRA_AUTO_REQUEST_CAPTURE, false)) {
             pendingCaptureRequest = true
         }
@@ -193,6 +215,16 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btn_back_overlay).setOnClickListener { launchOverlayAndExit() }
         renderScriptRows()
         bindSwipeTest()
+        // 悬浮窗点了某个脚本的「导入」动作 ⇒ 进管理器后立刻开选择器
+        if (pendingPickGood) {
+            pendingPickGood = false
+            launchGoodPicker()
+        }
+    }
+
+    private fun launchGoodPicker() {
+        runCatching { goodImportLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }
+            .onFailure { NoticeCenter.error("无文件选择器：${it.message}") }
     }
 
     // ---- 滑动测试（2026-09-18 由悬浮窗迁入：用户需求③「滑动测试功能也移动到 MainActivity」）----
