@@ -21,8 +21,8 @@ import java.util.Locale
  * 行宽按 260dp/10sp 等宽约 40 字符裁剪（详情仍走 logcat，不裁）。
  */
 object RecognitionLog {
-    /** 日志来源（对应五流程 + 自动对话）。 */
-    enum class Tag { AUTOSKIP, SCAN, LOCK, EQUIP, CHAR }
+    /** 日志来源（对应五流程 + 自动对话 + 应用级提醒）。 */
+    enum class Tag { AUTOSKIP, SCAN, LOCK, EQUIP, CHAR, APP }
 
     /** 级别：I=页/任务级（默认）、D=逐格/逐次识别、W=告警/失败。 */
     enum class Level { I, D, W }

@@ -29,6 +29,8 @@ import com.bettergi.pocket.capture.ScreenCaptureController
 import com.bettergi.pocket.feature.autopick.AutoPickFeature
 import com.bettergi.pocket.feature.autoskip.AutoSkipFeature
 import com.bettergi.pocket.genshin.GenshinLaunchMonitor
+import com.bettergi.pocket.notice.NoticeCenter
+import com.bettergi.pocket.scan.GoodRepository
 import com.bettergi.pocket.genshin.GenshinLauncher
 import com.bettergi.pocket.input.AccessibilityAutomationController
 import com.bettergi.pocket.input.InputAccessibilityService
@@ -87,8 +89,7 @@ class TriggerForegroundService : Service() {
         // 自动扫描：投影就绪即开跑；关闭即停（P1-c 悬浮窗入口）
         if (settings.scanEnabled && settings.screenShareEnabled && captureController.isRunning()) {
             if (!scriptRunner.isRunning()) {
-                overlayController.collapse() // 自动化执行前收面板（与滑动测试缩球对称）
-                scriptRunner.startScan(settings.scanFlow, maxPagesOrDefault(settings.scanMaxPages))
+                startFlowIfReady(settings.scanFlow, maxPagesOrDefault(settings.scanMaxPages))
             }
         } else if (!settings.scanEnabled && scriptRunner.isRunning()) {
             scriptRunner.stop()
@@ -189,7 +190,7 @@ class TriggerForegroundService : Service() {
                     // 投影刚就绪：若扫描开关已开，直接启动（悬浮窗先开扫描再授权的场景）
                     if (settingsRepository.get().scanEnabled) {
                         val s = settingsRepository.get()
-                        scriptRunner.startScan(s.scanFlow, maxPagesOrDefault(s.scanMaxPages))
+                        startFlowIfReady(s.scanFlow, maxPagesOrDefault(s.scanMaxPages))
                     }
                 } else {
                     settingsRepository.setScreenShareEnabled(false)
@@ -222,6 +223,16 @@ class TriggerForegroundService : Service() {
             }
             ACTION_DEBUG_SET_SCAN -> {
                 settingsRepository.setScanEnabled(intent.getBooleanExtra(EXTRA_ENABLED, false))
+            }
+            ACTION_DEBUG_SET_GOOD -> {
+                // 调试链：把设备上的 GOOD/计划文件复制成"当前输入"（用户侧入口在管理器，由 SAF 提供）
+                val src = intent.getStringExtra(EXTRA_GOOD_SRC) ?: ""
+                val (ok, msg) = GoodRepository.importFrom(applicationContext, java.io.File(src))
+                Log.i(TAG, "debug set good: ok=$ok msg=$msg src=$src")
+                NoticeCenter.post(
+                    if (ok) NoticeCenter.Level.INFO else NoticeCenter.Level.ERROR,
+                    "GOOD 输入：$msg",
+                )
             }
             ACTION_DEBUG_DUMP_GOOD -> {
                 val f = lastGoodFile
@@ -530,6 +541,37 @@ class TriggerForegroundService : Service() {
     /** 0 = 不限（悬浮窗约定）→ ScanEngine Int.MAX_VALUE。 */
     private fun maxPagesOrDefault(raw: Int): Int = if (raw <= 0) Int.MAX_VALUE else raw
 
+    /**
+     * **起流程的唯一入口**（2026-09-18 修"点了没反应"）。
+     *
+     * 修复前的缺陷：`startScan` 的 `plan` 参数**只有 adb 调试通道会传**，用户从悬浮窗点
+     * 「圣遗物锁定 / 自动装备」时 `plan = null` ⇒ `ScanEngine.foreach` 打一行 warn 就返回，
+     * 表现为"跑了一遍界面什么都没做"。
+     *
+     * 现在的行为：按脚本自己的 `ui.actions`（有没有 `import`）+ `vars`（要什么数据）取输入；
+     * 需要输入却没有 / 这份文件喂不了它 ⇒ **发一条提醒并拒绝起跑**，不再静默空跑。
+     */
+    private fun startFlowIfReady(flowKey: String, maxPages: Int) {
+        val ctx = applicationContext
+        if (GoodRepository.needsInput(ctx, flowKey)) {
+            val plan = GoodRepository.planFor(ctx, flowKey)
+            if (plan == null) {
+                val label = GoodRepository.labelOf(ctx, flowKey)
+                NoticeCenter.warn("「$label」需要先选一份输入文件（管理器 → GOOD 数据）")
+                if (settingsRepository.get().scanEnabled) {
+                    settingsRepository.setScanEnabled(false)
+                }
+                return
+            }
+            overlayController.collapse() // 自动化执行前收面板（与滑动测试缩球对称）
+            Log.i(TAG, "start flow=$flowKey plan=${plan.size} (from GoodRepository)")
+            scriptRunner.startScan(flowKey, maxPages, plan = plan)
+            return
+        }
+        overlayController.collapse()
+        scriptRunner.startScan(flowKey, maxPages)
+    }
+
     private fun requestCapturePermission() {
         if (requestingCapturePermission) return
         requestingCapturePermission = true
@@ -678,6 +720,9 @@ class TriggerForegroundService : Service() {
          * 落点：`/sdcard/Android/data/<pkg>/files/sweep_last_good.json`（adb shell 有 ext_data_rw 可读）。
          */
         const val ACTION_DEBUG_DUMP_GOOD = "com.bettergi.pocket.action.DEBUG_DUMP_GOOD"
+        /** 调试：把设备上的 GOOD/配装计划文件复制成当前输入（`--es src /sdcard/xxx.json`）。 */
+        const val ACTION_DEBUG_SET_GOOD = "com.bettergi.pocket.action.DEBUG_SET_GOOD"
+        const val EXTRA_GOOD_SRC = "src"
         const val ACTION_DEBUG_SET_PROBE = "com.bettergi.pocket.action.DEBUG_SET_PROBE"
         const val ACTION_DEBUG_SET_VERBOSE = "com.bettergi.pocket.action.DEBUG_SET_VERBOSE"
         const val ACTION_DEBUG_SWIPE_TEST = "com.bettergi.pocket.action.DEBUG_SWIPE_TEST"

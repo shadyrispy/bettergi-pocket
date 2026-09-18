@@ -21,6 +21,8 @@
     <color name="overlay_log_lock">#FFC9A36A</color>
     <color name="overlay_log_equip">#FFC79BFF</color>
     <color name="overlay_log_char">#FFFFA8C8</color>
+    <!-- 应用级提醒（NoticeCenter，Tag=APP）：暖砂色，与五流程主色区分 -->
+    <color name="overlay_log_app">#FFE6D3AE</color>
     <color name="overlay_log_warn">#FFFF8A5C</color>
     <color name="overlay_bilibili">#FFFB7299</color>
 

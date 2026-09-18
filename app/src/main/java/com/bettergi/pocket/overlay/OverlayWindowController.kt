@@ -914,6 +914,7 @@ class OverlayWindowController(
             RecognitionLog.Tag.LOCK -> R.color.overlay_log_lock
             RecognitionLog.Tag.EQUIP -> R.color.overlay_log_equip
             RecognitionLog.Tag.CHAR -> R.color.overlay_log_char
+            RecognitionLog.Tag.APP -> R.color.overlay_log_app
         }
     }
 
