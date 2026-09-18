@@ -219,7 +219,9 @@ object A11yOverlayRuntime {
         val latch = CountDownLatch(1)
         var result: T? = null
         mainHandler.post {
-            result = runCatching { block() }.getOrNull()
+            result = runCatching { block() }
+                .onFailure { Log.e(TAG, "onMain block failed", it) }
+                .getOrNull()
             latch.countDown()
         }
         return try {
