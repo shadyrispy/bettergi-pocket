@@ -9,7 +9,17 @@
   "ui": {
     "label": "圣遗物锁定",
     "icon": "lock",
-    "order": 40
+    "order": 40,
+    "actions": [
+      {
+        "kind": "import",
+        "label": "导入"
+      },
+      {
+        "kind": "run",
+        "label": "开始"
+      }
+    ]
   },
   "steps": [
     {

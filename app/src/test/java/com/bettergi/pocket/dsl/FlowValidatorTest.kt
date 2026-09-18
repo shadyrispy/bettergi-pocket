@@ -129,4 +129,72 @@ class FlowValidatorTest {
         val json = JSONObject("""{"steps":[{"do":"click"}],"ui":{"label":"x","icon":"gear","color":"7C4DFF"}}""")
         assertTrue(FlowValidator.validate(json).any { it.path == "ui.color" })
     }
+
+    // ---- P4：ui.actions（行右侧动作，脚本自己声明）----
+
+    @Test
+    fun parseUi_actions_default_to_single_run() {
+        val ui = FlowValidator.parseUi(JSONObject("""{"ui":{"label":"武器扫描"}}"""))
+        assertNotNull(ui)
+        assertEquals(1, ui!!.actions.size)
+        assertEquals("run", ui.actions[0].kind)
+        assertEquals("开始", ui.actions[0].label)
+    }
+
+    @Test
+    fun parseUi_actions_keep_declared_order() {
+        val ui = FlowValidator.parseUi(
+            JSONObject(
+                """{"ui":{"label":"圣遗物锁定","actions":[
+                   {"kind":"import","label":"导入"},{"kind":"run","label":"开始"}]}}""",
+            ),
+        )
+        assertEquals(listOf("import", "run"), ui!!.actions.map { it.kind })
+        assertEquals(listOf("导入", "开始"), ui.actions.map { it.label })
+    }
+
+    @Test
+    fun parseUi_actions_label_falls_back_by_kind() {
+        val ui = FlowValidator.parseUi(
+            JSONObject("""{"ui":{"label":"x","actions":[{"kind":"export"},{"kind":"open"}]}}"""),
+        )
+        assertEquals(listOf("导出", "打开"), ui!!.actions.map { it.label })
+    }
+
+    @Test
+    fun parseUi_unknown_kind_is_dropped() {
+        val json = JSONObject(
+            """{"ui":{"label":"x","actions":[{"kind":"teleport"},{"kind":"run"}]}}""",
+        )
+        val ui = FlowValidator.parseUi(json)
+        assertEquals(listOf("run"), ui!!.actions.map { it.kind })
+        // 且必须报错（不静默丢弃）
+        val issues = FlowValidator.validate(json)
+        assertTrue(issues.any { it.path == "ui.actions[0].kind" })
+    }
+
+    @Test
+    fun parseUi_empty_actions_falls_back_to_run_and_reports() {
+        val json = JSONObject("""{"ui":{"label":"x","actions":[]},"steps":[]}""")
+        val ui = FlowValidator.parseUi(json)
+        assertEquals(listOf("run"), ui!!.actions.map { it.kind })
+        assertTrue(FlowValidator.validate(json).any { it.path == "ui.actions" })
+    }
+
+    @Test
+    fun validate_reports_actions_over_inline_limit() {
+        val json = JSONObject(
+            """{"ui":{"label":"x","actions":[
+               {"kind":"export"},{"kind":"run"},{"kind":"config"}]},"steps":[]}""",
+        )
+        // 超限不截断（界面用「更多」子行承载），但要报出来
+        assertEquals(3, FlowValidator.parseUi(json)!!.actions.size)
+        assertTrue(FlowValidator.validate(json).any { it.path == "ui.actions" })
+    }
+
+    @Test
+    fun validate_actions_must_be_array() {
+        val json = JSONObject("""{"ui":{"label":"x","actions":"run"},"steps":[]}""")
+        assertTrue(FlowValidator.validate(json).any { it.path == "ui.actions" })
+    }
 }

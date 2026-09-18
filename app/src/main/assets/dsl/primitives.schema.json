@@ -48,6 +48,34 @@
         },
         "hint": {
           "type": "string"
+        },
+        "actions": {
+          "type": "array",
+          "title": "行右侧动作（P4）",
+          "description": "脚本自己声明本行右侧有哪些动作，界面只按 kind 渲染图标；缺省 = 一个 run。非法 kind 由 FlowValidator 报错（不静默丢弃）。",
+          "items": {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "run",
+                  "stop",
+                  "export",
+                  "import",
+                  "config",
+                  "open"
+                ]
+              },
+              "label": {
+                "type": "string",
+                "description": "无障碍名/长按提示（按钮渲染成图标，不显示文字）；缺省按 kind 给默认"
+              }
+            }
+          }
         }
       },
       "required": [

@@ -11,7 +11,17 @@
   "ui": {
     "label": "武器扫描",
     "icon": "weapon",
-    "order": 20
+    "order": 20,
+    "actions": [
+      {
+        "kind": "export",
+        "label": "导出"
+      },
+      {
+        "kind": "run",
+        "label": "开始"
+      }
+    ]
   },
   "steps": [
     {

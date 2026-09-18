@@ -16,7 +16,17 @@
   "ui": {
     "label": "圣遗物扫描",
     "icon": "artifact",
-    "order": 10
+    "order": 10,
+    "actions": [
+      {
+        "kind": "export",
+        "label": "导出"
+      },
+      {
+        "kind": "run",
+        "label": "开始"
+      }
+    ]
   },
   "steps": [
     {

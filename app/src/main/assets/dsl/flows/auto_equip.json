@@ -9,7 +9,17 @@
   "ui": {
     "label": "自动装备",
     "icon": "equip",
-    "order": 50
+    "order": 50,
+    "actions": [
+      {
+        "kind": "import",
+        "label": "导入"
+      },
+      {
+        "kind": "run",
+        "label": "开始"
+      }
+    ]
   },
   "steps": [
     {

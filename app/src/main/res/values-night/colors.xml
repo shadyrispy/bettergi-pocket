@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 设计 token 深色覆盖（管理器跟随系统深浅色） -->
+<resources>
+    <color name="pocket_bg">#1C1612</color>
+    <color name="pocket_card">#2A241E</color>
+    <color name="pocket_accent">#C9A36A</color>
+    <color name="pocket_on_accent">#1C1612</color>
+    <color name="pocket_text">#F7F0E4</color>
+    <color name="pocket_text_muted">#B3F7F0E4</color>
+    <color name="pocket_divider">#1FFFFFFF</color>
+    <color name="pocket_ok">#5CBA6A</color>
+    <color name="pocket_warn">#E8A45A</color>
+    <color name="pocket_danger">#E24B4A</color>
+</resources>

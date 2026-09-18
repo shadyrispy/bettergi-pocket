@@ -9,14 +9,41 @@ import org.json.JSONObject
  *   v1.0 兼容（无 info，取顶层 `version` 字符串，min_host_version 默认 0.0.0）。
  * - [validate]：校验 `steps` 数组 + 每 step 含 `do` 原语名；报步骤序号与字段路径。
  * - [hostSatisfies]：min_host_version 语义比较当前宿主版本（BuildConfig.VERSION_NAME）。
- * - [parseUi]：P2（2026-09-18）悬浮窗按钮描述 `ui{label,icon,order,color?,confirm?,hint?}` —— 缺省则不上窗；
- *   非法 `icon`/`color` 在 [validate] 报错（避免静默丢弃）。
+ * - [parseUi]：P2 悬浮窗按钮描述 `ui{label,icon,order,color?,confirm?,hint?}` —— 缺省则不上窗；
+ *   **P4 增 `actions[]`**：脚本自己声明本行右侧有哪些动作（`run/stop/export/import/config/open`），
+ *   界面只按 `kind` 渲染图标 —— 不同脚本的交互差别（扫描要"导出+开始"、锁定要"导入+开始"）由脚本表达，不由界面写死。
+ *   非法 `icon`/`color`/`kind` 一律在 [validate] 报错（避免静默丢弃）。
  */
 object FlowValidator {
     const val DEFAULT_TYPE = "pocket-script"
 
     /** 悬浮窗按钮图标白名单（P2）。 */
     val ICONS: Set<String> = setOf("artifact", "weapon", "character", "lock", "equip", "gear")
+
+    /**
+     * 悬浮窗按钮动作白名单（P4）。
+     * `kind` 决定点了做什么，界面只认 kind；`label` 退化为**无障碍名/长按提示**（按钮本身渲染成图标）。
+     */
+    val ACTION_KINDS: Set<String> = setOf("run", "stop", "export", "import", "config", "open")
+
+    /** 行内动作渲染上限；超出的部分由界面放进「更多」子行（面板只有 248dp 宽，放不下第 3 个）。 */
+    const val MAX_ACTIONS = 2
+
+    /** `label` 缺省值（按 kind）。 */
+    private val DEFAULT_ACTION_LABEL = mapOf(
+        "run" to "开始",
+        "stop" to "停止",
+        "export" to "导出",
+        "import" to "导入",
+        "config" to "配置",
+        "open" to "打开",
+    )
+
+    /** 缺省动作：只说 `ui` 没说 `actions` 的脚本 = 一个「开始」。 */
+    private fun defaultActions(): List<OverlayAction> = listOf(OverlayAction("run", "开始"))
+
+    /** 悬浮窗按钮上的一个动作（P4）。 */
+    data class OverlayAction(val kind: String, val label: String)
 
     /** 颜色格式：#RRGGBB。 */
     private val COLOR_RE = Regex("^#[0-9A-Fa-f]{6}$")
@@ -29,6 +56,8 @@ object FlowValidator {
         val color: String? = null,
         val confirm: Boolean = false,
         val hint: String? = null,
+        /** 行右侧动作（P4）；缺省 = 一个「开始」。 */
+        val actions: List<OverlayAction> = listOf(OverlayAction("run", "开始")),
     )
 
     data class FlowInfo(
@@ -85,7 +114,30 @@ object FlowValidator {
             color = color,
             confirm = ui.optBoolean("confirm", false),
             hint = hint,
+            actions = parseActions(ui),
         )
+    }
+
+    /**
+     * 解析 `actions`（P4）。规则（[validate] 会同步报错，绝不静默）：
+     * - 键缺失 ⇒ 缺省 `[{run,开始}]`；
+     * - 单项 `kind` 不在白名单 ⇒ **丢掉该项**（不猜、不回落成 run，免得误触发运行）；
+     * - 解析后为空（空数组 / 全非法）⇒ 回落缺省 `[{run,开始}]`；
+     * - 数量 > [MAX_ACTIONS] ⇒ 全量保留，由界面用「更多」子行承载。
+     */
+    private fun parseActions(ui: JSONObject): List<OverlayAction> {
+        val arr = ui.optJSONArray("actions") ?: return defaultActions()
+        val out = mutableListOf<OverlayAction>()
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            val kind = item.optString("kind", "")
+            if (kind !in ACTION_KINDS) continue
+            val label = item.optString("label", "").takeIf { it.isNotBlank() }
+                ?: DEFAULT_ACTION_LABEL[kind]
+                ?: kind
+            out.add(OverlayAction(kind, label))
+        }
+        return out.ifEmpty { defaultActions() }
     }
 
     fun validate(json: JSONObject): List<Issue> {
@@ -128,6 +180,43 @@ object FlowValidator {
             val color = ui.optString("color", "")
             if (color.isNotBlank() && !COLOR_RE.matches(color)) {
                 issues.add(Issue(null, "ui.color", "invalid color '$color'; expected #RRGGBB"))
+            }
+            // ---- actions（P4：行右侧动作，脚本自己声明）----
+            if (ui.has("actions")) {
+                val arr = ui.optJSONArray("actions")
+                if (arr == null) {
+                    issues.add(Issue(null, "ui.actions", "'ui.actions' must be an array"))
+                } else {
+                    if (arr.length() == 0) {
+                        issues.add(Issue(null, "ui.actions", "empty 'ui.actions' falls back to a single run action"))
+                    }
+                    for (i in 0 until arr.length()) {
+                        val item = arr.optJSONObject(i)
+                        if (item == null) {
+                            issues.add(Issue(null, "ui.actions[$i]", "action is not a JSON object"))
+                            continue
+                        }
+                        val kind = item.optString("kind", "")
+                        if (kind !in ACTION_KINDS) {
+                            issues.add(
+                                Issue(
+                                    null,
+                                    "ui.actions[$i].kind",
+                                    "unknown action kind '$kind'; allowed: " + ACTION_KINDS.sorted().joinToString("|"),
+                                ),
+                            )
+                        }
+                    }
+                    if (arr.length() > MAX_ACTIONS) {
+                        issues.add(
+                            Issue(
+                                null,
+                                "ui.actions",
+                                "${arr.length()} actions exceed inline limit $MAX_ACTIONS; the rest go into a 'more' sub-row",
+                            ),
+                        )
+                    }
+                }
             }
         }
         return issues

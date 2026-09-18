@@ -23,4 +23,16 @@
     <color name="overlay_log_char">#FFFFA8C8</color>
     <color name="overlay_log_warn">#FFFF8A5C</color>
     <color name="overlay_bilibili">#FFFB7299</color>
+
+    <!-- ===== 设计 token（2026-09-18 界面改版）：浅色为默认值，深色在 values-night 覆盖 ===== -->
+    <color name="pocket_bg">#FAF7F2</color>
+    <color name="pocket_card">#FFFFFF</color>
+    <color name="pocket_accent">#8A6A33</color>
+    <color name="pocket_on_accent">#FFFFFF</color>
+    <color name="pocket_text">#241D18</color>
+    <color name="pocket_text_muted">#B3241D18</color>
+    <color name="pocket_divider">#1F241D18</color>
+    <color name="pocket_ok">#2F7D3A</color>
+    <color name="pocket_warn">#9A6414</color>
+    <color name="pocket_danger">#B3352F</color>
 </resources>
