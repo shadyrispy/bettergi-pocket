@@ -7,6 +7,21 @@
     "roster": "list",
     "suspects": "list"
   },
+  "ui": {
+    "label": "角色扫描",
+    "icon": "character",
+    "order": 30,
+    "actions": [
+      {
+        "kind": "export",
+        "label": "导出"
+      },
+      {
+        "kind": "run",
+        "label": "开始"
+      }
+    ]
+  },
   "steps": [
     {
       "do": "enterScreen",

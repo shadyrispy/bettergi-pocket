@@ -18,6 +18,9 @@ class PocketApplication : Application() {
         FlowSource.install(this)
         if (currentProcessName() != packageName) return
         AppForeground.install(this)
+        // 提醒中心（全应用唯一提醒通路；prefs 用于 onceKey 去重）
+        com.bettergi.pocket.notice.NoticeCenter.install(this)
+        com.bettergi.pocket.notice.NoticeRouter.install(this)
         if (!OpenCvRuntime.ensureLoaded()) {
             Log.e(TAG, "OpenCV initialization failed")
         }

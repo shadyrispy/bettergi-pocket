@@ -3,7 +3,7 @@ package com.bettergi.pocket.input
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.bettergi.pocket.overlay.OverlayWindowController
+import com.bettergi.pocket.overlay.OverlayBridge
 
 /**
  * 动作原语执行端（dispatchGesture 收敛在 :a11y / 本地服务双路径，见 InputAccessibilityService）。
@@ -12,7 +12,7 @@ import com.bettergi.pocket.overlay.OverlayWindowController
  * 扫描链路据此取「动作后新帧」，杜绝旧帧。
  */
 class AccessibilityAutomationController(
-    private val overlayController: OverlayWindowController,
+    private val overlayController: OverlayBridge,
     private val onActionCompleted: (() -> Unit)? = null,
 ) : AutomationController {
     private val mainHandler = Handler(Looper.getMainLooper())

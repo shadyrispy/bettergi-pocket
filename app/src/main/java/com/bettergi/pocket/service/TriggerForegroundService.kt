@@ -5,7 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
@@ -13,7 +16,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
-import android.widget.Toast
+import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import com.bettergi.pocket.MainActivity
@@ -25,11 +28,13 @@ import com.bettergi.pocket.capture.ScreenCaptureController
 import com.bettergi.pocket.feature.autopick.AutoPickFeature
 import com.bettergi.pocket.feature.autoskip.AutoSkipFeature
 import com.bettergi.pocket.genshin.GenshinLaunchMonitor
+import com.bettergi.pocket.notice.NoticeCenter
+import com.bettergi.pocket.scan.GoodRepository
 import com.bettergi.pocket.genshin.GenshinLauncher
 import com.bettergi.pocket.input.AccessibilityAutomationController
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.input.SwipeMethod
-import com.bettergi.pocket.overlay.OverlayWindowController
+import com.bettergi.pocket.overlay.OverlayBridge
 import com.bettergi.pocket.recognition.RecognitionAssets
 import com.bettergi.pocket.recognition.ocr.OcrFactory
 import com.bettergi.pocket.scan.ScanListener
@@ -44,7 +49,12 @@ import kotlinx.coroutines.launch
 class TriggerForegroundService : Service() {
     private lateinit var settingsRepository: TriggerSettingsRepository
     private lateinit var captureController: ScreenCaptureController
-    private lateinit var overlayController: OverlayWindowController
+    /**
+     * 悬浮窗门面（2026-09-18 宿主迁移）。
+     * 悬浮窗本体已搬到无障碍进程（`TYPE_ACCESSIBILITY_OVERLAY` 零权限），本服务只持有转发门面；
+     * 方法签名与原控制器一致 ⇒ 扫描/自动对话侧零改动。
+     */
+    private lateinit var overlayController: OverlayBridge
     private lateinit var genshinLauncher: GenshinLauncher
     private lateinit var genshinLaunchMonitor: GenshinLaunchMonitor
     private lateinit var engine: TriggerEngine
@@ -58,6 +68,14 @@ class TriggerForegroundService : Service() {
     @Volatile
     private var shutDown = false
 
+    /** 无障碍状态变化 ⇒ 重连后把悬浮窗请求回来（见 onCreate 注释）。 */
+    private val a11yStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (shutDown) return
+            mainHandler.post { overlayController.show() }
+        }
+    }
+
     private val settingsListener: (TriggerSettings) -> Unit = { settings ->
         if (settings.screenShareEnabled) {
             if (!captureController.isRunning()) {
@@ -70,8 +88,7 @@ class TriggerForegroundService : Service() {
         // 自动扫描：投影就绪即开跑；关闭即停（P1-c 悬浮窗入口）
         if (settings.scanEnabled && settings.screenShareEnabled && captureController.isRunning()) {
             if (!scriptRunner.isRunning()) {
-                overlayController.collapse() // 自动化执行前收面板（与滑动测试缩球对称）
-                scriptRunner.startScan(settings.scanFlow, maxPagesOrDefault(settings.scanMaxPages))
+                startFlowIfReady(settings.scanFlow, maxPagesOrDefault(settings.scanMaxPages))
             }
         } else if (!settings.scanEnabled && scriptRunner.isRunning()) {
             scriptRunner.stop()
@@ -81,30 +98,18 @@ class TriggerForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        settingsRepository = TriggerSettingsRepository(applicationContext)
+        // 进程内单例：设置桥 Provider 必须拿到同一实例，否则两个缓存互相打架
+        settingsRepository = TriggerSettingsRepository.app(applicationContext)
         captureController = ScreenCaptureController(applicationContext) {
             if (settingsRepository.get().screenShareEnabled) {
                 settingsRepository.setScreenShareEnabled(false)
-                Toast.makeText(
-                    applicationContext,
-                    "屏幕共享已停止，可能被其他录制应用占用",
-                    Toast.LENGTH_SHORT,
-                ).show()
+                NoticeCenter.warn("屏幕共享已停止，可能被其他录制应用占用")
             }
         }
         genshinLauncher = GenshinLauncher(applicationContext)
-        overlayController = OverlayWindowController(
-            applicationContext,
-            settingsRepository,
-            genshinLauncher = genshinLauncher,
-            onExit = {
-                val stop = Intent(this, TriggerForegroundService::class.java).apply {
-                    action = ACTION_STOP
-                }
-                startService(stop)
-            },
-            onShareGoodRequested = { shareGood() },
-        )
+        // 「退出 / 开始导出」由无障碍进程经设置桥回调（METHOD_STOP / METHOD_SHARE_GOOD），
+        // 因此这里不再需要 onExit / onShareGoodRequested 回调。
+        overlayController = OverlayBridge(applicationContext)
         genshinLaunchMonitor = GenshinLaunchMonitor(
             settingsRepository = settingsRepository,
             launcher = genshinLauncher,
@@ -133,9 +138,16 @@ class TriggerForegroundService : Service() {
             listener = scanListener,
         )
         settingsRepository.addListener(settingsListener)
+        // ⚠️ 2026-09-18 上机实测：无障碍重连后**悬浮窗不会自己回来**（旧窗口随服务销毁，
+        //    而没有新的 overlay_show 请求）⇒ 表现为「助手在跑但球没了」，只能重启助手。
+        //    这里订阅无障碍状态变化，重连后补一次显示请求（幂等：已显示时 show() 直接返回）。
+        ContextCompat.registerReceiver(
+            applicationContext,
+            a11yStateReceiver,
+            IntentFilter(InputAccessibilityService.ACTION_STATE_CHANGED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         genshinLaunchMonitor.start()
-        // §16.3 S4：启动自动更新订阅仓库（后台协程，断网降级用已装副本）
-        scriptRunner.triggerRepoUpdateAtStartup()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -148,6 +160,10 @@ class TriggerForegroundService : Service() {
             ACTION_STOP -> {
                 shutdown()
                 stopSelf()
+            }
+            ACTION_SHARE_GOOD -> {
+                // 悬浮窗「开始导出」（无障碍进程发起）
+                shareGood()
             }
             ACTION_CAPTURE_RESULT -> {
                 requestingCapturePermission = false
@@ -169,7 +185,7 @@ class TriggerForegroundService : Service() {
                     // 投影刚就绪：若扫描开关已开，直接启动（悬浮窗先开扫描再授权的场景）
                     if (settingsRepository.get().scanEnabled) {
                         val s = settingsRepository.get()
-                        scriptRunner.startScan(s.scanFlow, maxPagesOrDefault(s.scanMaxPages))
+                        startFlowIfReady(s.scanFlow, maxPagesOrDefault(s.scanMaxPages))
                     }
                 } else {
                     settingsRepository.setScreenShareEnabled(false)
@@ -203,6 +219,16 @@ class TriggerForegroundService : Service() {
             ACTION_DEBUG_SET_SCAN -> {
                 settingsRepository.setScanEnabled(intent.getBooleanExtra(EXTRA_ENABLED, false))
             }
+            ACTION_DEBUG_SET_GOOD -> {
+                // 调试链：把设备上的 GOOD/计划文件复制成"当前输入"（用户侧入口在管理器，由 SAF 提供）
+                val src = intent.getStringExtra(EXTRA_GOOD_SRC) ?: ""
+                val (ok, msg) = GoodRepository.importFrom(applicationContext, java.io.File(src))
+                Log.i(TAG, "debug set good: ok=$ok msg=$msg src=$src")
+                NoticeCenter.post(
+                    if (ok) NoticeCenter.Level.INFO else NoticeCenter.Level.ERROR,
+                    "GOOD 输入：$msg",
+                )
+            }
             ACTION_DEBUG_DUMP_GOOD -> {
                 val f = lastGoodFile
                 if (f == null) {
@@ -227,7 +253,17 @@ class TriggerForegroundService : Service() {
             }
             ACTION_DEBUG_SET_PROBE -> {
                 // 切换 :a11y Overlay 探针（桥模式：服务侧 toggle 调用即 :a11y 进程内执行）
-                InputAccessibilityService.toggleProbe(this)
+                // ★ 2026-09-18 扩展：`--ez bal true` ⇒ 走 BAL 探针（挂**可点击**的 a11y overlay +
+                //   立即/点击两条 startActivity 路径），用于核实「长按浮窗 → 启动 MainActivity」是否被拦。
+                //   `--ez mount false` ⇒ 对照组（不挂 overlay，只为对比 BAL 判定差异）。
+                val bal = intent.getBooleanExtra("bal", false)
+                if (bal) {
+                    val mount = intent.getBooleanExtra("mount", true)
+                    Log.i(TAG, "debug: BAL probe 触发 mount=$mount")
+                    InputAccessibilityService.probeBal(this, mount)
+                } else {
+                    InputAccessibilityService.toggleProbe(this)
+                }
             }
             ACTION_DEBUG_SET_VERBOSE -> {
                 // §13：识别日志 D 级开关（逐格/逐次明细，默认关闭以免一页 21 行刷屏）
@@ -416,9 +452,24 @@ class TriggerForegroundService : Service() {
                 // :a11y 探针挂载时同步进度（跨进程状态桥，P2 机制验证）
                 InputAccessibilityService.pushScanProgress(text)
                 updateForegroundNotification(text)
-                (vars["file"] as? String)?.let { lastGoodFile = it }
+                (vars["file"] as? String)?.let {
+                    lastGoodFile = it
+                    GoodRepository.setLastExport(applicationContext, it)
+                }
                 Log.i("BetterGI.Scan", "progress[$stage]: $vars")
             }
+        }
+
+        override fun onNotice(level: String, text: String) {
+            // 脚本推的重点信息 → 全应用唯一提醒通路
+            NoticeCenter.post(
+                when (level.lowercase()) {
+                    "error" -> NoticeCenter.Level.ERROR
+                    "warn" -> NoticeCenter.Level.WARN
+                    else -> NoticeCenter.Level.INFO
+                },
+                text,
+            )
         }
 
         override fun onFinished(reason: String) {
@@ -434,18 +485,19 @@ class TriggerForegroundService : Service() {
         }
     }
 
-    /** 最近一次 GOOD 导出文件名（悬浮窗「分享 GOOD」用）。 */
+    /** 最近一次 GOOD 导出文件名（悬浮窗「开始导出」用）。 */
     @Volatile
     private var lastGoodFile: String? = null
 
     /**
-     * 悬浮窗「分享 GOOD」：拉 app 前台（MainActivity 中转）再起系统分享 chooser——
-     * service 后台直接 startActivity(chooser) 依赖 SAW 豁免，Android 14+ ROM 不可靠。
+     * 悬浮窗「开始导出」：拉 app 前台（MainActivity 中转）再起系统分享 chooser——
+     * service 后台直接 startActivity(chooser) 虽命中「UID 持有可见窗口」豁免，
+     * 但分享面板需要 Activity 上下文，Android 14+ ROM 上直接起不可靠。
      */
     private fun shareGood() {
         val file = lastGoodFile
         if (file == null) {
-            Toast.makeText(this, "还没有 GOOD 导出，先完成一次扫描", Toast.LENGTH_SHORT).show()
+            NoticeCenter.warn("还没有 GOOD 导出，先完成一次扫描")
             return
         }
         val intent = Intent(this, MainActivity::class.java)
@@ -483,6 +535,7 @@ class TriggerForegroundService : Service() {
         engine.release()
         captureController.stop()
         overlayController.hide()
+        runCatching { unregisterReceiver(a11yStateReceiver) }
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
@@ -498,16 +551,49 @@ class TriggerForegroundService : Service() {
     /** 0 = 不限（悬浮窗约定）→ ScanEngine Int.MAX_VALUE。 */
     private fun maxPagesOrDefault(raw: Int): Int = if (raw <= 0) Int.MAX_VALUE else raw
 
+    /**
+     * **起流程的唯一入口**（2026-09-18 修"点了没反应"）。
+     *
+     * 修复前的缺陷：`startScan` 的 `plan` 参数**只有 adb 调试通道会传**，用户从悬浮窗点
+     * 「圣遗物锁定 / 自动装备」时 `plan = null` ⇒ `ScanEngine.foreach` 打一行 warn 就返回，
+     * 表现为"跑了一遍界面什么都没做"。
+     *
+     * 现在的行为：按脚本自己的 `ui.actions`（有没有 `import`）+ `vars`（要什么数据）取输入；
+     * 需要输入却没有 / 这份文件喂不了它 ⇒ **发一条提醒并拒绝起跑**，不再静默空跑。
+     */
+    private fun startFlowIfReady(flowKey: String, maxPages: Int) {
+        val ctx = applicationContext
+        if (GoodRepository.needsInput(ctx, flowKey)) {
+            val plan = GoodRepository.planFor(ctx, flowKey)
+            if (plan == null) {
+                val label = GoodRepository.labelOf(ctx, flowKey)
+                NoticeCenter.warn("「$label」需要先选一份输入文件（管理器 → GOOD 数据）")
+                if (settingsRepository.get().scanEnabled) {
+                    settingsRepository.setScanEnabled(false)
+                }
+                return
+            }
+            overlayController.collapse() // 自动化执行前收面板（与滑动测试缩球对称）
+            Log.i(TAG, "start flow=$flowKey plan=${plan.size} (from GoodRepository)")
+            scriptRunner.startScan(flowKey, maxPages, plan = plan)
+            return
+        }
+        overlayController.collapse()
+        scriptRunner.startScan(flowKey, maxPages)
+    }
+
     private fun requestCapturePermission() {
         if (requestingCapturePermission) return
         requestingCapturePermission = true
         try {
-            // 悬浮窗点击是用户交互 + SAW 豁免（与原版同款语义）：直接启动授权 activity
+            // 悬浮窗点击 = 用户交互，且本应用 UID 持有可见窗口（无障碍进程里的悬浮窗）⇒
+            // 命中「允许后台启动 Activity」的豁免，无需 SAW 也能直接拉起授权 activity
+            // （2026-09-18 已用探针实测：吊销「显示在上层」权限后仍可启动）
             val intent = Intent(this, CapturePermissionActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
         } catch (e: Exception) {
-            // 兜底：部分 ROM 收紧 SAW 后台启动 → 拉 app 前台，MainActivity 前台内再发起（无通知依赖）
+            // 兜底：部分 ROM 收紧后台启动限制 → 拉 app 前台，MainActivity 前台内再发起（无通知依赖）
             requestingCapturePermission = false
             Log.w(TAG, "direct capture launch failed, bringing app to front", e)
             val intent = Intent(this, MainActivity::class.java)
@@ -626,6 +712,12 @@ class TriggerForegroundService : Service() {
         const val ACTION_STOP = "com.bettergi.pocket.action.STOP"
         const val ACTION_CAPTURE_RESULT = "com.bettergi.pocket.action.CAPTURE_RESULT"
         const val ACTION_CAPTURE_DENIED = "com.bettergi.pocket.action.CAPTURE_DENIED"
+        /**
+         * 悬浮窗「开始导出」：由无障碍进程经设置桥（`overlay_share_good`）转成服务指令。
+         * 之所以不在无障碍进程直接起分享：导出文件名只有本服务知道（`lastGoodFile`），
+         * 且系统分享面板必须由带 Activity 的进程拉前台。
+         */
+        const val ACTION_SHARE_GOOD = "com.bettergi.pocket.action.SHARE_GOOD"
         const val ACTION_SCAN_START = "com.bettergi.pocket.action.SCAN_START"
         const val ACTION_SCAN_STOP = "com.bettergi.pocket.action.SCAN_STOP"
         const val ACTION_DEBUG_SET_SCREEN_SHARE = "com.bettergi.pocket.action.DEBUG_SET_SCREEN_SHARE"
@@ -638,6 +730,9 @@ class TriggerForegroundService : Service() {
          * 落点：`/sdcard/Android/data/<pkg>/files/sweep_last_good.json`（adb shell 有 ext_data_rw 可读）。
          */
         const val ACTION_DEBUG_DUMP_GOOD = "com.bettergi.pocket.action.DEBUG_DUMP_GOOD"
+        /** 调试：把设备上的 GOOD/配装计划文件复制成当前输入（`--es src /sdcard/xxx.json`）。 */
+        const val ACTION_DEBUG_SET_GOOD = "com.bettergi.pocket.action.DEBUG_SET_GOOD"
+        const val EXTRA_GOOD_SRC = "src"
         const val ACTION_DEBUG_SET_PROBE = "com.bettergi.pocket.action.DEBUG_SET_PROBE"
         const val ACTION_DEBUG_SET_VERBOSE = "com.bettergi.pocket.action.DEBUG_SET_VERBOSE"
         const val ACTION_DEBUG_SWIPE_TEST = "com.bettergi.pocket.action.DEBUG_SWIPE_TEST"

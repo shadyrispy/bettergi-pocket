@@ -36,6 +36,12 @@ interface OcrGateway {
 interface ScanListener {
     fun onProgress(stage: String, vars: Map<String, Any?>)
     fun onFinished(reason: String)
+
+    /**
+     * 脚本用 `notify` 原语推出的重点信息（P4）。
+     * 默认空实现 ⇒ 老的实现类不必改；展示由宿主决定（本应用走 NoticeCenter）。
+     */
+    fun onNotice(level: String, text: String) {}
 }
 
 /** 扫描会话变量（flow vars + visit 产物）。 */
@@ -262,11 +268,50 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             "exit" -> exitStep(step)
             "verify" -> verify(step)
             "emit" -> listener.onProgress("emit", vars.snapshot())
+            "notify" -> notifyStep(step)
             else -> {
                 Log.w(TAG, "unknown step '$op', skipped")
                 RecognitionLog.log(logTag, RecognitionLog.Level.W, "未知原语 $op 已跳过")
             }
         }
+    }
+
+    /**
+     * `notify` 原语（P4）：脚本随时推一条重点信息给用户。
+     *
+     * ```json
+     * { "do": "notify", "level": "warn", "text": "已入库 $total 件，重复过多提前结束" }
+     * ```
+     * `text` 支持 `$var` 插值（复用 DSL 既有的「`$` 前缀 = 引用」约定）；
+     * 可用的变量 = [ScanVars.snapshot] 里的字段（total / level / rarity / locked / favorited /
+     * crafted / gridLocked / charDupStreak / stopRequested），未知名字替换成空串。
+     */
+    private fun notifyStep(step: JSONObject) {
+        val raw = step.optString("text", "")
+        if (raw.isBlank()) return
+        val level = step.optString("level", "info").lowercase()
+        val text = interpolateVars(raw)
+        RecognitionLog.log(logTag, RecognitionLog.Level.I, "notify[$level] $text")
+        listener.onNotice(level, text)
+    }
+
+    /** `$name` → 会话变量值；非标量转 JSON 串；未知名字 → 空串。 */
+    private fun interpolateVars(raw: String): String {
+        if (!raw.contains('$')) return raw
+        val snapshot = vars.snapshot()
+        val sb = StringBuilder()
+        var i = 0
+        while (i < raw.length) {
+            val c = raw[i]
+            if (c != '$') { sb.append(c); i++; continue }
+            var j = i + 1
+            while (j < raw.length && (raw[j].isLetterOrDigit() || raw[j] == '_')) j++
+            val name = raw.substring(i + 1, j)
+            if (name.isEmpty()) { sb.append('$'); i++; continue }
+            sb.append(snapshot[name]?.toString() ?: "")
+            i = j
+        }
+        return sb.toString()
     }
 
     // ---- #1 enterScreen：入口链跳转 + anchor OCR 断言（重试 3 次）----
@@ -3768,6 +3813,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                     }
                 }
                 "stopWhen" -> stopWhen(step)
+                "notify" -> notifyStep(step)
                 else -> {
                     Log.w(TAG, "unknown visit step '$vop', skipped")
                     RecognitionLog.log(logTag, RecognitionLog.Level.W, "未知 visit 步 $vop 已跳过")

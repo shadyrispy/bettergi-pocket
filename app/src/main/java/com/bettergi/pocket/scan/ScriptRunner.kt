@@ -8,10 +8,9 @@ import android.util.Log
 import com.bettergi.pocket.capture.FrameSource
 import com.bettergi.pocket.capture.ScreenCaptureController
 import com.bettergi.pocket.input.InputAccessibilityService
-import com.bettergi.pocket.overlay.OverlayWindowController
+import com.bettergi.pocket.overlay.OverlayBridge
 import com.bettergi.pocket.dsl.FlowSource
 import com.bettergi.pocket.dsl.FlowValidator
-import com.bettergi.pocket.dsl.repo.RepoManager
 import com.bettergi.pocket.recognition.ocr.OcrFactory
 import com.bettergi.pocket.recognition.name.GoodNames
 import kotlinx.coroutines.CoroutineScope
@@ -32,12 +31,10 @@ class ScriptRunner(
     context: Context,
     private val frameSource: FrameSource,
     private val captureController: ScreenCaptureController,
-    private val overlayController: OverlayWindowController,
+    private val overlayController: OverlayBridge,
     private val listener: ScanListener,
 ) {
     private val appContext = context.applicationContext
-    /** §16.3 S4：脚本仓库管理器（订阅/更新）。执行前与启动自动更新共用。 */
-    val repoManager = RepoManager(appContext)
     private val mainHandler = Handler(Looper.getMainLooper())
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -228,13 +225,6 @@ class ScriptRunner(
         }
         currentJob = scope.launch {
             try {
-                // §16.3 S4：执行前自动更新到期订阅（对齐 PC AutoUpdateBeforeCommandLineRun）；
-                // 到期检查为本地时间戳比对，无到期时立即返回，不拖慢扫描启动。
-                try {
-                    repoManager.updateAllIfDue()
-                } catch (e: Exception) {
-                    Log.w(TAG, "repo auto-update before scan failed", e)
-                }
                 val profile = ScreenProfile.loadFor(appContext.assets, size.first, size.second)
                 profile.calibrate(size.first, size.second)
                 @Suppress("DEPRECATION")
@@ -403,11 +393,6 @@ class ScriptRunner(
         } finally {
             frame.release()
         }
-    }
-
-    /** §16.3 S4：启动自动更新（fire-and-forget，后台协程，不阻塞服务启动）。 */
-    fun triggerRepoUpdateAtStartup() {
-        scope.launch(Dispatchers.IO) { runCatching { repoManager.updateAllIfDue() } }
     }
 
     /**

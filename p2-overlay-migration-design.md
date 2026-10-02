@@ -1,6 +1,15 @@
 # P2 悬浮窗迁移设计（A11yOverlayHost）
 
-状态：**待定稿**。已落地前置 step1/3（`OverlayHost` 抽象 + `AppOverlayHost` 回退，commit `9cb4951`）。
+状态：**已落地（2026-09-18）**。
+
+> 实施说明（与本文原始设计的差异，实测后定稿）：
+> - 本文写于方案阶段，当时设想 `OverlayHost`/`AppOverlayHost` 双实现回退。**最终未做双实现** ——
+>   无障碍本就是扫描的硬前提，双轨只会带来「两个进程各起一个控制器」的状态同步难题。
+>   改为**单轨**：悬浮窗只活在无障碍进程（`A11yOverlayRuntime` 持有控制器），主进程只留一个
+>   同名门面 `OverlayBridge` 负责转发。
+> - 设置桥按本文「决策一 A」实现（`.settings` Provider 主进程权威 + `notifyChange` 回推），
+>   另外补了识别日志的跨进程镜像（`log_snapshot` 轮询 + `log_append` 回写）。
+> - 逐点击的 `prepareClickPassthrough` **保留 IPC**，没有搬进注入侧（会改掉扫描/自动对话两处语义）。
 
 ## 已确认的前提
 

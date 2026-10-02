@@ -20,9 +20,9 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
-import android.widget.Toast
 import com.bettergi.pocket.genshin.GenshinPackages
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -32,6 +32,9 @@ class InputAccessibilityService : AccessibilityService() {
         instance = this
         Log.i(TAG, "accessibility service connected")
         notifyStateChanged()
+        // 2026-09-18 宿主迁移：登记悬浮窗运行时的宿主服务。**此处不上窗** ——
+        // 「什么时候显示」仍由主进程前台服务决定（收到 overlay_show 才构建控制器）。
+        com.bettergi.pocket.overlay.A11yOverlayRuntime.attachService(this)
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -54,6 +57,8 @@ class InputAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     private fun clearInstance() {
+        // 无障碍断开 ⇒ 悬浮窗随之销毁（TYPE_ACCESSIBILITY_OVERLAY 的窗口活不过服务）
+        com.bettergi.pocket.overlay.A11yOverlayRuntime.detachService()
         if (instance === this) {
             instance = null
             lastAppPackage = null
@@ -76,6 +81,8 @@ class InputAccessibilityService : AccessibilityService() {
         private const val METHOD_SWIPE = "swipe"
         private const val METHOD_SCAN_PROGRESS = "scan_progress"
         private const val METHOD_PROBE = "probe"
+        private const val METHOD_PROBE_BAL = "probe_bal"
+        private const val KEY_MOUNT_OVERLAY = "mount_overlay"
         private const val METHOD_BACK = "back"
         private const val KEY_TEXT = "text"
         private const val KEY_CONNECTED = "connected"
@@ -198,7 +205,12 @@ class InputAccessibilityService : AccessibilityService() {
         fun ensureEnabled(context: Context, message: String = DEFAULT_PROMPT): Boolean {
             if (isConnected()) return true
             val prompt = if (isEnabledInSettings(context)) CRASHED_PROMPT else message
-            Toast.makeText(context, prompt, Toast.LENGTH_LONG).show()
+            // 提醒走唯一通路；无障碍未配好时什么都用不了，但也不该反复弹 ⇒ 用 onceKey 只提示一次
+            com.bettergi.pocket.notice.NoticeCenter.post(
+                com.bettergi.pocket.notice.NoticeCenter.Level.WARN,
+                prompt,
+                onceKey = "a11y_enable_hint",
+            )
             openSettings(context)
             return false
         }
@@ -337,6 +349,9 @@ class InputAccessibilityService : AccessibilityService() {
                 METHOD_PROBE -> Bundle().apply {
                     putBoolean(KEY_OK, toggleProbeOverlay())
                 }
+                METHOD_PROBE_BAL -> Bundle().apply {
+                    putBoolean(KEY_OK, probeBalLocal(extras?.getBoolean(KEY_MOUNT_OVERLAY, true) ?: true))
+                }
                 METHOD_CLICK -> Bundle().apply {
                     putBoolean(
                         KEY_OK,
@@ -362,7 +377,9 @@ class InputAccessibilityService : AccessibilityService() {
                         ),
                     )
                 }
-                else -> Bundle()
+                // 悬浮窗相关指令全部转交运行时（2026-09-18 宿主迁移）：
+                // 主进程的 OverlayBridge 只发这一组方法名，方法表在 A11yOverlayRuntime 里维护。
+                else -> com.bettergi.pocket.overlay.A11yOverlayRuntime.handle(method, extras)
             }
         }
 
@@ -721,6 +738,91 @@ class InputAccessibilityService : AccessibilityService() {
                 probeView = null
                 probeProgressView = null
                 false
+            }
+        }
+
+        // ---- ★ 2026-09-18 探针：a11y overlay 可见时能否从后台启动 Activity（BAL 豁免核实）----
+        private var balProbeView: View? = null
+
+        /**
+         * 供真机核实「长按/点击 a11y 悬浮窗 → 启动 MainActivity」是否被系统 BAL 拦截。
+         *
+         * 依据（官方文档「允许后台启动 Activity 的情形」第一条 = *应用拥有可见窗口*；
+         * AOSP 判定式 `((appSwitchAllowedOrFg || hasNonAppVisibleWindow(uid)) && callingUidHasAnyVisibleWindow)`）：
+         * a11y overlay 属**非应用可见窗口** ⇒ 理论可行，且**不需要 SYSTEM_ALERT_WINDOW**。
+         *
+         * ⚠️ startActivity 被拦截时**不抛异常**（静默失败）⇒ 本探针只负责「触发 + 打点」，
+         * 结论必须由外部证据判定：
+         *   ① `adb logcat -s ActivityTaskManager` 出现 `Background activity start … not allowed` ⇒ 被拦
+         *   ② `adb shell dumpsys activity activities | grep bettergi` 出现 MainActivity ⇒ 成功
+         * 诊断探针，结论落地后按需删除。
+         */
+        fun probeBal(context: Context, mount: Boolean): Boolean {
+            if (instance != null) return probeBalLocal(mount)
+            val extras = Bundle().apply { putBoolean(KEY_MOUNT_OVERLAY, mount) }
+            return remoteCall(METHOD_PROBE_BAL, extras)?.getBoolean(KEY_OK, false) == true
+        }
+
+        private fun probeBalLocal(mount: Boolean): Boolean {
+            val service = instance ?: return false
+            Handler(Looper.getMainLooper()).post {
+                if (mount) mountBalProbeOverlay(service)
+                // ⚠️ 关键时序：BAL 判定看 `callingUidHasAnyVisibleWindow`，窗口需**已成可见**才有豁免
+                //   ⇒ 延后 600ms 再试，否则会得到假阴性（窗口刚 addView 还没上屏）
+                Handler(Looper.getMainLooper()).postDelayed(
+                    { balTryStart(service, "immediate(mountOverlay=$mount, +600ms)") },
+                    600L,
+                )
+            }
+            return true
+        }
+
+        private fun mountBalProbeOverlay(service: AccessibilityService): Boolean {
+            val container = LinearLayout(service).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(Color.argb(230, 20, 90, 40))
+                setPadding(24, 16, 24, 16)
+            }
+            container.addView(
+                TextView(service).apply {
+                    text = "BAL 探针（a11y overlay）"
+                    setTextColor(Color.WHITE)
+                    textSize = 14f
+                },
+            )
+            container.addView(
+                Button(service).apply {
+                    text = "点我开 MainActivity"
+                    setOnClickListener { balTryStart(service, "byTap") }
+                },
+            )
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                // ⚠️ 不可加 FLAG_NOT_TOUCHABLE（要能点）；NOT_FOCUSABLE 保证不抢输入焦点
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT,
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = 40
+                y = 300
+            }
+            val ok = attachA11yView(container, lp)
+            balProbeView = container
+            Log.i(TAG, "bal-probe: overlay mounted=$ok（type=TYPE_ACCESSIBILITY_OVERLAY, 可点击）")
+            return ok
+        }
+
+        private fun balTryStart(service: AccessibilityService, why: String) {
+            try {
+                service.startActivity(
+                    Intent(service, com.bettergi.pocket.debug.BalProbeActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+                Log.i(TAG, "bal-probe: startActivity 已发出（$why）—— 结果查 ActivityTaskManager 日志 / dumpsys")
+            } catch (t: Throwable) {
+                Log.e(TAG, "bal-probe: startActivity 抛异常（$why）", t)
             }
         }
 
