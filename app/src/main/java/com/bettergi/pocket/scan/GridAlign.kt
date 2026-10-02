@@ -1,6 +1,7 @@
 package com.bettergi.pocket.scan
 
 import android.util.Log
+import com.bettergi.pocket.core.IntRect
 import org.opencv.core.Mat
 
 /**
@@ -52,6 +53,22 @@ object GridAlign {
     private const val BAND_TOL = 14          // 跨列/跨行 δ 一致性容差
     private const val BAND_MIN_COLS = 5      // 共识门：至少几列投出一致的带（6 列网格允许 1 列空/翻票）
 
+    // ---- 逐行锚定的**文本行**检测（#169，筛选面板这类"每行没有标签亮带"的网格用）----
+    //
+    // 与上面的底栏锚 [rowPhase] 并列，共用同一套语义（profile `labelAnchor` =
+    // 「行顶 → 本网格用于绝对行相位的行内特征中心」），只是**特征与聚合方式**不同：
+    //   · 背包类网格：特征是**卡内等级标签亮带** ⇒ 逐**列**量带、跨列取众数（6~7 列，抗单列翻票）；
+    //   · 筛选面板：特征是**套名文本行**（每行没有标签亮带）⇒ 逐**行**量墨迹带、以锚定心
+    //     （2 列无法做"多数票"，而逐行独立测量天然有 8~16 份样本，判据放在"离锚多远"上）。
+    private const val TEXT_QUANTILE = 0.95   // 行亮度取 95 分位：字在窄列里占比低，均值会被背景抹平
+    private const val TEXT_CONTRAST_MIN = 12.0 // 剖面 峰−中位 下限（空带实测 ≤8；灰化字实测 ≥22；底栏带的门是 40）
+    private const val TEXT_HI_NUM = 2
+    private const val TEXT_HI_DEN = 5        // 起带阈 = 中位 + 2/5 对比度（离线标定值 0.40）
+    private const val TEXT_AMBIG_MIN = 8     // 双候选带"离锚最近"至少要赢这么多 px，否则判没量准
+    // 横条（行卡片分隔线）判据＝**最长一段上墨列 / ROI 宽**。2244 真机 38 帧 608 次逐行量测：
+    // 文字带（2~7 字、列覆盖 0.25~0.86）此值恒 ≤0.13（≈一个字宽 / 名框宽，与分辨率同比例缩放）；
+    // 横条/高亮块 0.30~1.00。覆盖率那条判据不行——同一根线被复选框打断时 cov 掉到 0.45~0.81。
+    private const val TEXT_BAR_LONGEST = 0.30
 
     /** p0 基准：顶对齐首帧检测到的绝对位置（帧坐标）；null = 未建立 → drift 退化为 detected−expected。 */
     private val baselines = mutableMapOf<String, Int?>()
@@ -234,7 +251,10 @@ object GridAlign {
                 barsByCol.add(kept)
             }
         }
-        val gate = minOf(BAND_MIN_COLS, g.cols)
+        val gate = minOf(
+            profile.rawObject("grids.$gridKey")?.optInt("phaseMinCols", BAND_MIN_COLS) ?: BAND_MIN_COLS,
+            g.cols,
+        )
         val phase = phaseFromBars(barsByCol, firstCenter, pitch, tol, gate)
         if (phase == null) {
             Log.d(
@@ -464,5 +484,209 @@ object GridAlign {
         var sum = 0L
         for (i in buf.indices) sum += buf[i].toLong() and 0xFF
         return sum.toDouble() / buf.size
+    }
+
+    // ================= #169 逐行锚定的文本行裁剪（与 rowPhase 同为"绝对行相位"家族）=================
+
+    /** [crop] = 实际送 OCR 的框（帧坐标）；[phase] = 实测字心 − 名义字心（帧 px，正=内容偏下）。 */
+    data class TextLineCrop(val crop: IntRect, val phase: Int)
+
+    /**
+     * 名义行带 → **实测文本行**的紧裁剪（+该行的绝对相位）。
+     *
+     * 用于 rec-only 槽位（没有 det 帮忙找行）且**名义行带远高于一行字**的网格。2244 筛选面板实测：
+     * 行带 90px 里只有 [23,49] 那 27px 是字、且**贴带顶** ⇒ 列表落点 δ 一出 `[−27,+41]` 就把整页
+     * 切成"半截字 + 大片空白"，压到 rec 的 48px 工作高后全是**确定性乱码**（同页两次读数一字不差；
+     * 当初误判成"灰化低对比度 / 词典缺口"，#169 复查推翻）。离线复算（`_dev/probe_169_anchor.py`
+     * 把真截图整体平移模拟落点）：δ=−30 时名义带 16 行只对 1 行、±40~50 全页归零。
+     *
+     * 为什么必须带 profile 锚 [anchor]：锚给出「这张卡的字在行带里的位置」，而**读数与点击由同一个
+     * 相位驱动**（`clickY = rowCenterY + phase`，见 ScanJudgmentDomain.matchFilterRow）⇒ 量到相邻那张
+     * 卡也不算错，两件事自洽即可。真正会出错的是"回退用名义行带读数、却按名义行中心点"：δ=−53 时
+     * 名义带里只剩上一张卡的下半截字，点下去却是本行中心 ⇒ 读 B 点 A（静默选错套装）。
+     * 与 [rowPhase] 同义：`labelAnchor` = 行顶 → 行内特征中心；背包那份的特征是等级标签亮带，
+     * 本函数的名字叫法是套名文本行。
+     *
+     * 返回 null 的情形（未标定锚 / 窗内没有墨迹带 / 对比度不过门 / 两条候选离锚几乎一样近 /
+     * 窗内只剩横条，见 [isBarShape]）—— 调用方**不许**拿名义行带凑数：这行不读，也不点。
+     *
+     * ⚠️ 真机 2026-10-02 三轮 2244 探针各暴露一条，全在尾页：
+     * ① **行卡片的上边框线也是一条墨迹带**，且它比文字更靠锚（实测 f58：文字 ph=+31、边框 ph=−19）
+     *    ⇒ 单看"离锚最近"会裁到一条线、rec 读空（表现为"整页空 13 行"）。
+     * ② 横条还会**污染阈值本身**：它把 峰 抬到 200+、中位 抬到 100+，而尾页有些行的字 p95 只有 140
+     *    ⇒ 起带阈 144~171 直接把那些行判成"没墨"（单遍写法即使认出了横条也救不回来，必须**摘掉横条
+     *    重算阈**）。摘掉后 2244 f60 的四行 `谐律异想断章/沙上楼阁史话/回声之林夜话/来歆余响` 全部读正。
+     * 线与字在**横向连续性**上完全可分：文字带最长上墨段 ≤0.13×框宽（≈一个字宽），横条 0.30~1.00；
+     * 覆盖率不可分（同一根线被复选框打断时 cov 掉到 0.45~0.81，而 7 字密名 cov 高达 0.86）。
+     * ③ **选取窗必须放满半个行距**：尾页实测 δ=−53（滑到底停不住，整页停在格点之外），±45 窗
+     *    8 帧 × 16 格**一个都没量到**、半行距窗量到 96 个（`_dev/probe_169_tailpage.py --score`）。
+     *
+     * @param bandHeight 名义行带高（profile `rowHeight`）
+     * @param pitch 行距（`rowPitch`）：决定选取窗（±半行距）与剖面窗（再外扩 1/4 行带）
+     * @param anchor 名义行顶 → 行内特征中心（profile `labelAnchor`，负=未标定）
+     */
+    fun textLineCrop(
+        src: Mat,
+        x0: Int,
+        width: Int,
+        yTop: Int,
+        bandHeight: Int,
+        pitch: Int,
+        anchor: Int,
+    ): TextLineCrop? {
+        if (src.empty() || anchor < 0 || width <= 0 || bandHeight <= 0 || pitch <= 0) return null
+        val xFrom = x0.coerceIn(0, src.cols() - 1)
+        val xTo = (x0 + width).coerceIn(xFrom + 1, src.cols())
+        val center = yTop + anchor
+        // 相位**同时**加到读数与点击（见 ScanJudgmentDomain.matchFilterRow：clickY = rowCenterY + phase），
+        // 所以"量到哪张卡"不自洽才是错，量到**相邻**卡本身不错 —— 选取范围因此放满半个行距（±pitch/2），
+        // 而剖面窗再外扩 1/4 行带：|δ|→半行距 时字带会贴到窗沿被截半，截半的图压到 48px 就是乱码。
+        // 真机 2244 尾页实测 δ=−53（列表滑到底停不住整页）：±45 窗 **0/128 格**认得出，
+        // 半行距窗 96/128（名义行带只有 16，且读的是**上一张卡被裁掉的下半截**）。
+        val half = pitch / 2
+        val slack = half + bandHeight / 4
+        val yFrom = (center - slack).coerceAtLeast(0)
+        val yTo = (center + slack).coerceAtMost(src.rows())
+        if (yTo <= yFrom + 1) return null
+
+        val prof = textRowProfile(src, xFrom, xTo, yFrom, yTo)
+        val thr0 = inkThreshold(prof) ?: return null
+        val minRun = maxOf(4, bandHeight / 16)
+        // 上限：字带实测 ≈ 0.37×行带；放到半行带仍宽裕，再大就是"整窗皆墨"（高亮行/底色）而非一行字
+        val maxRun = maxOf(minRun, minOf(bandHeight / 2, pitch / 2 - 1))
+        // 第一遍**放开宽度门**，只为认出横条并把它们的行从阈值统计里摘掉：横条把 峰 抬到 200+、
+        // 中位 抬到 100+，尾页那些"字比线暗"的行（字 p95≈140）就永远进不了起带阈 ⇒ 整行读空。
+        // 真机 2244 f60 实测：y=769/871 四行就是这么丢的（单遍写法认得出横条、但阈已经被它污染）。
+        val bar = BooleanArray(prof.size)
+        for (run in inkRuns(prof, 1, prof.size, thr0)) {
+            if (isBarShape(bandShape(src, xFrom, xTo, yFrom + run.first, yFrom + run.last + 1, thr0))) {
+                for (i in run.first..run.last) bar[i] = true
+            }
+        }
+        val clean = DoubleArray(prof.size - bar.count { it })
+        var k = 0
+        for (i in prof.indices) if (!bar[i]) clean[k++] = prof[i]
+        val thr = inkThreshold(clean) ?: return null
+        val near = inkRuns(prof, minRun, maxRun, thr)
+            .filterNot { isBarShape(bandShape(src, xFrom, xTo, yFrom + it.first, yFrom + it.last + 1, thr)) }
+            .map { it to yFrom + (it.first + it.last) / 2 - center }
+            .filter { Math.abs(it.second) <= half }
+        if (near.isEmpty()) return null
+        val dists = near.map { Math.abs(it.second) }.sorted()
+        // 行格不规则时（2560 的 rowYTop 步长 133 vs 实测 136）同一窗里会留下两条都进得了 ±pitch/2 的带；
+        // 差距不到 TEXT_AMBIG_MIN 就判"这行没量准"（调用方不许拿名义带凑数，见该处注释）。
+        if (dists.size >= 2 && dists[1] - dists[0] < TEXT_AMBIG_MIN) return null
+        val (run, phase) = near.minByOrNull { Math.abs(it.second) } ?: return null
+        val pad = maxOf(2, bandHeight / 16)
+        val top = (yFrom + run.first - pad).coerceAtLeast(0)
+        val bottom = (yFrom + run.last + 1 + pad).coerceAtMost(src.rows())
+        if (bottom - top < minRun) return null
+        return TextLineCrop(IntRect(xFrom, top, xTo - xFrom, bottom - top), phase)
+    }
+
+    /**
+     * 纯函数：剖面的起带阈（自适应于该窗自身 ⇒ 不随分辨率/整体明暗漂移）。
+     * 对比度不过门（空带/纯噪声）⇒ null，调用方按"没量到"处理。
+     * [inkRuns] 与 [bandShape] **必须共用本值** —— 两处阈值不同源就会一处认为有带、另一处认为没墨。
+     */
+    internal fun inkThreshold(prof: DoubleArray): Double? {
+        if (prof.isEmpty()) return null
+        val med = prof.sortedArray()[prof.size / 2]
+        val mx = prof.max()
+        if (mx - med < TEXT_CONTRAST_MIN) return null
+        return med + (mx - med) * TEXT_HI_NUM / TEXT_HI_DEN
+    }
+
+    /**
+     * 纯函数：这条带像不像"一行字"。判据是**横向连续性**：横条（行卡片分隔线/边框/高亮块）
+     * 有一整段连续上墨的列，文字带最长一段只到一个字宽。实测见 [TEXT_BAR_LONGEST] 处。
+     */
+    internal fun isBarShape(longestRunRatio: Double): Boolean = longestRunRatio >= TEXT_BAR_LONGEST
+
+    /** 一条候选带的横向结构：最长一段连续上墨列 / 窗宽。阈值与 [inkRuns] 同一个。 */
+    private fun bandShape(src: Mat, xFrom: Int, xTo: Int, yTop: Int, yBot: Int, thr: Double): Double {
+        val width = xTo - xFrom
+        val ch = src.channels()
+        val buf = ByteArray(width * ch)
+        val inked = BooleanArray(width)
+        for (y in yTop until yBot) {
+            src.get(y, xFrom, buf)
+            for (p in 0 until width) {
+                if (inked[p]) continue
+                val o = p * ch
+                var v = buf[o].toInt() and 0xFF
+                for (c in 1 until ch) {
+                    val b = buf[o + c].toInt() and 0xFF
+                    if (b > v) v = b
+                }
+                if (v >= thr) inked[p] = true
+            }
+        }
+        var longest = 0
+        var cur = 0
+        for (p in 0 until width) {
+            if (inked[p]) {
+                cur++
+                if (cur > longest) longest = cur
+            } else {
+                cur = 0
+            }
+        }
+        return longest.toDouble() / width
+    }
+
+    /** 逐行亮度剖面（每行一个 0..255 标量 = 该行像素亮度 95 分位；亮度取 BGR 通道最大值）。 */
+    private fun textRowProfile(src: Mat, xFrom: Int, xTo: Int, yFrom: Int, yTo: Int): DoubleArray {
+        val n = yTo - yFrom
+        val ch = src.channels()
+        val width = xTo - xFrom
+        val buf = ByteArray(width * ch)
+        val hist = IntArray(256)
+        return DoubleArray(n) { i ->
+            src.get(yFrom + i, xFrom, buf)
+            hist.fill(0)
+            for (p in 0 until width) {
+                val o = p * ch
+                var v = buf[o].toInt() and 0xFF
+                for (c in 1 until ch) {
+                    val b = buf[o + c].toInt() and 0xFF
+                    if (b > v) v = b
+                }
+                hist[v]++
+            }
+            quantileFromHistogram(hist, width, TEXT_QUANTILE)
+        }
+    }
+
+    /** 由直方图取分位数：最小的 q 使「≤q 的样本数 ≥ ratio·n」（与 numpy `percentile` 线性插值差 <1）。 */
+    private fun quantileFromHistogram(hist: IntArray, n: Int, ratio: Double): Double {
+        val target = Math.max(1, Math.round(n * ratio))
+        var acc = 0
+        for (v in hist.indices) {
+            acc += hist[v]
+            if (acc >= target) return v.toDouble()
+        }
+        return (hist.size - 1).toDouble()
+    }
+
+    /**
+     * 纯函数：剖面 → 墨迹带（**闭**区间，索引相对 [prof] 起点），阈 [thr] 由 [inkThreshold] 给。
+     * 宽度不在 `[minRun, maxRun]` 的碎片丢弃；"是不是横条"由调用方按 [isBarShape] 再筛。
+     */
+    internal fun inkRuns(prof: DoubleArray, minRun: Int, maxRun: Int, thr: Double): List<IntRange> {
+        if (prof.isEmpty() || maxRun < minRun) return emptyList()
+        val out = ArrayList<IntRange>()
+        var i = 0
+        while (i < prof.size) {
+            if (prof[i] >= thr) {
+                var j = i
+                while (j + 1 < prof.size && prof[j + 1] >= thr) j++
+                if (j - i + 1 in minRun..maxRun) out.add(i..j)
+                i = j + 1
+            } else {
+                i++
+            }
+        }
+        return out
     }
 }

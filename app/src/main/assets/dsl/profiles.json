@@ -921,7 +921,24 @@
       ],
       "rowPitch": 136,
       "rowHeight": 120,
-      "cols": {
+      "cardSize": [
+        921,
+        120
+      ],
+      "cardOrigin": [
+        203,
+        210
+      ],
+      "pitch": [
+        966,
+        136
+      ],
+      "visibleRows": 8,
+      "cols": 2,
+      "labelAnchor": 48,
+      "labelAnchorNote": "★2026-10-02 #174 改由**本档两帧直接量取**（此前是 46 = 按 2560 档推导、从未在本档复核）。帧 02 `uploaded/set_filter_popup_1000053593.jpg`：12 行可用 ⇒ 锚 48.5~49.0、**斜率 −0.04 px/行**（⇒ 本档 `rowPitch`=136 与 `rowYTop` 逐行吻合，残差 σ=0.2）；帧 01 `uploaded/set_filter_popup_3200x1440.png`：8 行可用 ⇒ 48.0~48.5。取 **48**（墨迹带在两帧里恒为行带内 [30,67]）。⚠️ 帧 01 首行量出 73.5 不是锚漂移，是**勾选态的金色高亮点亮了整带**，已被 DARK_MAX 排除，别拿它当离群证据。**键名语义**同背包档（行顶 → 绝对行相位的行内特征中心），本面板的特征是套名文本行。写错的**风险是有界的**：`GridAlign.textLineCrop` 在锚 ±(半行距−1/16行距) 窗内取墨迹带，只要真实锚与本值相差 ≤ 半行距(68) 就仍是本行的字 ⇒ 顶多少裁一点，不会错行（错行才是静默选错套装）。复算：`dsl/.venv/bin/python dsl/scripts/probe_169_anchor_only.py dsl/uploaded/set_filter_popup_1000053593.jpg dsl/json/profiles.json`。★本值**已在本档真机复验**（22:22 纯读轮：六页自洽度全 1.00、首遍认出 86/96，与锚 46 那两轮 86/87 同档；`ph=` 落在 −62..+65 全在选取窗内 ⇒ 见审计 §12-F）⇒ 本档锚不再是推导值。",
+      "geomNote": "★2026-10-02 #174 注册为卡片网格（本档**实测**，两帧互证）：卡缘是**亮色描边**（比卡内底亮 ~13 级），竖描边中心 204.5 / 1124.5 / 1171.0 / 2090.0 —— 两帧在「只取第 4~8 行」的同一取样窗下**逐位相同**。取样必须避开被勾选那行：它画的是**金色描边**（宽 7px、亮 20 级），混进统计会把线位拉偏 8px（帧 01 首行勾选 ⇒ 整窗量出左缘 196）。按 2244 的同一口径记（原点=描边首像素、右缘=描边中心）⇒ `cardOrigin.x=203`、`cardSize[0]=921`、`pitch[0]=1169−203=966`。互证：`countRight+19` → 1105+19=1124 ✓、2070+19=2089≈2090 ✓（与 2244 同一条规则）；⚠️ 2244 的另一条 `checkboxX−33` 在本档**差 4px**（240−33=207 vs 描边首像素 203，本档等价式是 −37）⇒ 别拿它反推本档列原点。行向：横描边中心 477.2/612.5/749/884.5/1021/1157 ⇒ 行距 136.0±0.5、`rowYTop` = 描边中心 +5（2244 是 +3.5，同型不同值）；卡**画高** = 136−27(卡间缝) = 109，而 `cardSize[1]` 记 **120 = `rowHeight`**（可点行高；2244 也是「画高 82 / 记 90」，cardH ≠ 画高是常态）。落点余量：`210+7×136+120 = 1282 ≤ bounds 底 1292` ✓。⚠️ **注册本身不改本面板的任何运行行为**：`setFilter` 只读 `rowYTop`/`rowHeight`/`columns`/`bounds`/`advance`；`gridBounds` 有显式 `bounds` 键优先；`advanceStart`/`clickBandHalfFor` 只在 pagedGrid（背包网格）或 `useGeometryAdvance=true` 时被取，本面板两条都不走 ⇒ 期望值钉在 `GridGeometryTest`。量法脚本 `dsl/scripts/probe_174_card_borders.py`（先按 2244 真值 152/764/800/1411 自校通过，才用于本档；`calib_setfilter_grid.py` 的 x 向那条路径不可信，见审计 §11-C③）。",
+      "columns": {
         "left": {
           "checkboxX": 240,
           "nameBox": [
@@ -1179,7 +1196,7 @@
       "setName": {
         "collect": false,
         "reason": "用户定稿(2026-09-01)：背包面板 set_name 被遮挡 OCR 识别不到，不标定不采集；set_name 由圣遗物单件名 name 经词典反推",
-        "reverseDict": "tools/good_names.json（artifactPieces 305 件/65 套，由 gen_mappings.py→gen_good_names.py 从游戏 Reliquary 表生成）",
+        "reverseDict": "tools/mappings.json（artifactPieces 305 件/65 套，由 gen_mappings.py 从游戏 Reliquary 表生成并同步进 app assets）",
         "archivedMeasure": "动态 set_top=800+nSubs*64(±4) 实测留档，勿用于采集"
       },
       "equipped": [
@@ -1561,11 +1578,11 @@
   },
   "assets": {
     "dictionaries": {
-      "mappings": "tools/good_names.json",
+      "mappings": "tools/mappings.json",
       "keys": {
         "weapons": 242,
         "characters": 123,
-        "artifactSets": 56
+        "artifactSets": 65
       },
       "note": "1★/2★武器未收录（止扫靠稀有度判据）"
     },

@@ -197,7 +197,7 @@ class ScriptRunner(
 
     /**
      * 启动扫描流程。flowName 决定 assets/dsl/flows/<flowName>.json（"artifact_scan" | "weapon_scan"）。
-     * 名称词典统一加载（dsl/tools/good_names.json → GoodNames），各原语经 NameMatcher 反查。
+     * 名称词典统一加载（dsl/tools/mappings.json → GoodNames），各原语经 NameMatcher 反查。
      */
     fun startScan(
         flowName: String = "artifact_scan",
@@ -288,7 +288,7 @@ class ScriptRunner(
                 val names = try {
                     GoodNames.load(appContext.assets)
                 } catch (e: Exception) {
-                    Log.w(TAG, "good_names unavailable", e); null
+                    Log.w(TAG, "名称词典不可用（tools/mappings.json）", e); null
                 }
                 val engine = ScanEngine(
                     flowJson = flow,

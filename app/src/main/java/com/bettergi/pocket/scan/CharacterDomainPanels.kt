@@ -25,6 +25,7 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.DEFAULT_CHAR_DICT
 import com.bettergi.pocket.scan.ScanEngine.Companion.panelShotDir
 import com.bettergi.pocket.scan.ScanEngine.Companion.talentLevelOf
 import com.bettergi.pocket.scan.ScanEngine.Companion.talentRowPitch
+import com.bettergi.pocket.scan.ScanEngine.Companion.talentSamplesTied
 import com.bettergi.pocket.scan.ScanEngine.Companion.voteTalentLevel
 import com.bettergi.pocket.scan.ScanEngine.Companion.FILTER_PANEL_BACK_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.MAX_ROSTER_PAGES
@@ -897,25 +898,13 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
             //   ⇒ 取数字串**前 2~3 位中 ≤100 的最长者**为 level；**尾部**若为合法上限
             //   （20/40/50/60/70/80/90/100）⇒ 记 levelCap，供 ascension 精确推导 ✓
             val lvText = tt.getOrElse(1) { "" }
-            // ⚠️ 实测 OCR 原文形如「等级90/90」「等级80/90」（含"等级"二字 + "/"）✗
-            //    ⇒ 取**文本里的数字序列**：第 1 个 = level、第 2 个 = 等级上限（cap）✓
-            val lvNums = Regex("(\\d+)").findAll(lvText).map { it.value }.toList()
-            val lv = lvNums.getOrNull(0)?.let { d ->
-                d.take(3).toIntOrNull()?.takeIf { it <= 100 } ?: d.take(2).toIntOrNull()
-            } ?: 0
-            val validCaps = listOf(100, 90, 80, 70, 60, 50, 40, 20)
-            val levelCap = lvNums.getOrNull(1)?.toIntOrNull()?.takeIf { it in validCaps }
-                ?: lvNums.getOrNull(0)?.let { d -> validCaps.firstOrNull { d.length > it.toString().length && d.endsWith(it.toString()) } }
-            lastCharAscension = run {
-                val cap = levelCap ?: 0
-                when {
-                    cap >= 90 -> 6; cap >= 80 -> 5; cap >= 70 -> 4
-                    cap >= 60 -> 3; cap >= 50 -> 2; cap >= 40 -> 1; cap > 0 -> 0
-                    else -> when { // 回退：按 level 分层（GT 反推：70~80 ⇒ 5、81+ ⇒ 6）
-                        lv >= 81 -> 6; lv >= 70 -> 5
-                        lv >= 61 -> 4; lv >= 50 -> 3
-                        lv >= 41 -> 2; lv >= 21 -> 1; else -> 0
-                    }
+            val (lv, levelCap) = parseLevelText(lvText)
+            lastCharAscension = ascensionOf(lv, levelCap).also { asc ->
+                // cap 没读到 ⇒ 只能按 level 分层推，而 level 恰落在突破门槛上时 asc 5/6 是真的分不开
+                // （#165 就是这么静默错掉 8 位的）。这种"只能猜"的场合必须出声。
+                if (levelCap == null && lv in AMBIGUOUS_LEVELS) {
+                    Log.w(TAG, "char: 等级原文='$lvText' 没读到上限，level=$lv 正卡在门槛上" +
+                        "⇒ asc=$asc 是按 level 猜的，5/6 分不清；要么 ROI 又收窄了，要么 OCR 掉了后半段")
                 }
             }
             if (PANEL_RAW_DUMP) {
@@ -934,7 +923,7 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
         val nameDict = dictKeyOf(step, "name") ?: DEFAULT_CHAR_DICT
         /**
          * 三级解析：① 用户昵称表（#105，奇偶/流浪者这类显示名由玩家自定义、词典结构性命中不了）
-         *            ② 官方词典（good_names，中文名为键）
+         *            ② 官方词典（mappings，中文名为键）
          *            ③ 元素规则（旅行者 —— 官方键还要 `<元素>` 后缀，只有概览面板读得到元素）
          * ⚠️ ①② 都可换序，③ 必须最后：元素规则会吃掉**任何**未命中且元素已知的名字 ⇒ 前两档
          *    必须先判，否则「随机姓/随机人」（同为冰元素）会被误判成 TravelerCryo ✗（2026-09-17 实测）。
@@ -1006,9 +995,10 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
         charKey = key
         lastCharKey = key
         charLevel = level
-        charElement = element
+        val elGood = exportElement(key, element)
+        charElement = elGood
         vars.level = level
-        Log.i(TAG, "char: name=${key ?: rawName} lv=$level element=$element")
+        Log.i(TAG, "char: name=${key ?: rawName} lv=$level element=$elGood（页头 OCR='$element'）")
     } catch (e: OcrUnavailableException) {
         // ★ A7/G：函数级 catch 会把「OCR 引擎未就绪」吞成「跳过该格」（静默错数据）。
         //   引擎不可用是 loud 失败，必须放行（轨 E 已在 OcrGatewayImpl 侧显式抛出）。
@@ -1243,9 +1233,28 @@ internal suspend fun ScanEngine.readTalent() {
     //   循环节奏/停止条件/延迟**一个都没动**，只换合并律。
     var attempts = 0
     // ★ 停止条件：**至少完成 1 次额外读**（防"非零误读"，实测 cver14 Chevreuse 首读 skill='Lv.1'
-    //   而真值 11 ⇒ 只判 `>0` 会直接采信 ✗）**且**三项都 >0（全部战斗天赋基础等级恒 ≥1）。
+    //   而真值 11 ⇒ 只判 `>0` 会直接采信 ✗）**且**三项都 >0（全部战斗天赋基础等级恒 ≥1）
+    //   **且**各格已**不再平票**（#166）。
+    // ★ 2026-10-01 #166：只判「三项都 >0」时 2 个样本就够，而两样本的任何分歧**恰好是平票**
+    //   ⇒ 取值完全由平票方向单方面决定，多数票退化成一帧定终身。
+    //   取证（2244 三轮 19:30 / 19:45 / 20:58，逐访问把 `天赋重读` 序列还原成样本后回放）：
+    //   · **已入库**的错值 1 条：19:30 轮 随机姓名(=Manekina) `auto` 读数 `[10,10,10]` 后跟
+    //     `[1,10,10]`（第 2 帧原文 `'Lv.1o'`＝末位 `0` 被认成字母 `o`）⇒ 平票取更晚 = 1，
+    //     导出件 `20261001_1941_2244_character_HEAD.json` 里 auto=1，真值 10。
+    //   · 未入库但同形 2 次：Fischl burst `[8,13,12]` 后跟 `[8,13,2]`（`'•Lv.i2'`＝首位 `1`
+    //     认成 `i`）⇒ 取 2，再按 c6 减 3 夹到下限 1（真值面板 12 / GT 9）。两轮都落在**第二遍
+    //     访问**（`char 重复 ⇒ 不入库`）⇒ 只是没造成损失，首遍同形就会写进 GOOD。
+    //   · 反例 1 次：Citlali 20:58 轮 `[4,10,10]` → `[6,10,10]`（第 1 帧原文没打进日志、读到 4，
+    //     第 2 帧 `'WLv.6'`→6）⇒ 平票取更晚这次**恰好对**。所以平票不是恒错，是"没有多数票时只能赌"。
+    //   ⇒ 两手一起做：**采到不平票才停**（本处）+ **平票方向改成取更大**（见 [voteTalentLevel]，
+    //     锚定后 12 次分歧里每条错读都是**掉字**⇒偏小，取更大 9/9 对、取更晚只 6/9）。
+    //   代价已按同三轮日志逐访问回放量过：**156/160 次访问仍是 2 个样本**（20:58 轮），
+    //   只有真出现分歧的那 1~6 次会多读 1~4 次（每次 700ms），上限仍是 [TALENT_RETRY_MAX]。
+    //   ⚠️ 旧的 max 合并在 Manekina/Fischl 这两例**都是对的** ⇒ 本改法不是回退 #153：
+    //   多数票仍然保留（它挡"单帧偶发"，不依赖方向），只是不再让平票冒充多数票。
+    //   循环节奏/延迟/上限一个都不动。
     while (attempts < TALENT_RETRY_MAX) {
-        if (attempts > 0 && charTalents.none { it <= 0 }) break
+        if (attempts > 0 && charTalents.none { it <= 0 } && !talentSamplesTied(samples)) break
         attempts++
         delay(TALENT_REREAD_DELAY_MS)
         val f2 = runCatchingCancellable { freshFrame() }.getOrNull() ?: break
@@ -1275,13 +1284,17 @@ internal suspend fun ScanEngine.readTalent() {
             "char: 天赋重读 #$attempts $before → ${charTalents.toList()} ｜ 原文=${t2.take(3).map { "'" + it + "'" }}",
         )
     }
-    // ★ 2026-09-30 #153：**合并律从 max 改为「多数票 + 后到优先」**。
-    //   旧注释「OCR 失配恒为欠读 ⇒ 取 max 安全」**已被实测证伪**：错读也会**偏大**
+    // ★ 2026-09-30 #153：**合并律从 max 改为「多数票」**。
+    //   旧注释「OCR 失配恒为欠读 ⇒ 取 max 安全」当时**已被实测证伪**：错读也会**偏大**
     //   （2244 六轮实测：Diona 首读 `4Lv.1`→4 / Layla `.L4`→4，GT 真值都是 1；
     //    Kaeya 导出 (7,2,2) vs GT (3,2,2)）。max 让这类偏大错读**永久压住**后面读到的真值。
     //   多数票能同时挡住「早到的淡入期错读」和「晚到的瞬时错读」，max/first/last 各只挡一侧。
+    //   ⚠️ 那三条**偏大**样本都是同一个解析缺陷（「取串里第一个数」把邻格碎字当等级），
+    //   #153 在改合并律的**同一次提交**里把 [talentLevelOf] 改成锚定 `v` 之后就再没复现过；
+    //   #166 复查留存日志时，锚定后的 12 次分歧读数里 0 次偏大（详见 [voteTalentLevel] KDoc）。
+    //   ⇒ 保留多数票（它挡的是"单帧偶发"，不依赖方向），但**平票方向已改成取更大**（#166）。
     //   ⚠️ 只在**非零票**之间投票：0 = 「这次没读到」，不是「读到 0」，不能参与计数。
-    //   平票 ⇒ 取**更晚**的那个值（面板已淡入完成，后到的帧更可信）。
+    //   平票 ⇒ 取**更大**的那个值（#166 改的方向；原判据与 9/9 取证见 [voteTalentLevel] KDoc）。
     val voted = IntArray(3) { i -> voteTalentLevel(samples, i) }
     if (voted.toList() != charTalents.toList()) {
         Log.i(
@@ -1290,6 +1303,15 @@ internal suspend fun ScanEngine.readTalent() {
                 "｜ ${samples.size} 次读数 ${samples.joinToString("") { "[${it.joinToString(",")}]" }}",
         )
         for (i in 0 until 3) if (voted[i] > 0) charTalents[i] = voted[i]
+    }
+    // ★ 2026-10-01 #166：打到 [TALENT_RETRY_MAX] 仍平票 ⇒ 这一格不是多数票判的，是平票方向判的
+    //   （掉字型错读是持续性的，多采几次未必自己收敛）。必须出声——静默采信一帧正是 #166 的形态。
+    if (talentSamplesTied(samples)) {
+        Log.w(
+            TAG,
+            "char: 天赋 $attempts 次重读后仍有平票 ⇒ 该格由「平票取更大」决定（不是多数票）" +
+                " ｜ 取值=${charTalents.toList()} ｜ 读数=${samples.joinToString("") { "[${it.joinToString(",")}]" }}",
+        )
     }
     // ── ★ 2026-09-17（四修）：**「多一行」回退**（冲刺技占行的角色）──
     //   实测 cver15：神里绫华 / 莫娜 的「战斗天赋」组里**多插一行无 Lv 的冲刺技**
@@ -1333,32 +1355,177 @@ internal suspend fun ScanEngine.readTalent() {
             }
         }
     }
-    // ★ 2026-09-17：**减去命座加成**（游戏面板是"含加成值"，GOOD/GT 是"基础值" ✗）
-    //   逐角色查 [TALENT_BONUS]；未收录时回退近似规则（c≥3 ⇒ skill-3 / c≥5 ⇒ burst-3）
-    //   ★ A38（#155）：**查表未命中必须可见**。角色在表中但没有当前命座档（命座升了/误读）
-    //   时会静默落进近似规则 —— 实测恰好发生过：某轮把 c3 读成 c2 ⇒ 表 [0,3,0] 未命中 ⇒
-    //   fallback(c2)=[0,0,0] ⇒ 少减 skill 的 +3 ⇒ 导出 = GT+3。按 GT 对账（pcap GT × 4 轮
-    //   面板导出，2026-09-29）当前账号 92 角色 0 差异 ⇒ 无确凿差异集、不臆造补表；
-    //   机制层先把未命中点亮，对账出现成片 +3 时日志即给出定位。
+    // ── ★ 2026-10-01 #155：命座天赋加成改**数据驱动**（GOODScanner `adjust_talents` 同法）──
+    //   旧实现是一张 GT 监督反推的手表（51 角色 ×「本账号当时那一档命座」），换个命座档就查不到 ⇒
+    //   落进 `c≥3⇒E / c≥5⇒Q` 的近似规则。而词典里 `c3`/`c5` 一直就有（120/123 角色齐全，此前被
+    //   中间那层 re-encode 丢掉），且**绫华 / 莫娜 / 琴…方向正好相反**（c3=Q、c5=E）⇒ 近似规则两头都减错，
+    //   表现就是 #155 的「成片少减 3」。手表 51 条里 50 条与本规则逐位一致，唯一差异是 Tartaglia
+    //   的普攻 +1（与命座无关，旧表把它塞进 c=0 那一格 ⇒ 达达利亚一旦有命座就丢掉这个 +1）。
     val c = charConstellation
-    val tableForChar = lastCharKey?.let { k -> TALENT_BONUS[k] }
-    if (tableForChar != null && tableForChar[c] == null) {
+    // 旅行者的 GOOD 键带元素后缀（TravelerDendro…），而词典只有一个 `Traveler` 条目 ⇒ 归一到基名再查。
+    val dictKey = lastCharKey?.let { k -> if (TRAVELER_BY_ELEMENT.containsValue(k)) "Traveler" else k }
+    val attrs = dictKey?.let { names?.charAttrs?.get(it) }
+    if (dictKey != null && attrs == null) {
+        Log.w(TAG, "char: 词典里没有角色 $dictKey ⇒ 命座加成无从可查，天赋按面板原值入库")
+    }
+    val (bonus, suspicious) = applyConstellationTalentBonus(charTalents, dictKey, attrs, c)
+    if (suspicious) {
         Log.w(
             TAG,
-            "char: $lastCharKey 在命座加成表中但无 c=$c 档（已录 ${tableForChar.keys}）" +
-                "⇒ 回退近似规则；若该档真有加成将少减 ⇒ 对账会出现 +3，请扩表",
+            "char: $dictKey c=$c 该减加成的天赋行读数 <4（面板原值=${texts.take(3).map { "'" + it + "'" }}）" +
+                "⇒ 疑似命座误读，导出可能偏 3",
         )
     }
-    val b = tableForChar?.get(c)
-        ?: intArrayOf(0, if (c >= 3) 3 else 0, if (c >= 5) 3 else 0)
-    for (i in 0 until 3) charTalents[i] = (charTalents[i] - b.getOrElse(i) { 0 }).coerceAtLeast(0)
     // 诊断：实测我方天赋 = GT + 3（恒差，非命座加成 ✗）⇒ 打印 OCR 原文与 ROI 定位
     Log.i(
         TAG,
         "char: 天赋等级 ${charTalents.toList()} ｜ 原文=${texts.take(3).map { "'" + it + "'" }} " +
-            "｜ bonus=${b.toList()} key=$lastCharKey c=$c " +
+            "｜ bonus=${bonus.toList()} key=$dictKey c=$c attrs(c3,c5)=${attrs?.c3}/${attrs?.c5} " +
             "｜ ROI=${rects.take(3).joinToString { "(${it.left},${it.top},${it.right},${it.bottom})" }}",
     )
 }
+
+/**
+ * 命座对天赋行的加成扣减（#155，GOODScanner `character::scanner::adjust_talents` 同法）。
+ *
+ * 天赋面板显示的是**含加成值**，而 GOOD/GT 要的是**基础值** ⇒ 必须把命座抬上去的 +3 减回来。
+ * 减哪一行由词典决定：[GoodNames.CharAttrs.c3]/[GoodNames.CharAttrs.c5] 给出第 3 / 第 5 层
+ * 抬的是 `A` 普攻 / `E` 元素战技 / `Q` 元素爆发。**不要按「c≥3⇒E、c≥5⇒Q」近似** ——
+ * 绫华 / 莫娜 / 琴 等人是 `c3=Q、c5=E`，方向正好相反，近似规则会两头都减错。
+ *
+ * 就地修改 [talents]，返回「实际减掉的量」与 [suspicious]。三条口径：
+ * - `talents[i] == 0` 表示**这一行没读到**（不是读到 0）⇒ 跳过不减，否则凭空造出等级；
+ * - 减完下限是 **1**（游戏里天赋最低 1 级），不是 0；
+ * - [suspicious]：该减加成的行读数 <4 ⇒ 十有八九是命座读错或本行 OCR 错。上游用它触发角色重扫，
+ *   本仓先只报日志（重扫是行为改动，要真机验）。
+ *
+ * 两个特例：达达利亚的普攻恒 +1（与命座无关）；旅行者命座按元素各有一套、词典里不给 c3/c5，
+ * 沿用上游推定 —— c≥5 时 E/Q 各 +3，否则**只有超过基础上限 10 的行**才可能含命座加成。
+ */
+internal fun applyConstellationTalentBonus(
+    talents: MutableList<Int>,
+    dictKey: String?,
+    attrs: GoodNames.CharAttrs?,
+    constellation: Int,
+): Pair<IntArray, Boolean> {
+    val bonus = IntArray(3)
+    var suspicious = false
+    fun rowOf(t: String?) = when (t) { "A" -> 0; "E" -> 1; "Q" -> 2; else -> null }
+    fun sub3(i: Int) {
+        val v = talents[i]
+        if (v <= 0) return
+        if (v < 4) suspicious = true
+        talents[i] = (v - 3).coerceAtLeast(1)
+        bonus[i] += 3
+    }
+    if (dictKey == "Tartaglia" && talents[0] > 0) {
+        talents[0] = (talents[0] - 1).coerceAtLeast(1)
+        bonus[0] += 1
+    }
+    when {
+        attrs != null && (attrs.c3 != null || attrs.c5 != null) -> {
+            if (constellation >= 3) rowOf(attrs.c3)?.let(::sub3)
+            if (constellation >= 5) rowOf(attrs.c5)?.let(::sub3)
+        }
+        dictKey == "Traveler" -> {
+            if (constellation >= 5) {
+                sub3(1)
+                sub3(2)
+            } else {
+                if (talents[1] > 10) sub3(1)
+                if (talents[2] > 10) sub3(2)
+            }
+        }
+        // 有词条但确实无加成（奇偶无命座系统），或词典里没有这个角色 ⇒ 什么都不减。
+        else -> {}
+    }
+    return bonus to suspicious
+}
+
+/**
+ * 导出用的元素名（GOOD 写法 'Hydro' 这类），★ 2026-10-01 #167：**不再从页头 OCR 取**。
+ *
+ * 触发样本（22:01 轮 2244）：Columbina 首遍访问页头读成 `'永元素/哥伦比处'` ⇒ 导出
+ * `element='永'`（GT 是 Hydro），而第二遍访问读到正确的 `'水'` —— 但那一遍被判成
+ * `char 重复 ⇒ 不入库`，正确值直接丢了。element 和 level 一样是**单样本字段**，
+ * 没有天赋那套重读+投票，一帧错读就是终值。
+ *
+ * 正解不是"多采几帧"，而是**这个字段根本不需要采**：角色 key 一定，元素就是定值，
+ * 字典里查得到。GOODScanner 同一条划分（`character/scanner.rs::ELEMENT_CHARACTERS`）：
+ * 只有**旅行者 / 偶数 / 奇偶**三个可改名角色的元素会随游戏内实时变（字典恒为 anemo），
+ * 他们才用页头 OCR，其余角色连 element 都不写。
+ *
+ * 与 GOODScanner 的**一处差异**（故意的）：我们照常给所有角色写 element，
+ * 因为对账侧 `good_vs_gt.py` 拿 GT（抓包，人人都有 element）逐位比，缺字段就等于少一道闸。
+ */
+internal fun ScanEngine.exportElement(dictKey: String?, ocrZh: String?): String? {
+    val n = names
+    val dynamic = dictKey != null &&
+        (dictKey.startsWith("Traveler", ignoreCase = true) ||
+            dictKey.startsWith("Manekin", ignoreCase = true))
+    if (dictKey != null && !dynamic) {
+        n?.elementOf(dictKey)?.let { return it }
+        Log.w(TAG, "char: 字典里没有角色 $dictKey 的元素 ⇒ 回退页头 OCR '$ocrZh'")
+    }
+    val zh = ocrZh?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val good = n?.elementByZh?.get(zh)
+    if (good == null) {
+        Log.w(TAG, "char: 页头元素 '$zh' 不在七元素闭集里 ⇒ 原样入库（OCR 误读，对账会报出来）")
+    }
+    return good ?: zh
+}
+
+/**
+ * 等级控件文本 → `(level, cap)`。
+ *
+ * 游戏里这一格是「等级80 / 90」，OCR 常把 `/` 读成 `1` ⇒ 文本可能是 `等级80/90`、`8090`、`80190`、
+ * `等级80.1.90`、`80`（ROI 截断）几种形态。规则：第 1 个数字串里取**前 2~3 位中 ≤100 的最长者**为 level；
+ * 上限取第 2 个数字串**起**第一个合法值（先滤掉被读成独立 token 的 `1`），都取不到则回看第 1 个串
+ * **尾部**是不是合法上限（正是 `80190` 这种粘连）。
+ *
+ * ⚠️ 上限合法值含 **95**：5.x 起可再突破到 95/100，而超过 90 的等级只有 95、100 两档
+ * （不会出现 91/96 之类），所以 level=95/100 本身就是"已突破到该上限"的证据。
+ */
+internal fun parseLevelText(text: String): Pair<Int, Int?> {
+    val nums = Regex("\\d+").findAll(text).map { it.value }.toList()
+    val level = nums.firstOrNull()?.let { d ->
+        d.take(3).toIntOrNull()?.takeIf { it <= 100 } ?: d.take(2).toIntOrNull()
+    } ?: 0
+    // 斜杠被读成 `1` 时它是**独立的一个 token**（`等级80 / 90` → `等级80.1.90` → ["80","1","90"]），
+    // 上限排在第 3 个数字上。`1` 不可能是合法上限（最小上限是 20），直接滤掉再找。
+    val tail = nums.drop(1).filterNot { it == "1" }
+    val cap = tail.mapNotNull { it.toIntOrNull() }.firstOrNull { it in VALID_LEVEL_CAPS }
+        ?: nums.firstOrNull()?.let { d ->
+            VALID_LEVEL_CAPS.firstOrNull { d.length > it.toString().length && d.endsWith(it.toString()) }
+        }
+    return level to cap
+}
+
+/**
+ * `(level, cap)` → ascension。**cap 是唯一可靠来源**：level 恰好等于某个突破门槛时，
+ * "卡在本阶段上限(asc=i)"与"已突破到下一阶段(asc=i+1)"的等级数字完全一样，只看 level 分不开。
+ *
+ * 2026-10-01 #165 的教训：2244 档的 level ROI 曾在 09-11 被收窄到只框住白色等级数字
+ * （因为那时还没有上面那套粘连解析），于是 cap 恒 null、一律走 level 分层 ⇒
+ * **每一位 level 80 的角色都被报成 asc 5**，与 GT 差 8 位（另 5 位真 asc 5 只是蒙对）。
+ */
+internal fun ascensionOf(level: Int, cap: Int?): Int {
+    val c = cap ?: 0
+    if (c > 0) return when {
+        c >= 90 -> 6; c >= 80 -> 5; c >= 70 -> 4
+        c >= 60 -> 3; c >= 50 -> 2; c >= 40 -> 1; else -> 0
+    }
+    return when { // 回退：只按 level 分层（门槛处会猜，调用方负责打日志）
+        level >= 81 -> 6; level >= 70 -> 5
+        level >= 61 -> 4; level >= 50 -> 3
+        level >= 41 -> 2; level >= 21 -> 1; else -> 0
+    }
+}
+
+/** 游戏里合法的等级上限（5.x 含 95/100）。长的排前面，让 `80100` 这类粘连优先配到 `100`。 */
+private val VALID_LEVEL_CAPS = listOf(100, 95, 90, 80, 70, 60, 50, 40, 20)
+
+/** cap 读不到时，这些 level 值真的无法判定 ascension（= 各阶段的突破门槛）。 */
+private val AMBIGUOUS_LEVELS = setOf(20, 40, 50, 60, 70, 80, 90)
 
 /** navigate 后按 `read` 数组判读页面（char_constellation / char_talent）。 */

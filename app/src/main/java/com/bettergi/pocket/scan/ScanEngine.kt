@@ -160,7 +160,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         dupRevisits = 0; dupRevisitRecovered = 0; pageFreezeAbandoned = 0; swallowedClickRetries = 0
         clickGiveups = 0; weaponStaleDropped = 0
         weaponOverlapRepeats = 0; weaponIdentityRuns.clear(); lastEmittedWeaponIdentity = null
-        unknownSetPieces = 0
+        unknownSetPieces = 0; charUnresolved = 0
         panelShotSeq = 0; panelShotDropped = 0; panelShotWriteFailures = 0
         panelShotSpaceCheckedAt = 0; panelShotSpaceOk = true
         PerfProbe.reset() // 只读探针：每轮扫描独立统计
@@ -218,6 +218,9 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 // ★ #104：只观测、已照常入库 —— 对账"多 N 件"时先看这个数，别把它算成丢件或真多出来的装备
                 (if (weaponOverlapRepeats > 0) "武器重叠重读=${weaponOverlapRepeats}件(已入库) " else "") +
                 "页级冻结放弃=${pageFreezeAbandoned}格 未知套装=${unknownSetPieces}件 " +
+                // ★ #156：身份未解析的位数（照常入库、导出无 key）。>0 就说明昵称表又漏人了，
+                //   对账侧会同时报"多 N 条未解析 + 缺 N 个真角色"。
+                "未解析身份=${charUnresolved}位 " +
                 // ★ #46：取证落盘的闸门计数只在**有话说**时出现（默认关取证 ⇒ 全 0 ⇒ 不打，免噪声）
                 (if (panelShotSeq > 0 || panelShotDropped > 0 || panelShotWriteFailures > 0) {
                     "| 取证图 落=${panelShotSeq}张 闸门丢弃=${panelShotDropped}张 写失败=${panelShotWriteFailures}张 "
@@ -409,6 +412,9 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
 
     /** 单件名→套装反查未命中的件数（词典缺口，件本身已照常入库；见 emit 处的拆分判据）。 */
     internal var unknownSetPieces = 0
+
+    /** 三档解析全未命中、按显示名入库的角色数（#156；这些记录**没有 GOOD key**，去管理器页补昵称）。 */
+    internal var charUnresolved = 0
 
     /** 重读期抑制「连续重复」计数：重访/回读必然重读到刚记过的件，会被回卷判据误判成"整页零新增"。 */
     internal var suppressDupStreak = false
@@ -659,68 +665,9 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     internal var charLevel = 0
     internal var charElement: String? = null
     internal var charConstellation = 0
-    /**
-     * 逐角色**命座对天赋的加成表**（2026-09-17，Irminsul GT 监督反推）
-     * 天赋面板显示的是【含加成值】，而 GOOD/GT 是【基础值】
-     * 用法：talents[i] = max(0, 面板值 - bonus[key][c][i])（0=auto 1=skill 2=burst）
-     * 来源：真机 92 角色（面板值 − GT 基础值）逐项取正；负值项 = OCR 读失败已置 0；训练集 167/174 = 96.0%
-     */
-    internal val TALENT_BONUS: Map<String, Map<Int, IntArray>> = mapOf(
-        "Aino" to mapOf(6 to intArrayOf(0,3,3)),
-        "Alyosha" to mapOf(3 to intArrayOf(0,3,0)),
-        "Barbara" to mapOf(6 to intArrayOf(0,3,3)),
-        "Beidou" to mapOf(6 to intArrayOf(0,3,3)),
-        "Bennett" to mapOf(6 to intArrayOf(0,3,3)),
-        "Candace" to mapOf(6 to intArrayOf(0,3,3)),
-        "Charlotte" to mapOf(6 to intArrayOf(0,3,3)),
-        "Chevreuse" to mapOf(3 to intArrayOf(0,3,0)),
-        "Chongyun" to mapOf(5 to intArrayOf(0,3,3)),
-        "Collei" to mapOf(6 to intArrayOf(0,3,3)),
-        "Dahlia" to mapOf(6 to intArrayOf(0,3,3)),
-        "Dehya" to mapOf(3 to intArrayOf(0,0,3)),
-        "Diluc" to mapOf(5 to intArrayOf(0,3,3)),
-        "Diona" to mapOf(6 to intArrayOf(0,3,3)),
-        "Dori" to mapOf(6 to intArrayOf(0,3,3)),
-        "Faruzan" to mapOf(6 to intArrayOf(0,3,3)),
-        "Fischl" to mapOf(6 to intArrayOf(0,3,3)),
-        "Freminet" to mapOf(6 to intArrayOf(3,3,0)),
-        "Gaming" to mapOf(6 to intArrayOf(0,3,3)),
-        "Gorou" to mapOf(6 to intArrayOf(0,3,3)),
-        "Ifa" to mapOf(4 to intArrayOf(0,3,0)),
-        "Illuga" to mapOf(6 to intArrayOf(0,3,3)),
-        "Jahoda" to mapOf(6 to intArrayOf(0,3,3)),
-        "Kachina" to mapOf(4 to intArrayOf(0,3,0)),
-        "Kaeya" to mapOf(3 to intArrayOf(0,3,0)),
-        "Kaveh" to mapOf(3 to intArrayOf(0,0,3)),
-        "Keqing" to mapOf(3 to intArrayOf(0,0,3)),
-        "Kirara" to mapOf(3 to intArrayOf(0,3,0)),
-        "KujouSara" to mapOf(6 to intArrayOf(0,3,3)),
-        "KukiShinobu" to mapOf(6 to intArrayOf(0,3,3)),
-        "LanYan" to mapOf(3 to intArrayOf(0,3,0)),
-        "Layla" to mapOf(6 to intArrayOf(0,3,3)),
-        "Lynette" to mapOf(6 to intArrayOf(0,3,3)),
-        "Mona" to mapOf(6 to intArrayOf(0,3,3)),
-        "Ningguang" to mapOf(4 to intArrayOf(0,0,3)),
-        "Noelle" to mapOf(6 to intArrayOf(0,3,3)),
-        "Prune" to mapOf(3 to intArrayOf(0,0,3)),
-        "Razor" to mapOf(6 to intArrayOf(0,3,3)),
-        "Rosaria" to mapOf(6 to intArrayOf(0,3,3)),
-        "Sayu" to mapOf(6 to intArrayOf(0,3,3)),
-        "Sethos" to mapOf(6 to intArrayOf(3,0,3)),
-        "ShikanoinHeizou" to mapOf(3 to intArrayOf(0,3,0)),
-        "Sucrose" to mapOf(6 to intArrayOf(0,3,3)),
-        "Tartaglia" to mapOf(0 to intArrayOf(1,0,0)),
-        "Thoma" to mapOf(6 to intArrayOf(0,3,3)),
-        "Xiangling" to mapOf(6 to intArrayOf(0,3,3)),
-        "Xingqiu" to mapOf(6 to intArrayOf(0,3,3)),
-        "Xinyan" to mapOf(6 to intArrayOf(0,3,3)),
-        "Yanfei" to mapOf(6 to intArrayOf(0,3,3)),
-        "Yaoyao" to mapOf(3 to intArrayOf(0,3,0)),
-        "YunJin" to mapOf(6 to intArrayOf(0,3,3)),
-    )
     internal val charTalents = MutableList(3) { 0 }
 
-    /** 当前角色的词典 key（供 `readTalent` 查 [TALENT_BONUS] 减加成）。 */
+    /** 当前角色的词典 key（供 `readTalent` 查词典 c3/c5 减命座加成）。 */
     internal var lastCharKey: String? = null
 
     /**
@@ -1194,22 +1141,51 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         }
 
         /**
-         * 多次读数的**投票合并**（#153，取代旧的「逐项取 max」）。
-         * 只投非零票（0 = 这次没读到，不是读到 0）；平票取**更晚**出现的那个值
-         * （面板淡入已完成，后到的帧更可信）。
+         * 多次读数的**投票合并**（#153 引入多数票；#166 把平票方向从「取更晚」改成「取更大」）。
+         * 只投非零票（0 = 这次没读到，不是读到 0）。
+         *
+         * ★ 2026-10-01 #166 平票方向：三档实测里**每一条掉字错读都偏小**（`Lv.10`→`Lv.1o`→1、
+         *   `Lv.12`→`•Lv.i2`→2、`Lv.11`→`Lv.1`→1），因为 [talentLevelOf] 锚在 `v` 之后取
+         *   `\d{1,2}` —— 首位被认成字母就整个丢掉。所以平票时**更大的那一侧**才是没掉字的那一帧。
+         *   取证：2244 三轮 `character_scan`（19:30 / 19:45 / 20:58）共 12 次"读数有分歧"的访问，
+         *   扣掉 3 次绫华/莫娜的「读到行名 ⇒ 下移补读」（那不是合并律的样本），
+         *   余 9 次：「取更晚」对 6、「取在先」对 3、「取更大」**9/9**。
+         *   旧律（取更晚）在这里造成过一条**已入库**的错值：19:30 轮 随机姓名(=Manekina)
+         *   `auto` 读成 1（真值 10），导出件 `20261001_1941_2244_character_HEAD.json` 里就是 1。
+         *   ⚠️ 反向风险没被排除：若哪天出现**偏大**错读（邻格数字粘到右侧），平票时取更大会选中它——
+         *   但那种读数只可能是 1 票，只要 [#166] 的停止律真的采到了第 3 帧就会被多数票否掉；
+         *   打到 TALENT_RETRY_MAX 仍平票时调用方会打 loud 日志（不再静默）。
          */
         internal fun voteTalentLevel(samples: List<IntArray>, slot: Int): Int {
             val count = HashMap<Int, Int>()
-            val lastSeen = HashMap<Int, Int>()
             for (si in samples.indices) {
                 val v = samples[si].getOrNull(slot) ?: 0
                 if (v <= 0) continue
                 count[v] = (count[v] ?: 0) + 1
-                lastSeen[v] = si
             }
             if (count.isEmpty()) return 0
             val top = count.values.max()
-            return count.filterValues { it == top }.keys.maxByOrNull { lastSeen[it] ?: -1 } ?: 0
+            return count.filterValues { it == top }.keys.maxOrNull() ?: 0
+        }
+
+        /**
+         * 各格读数里是否还有**平票**（#166）：任一格有两个不同的非零读数**同列最高票**即为 `true`。
+         * 和 [voteTalentLevel] 配对用——多数票的前提是"有多数"；平票时取值完全由平票方向
+         * 单方面决定，等于把投票退化成一帧定终身。
+         * 非零过滤与投票同口径：`0`/`-1`（没读到 / 读到但不是等级）都不算一票，也不构成平票。
+         */
+        internal fun talentSamplesTied(samples: List<IntArray>): Boolean {
+            for (slot in 0 until 3) {
+                val count = HashMap<Int, Int>()
+                for (s in samples) {
+                    val v = s.getOrNull(slot) ?: 0
+                    if (v > 0) count[v] = (count[v] ?: 0) + 1
+                }
+                if (count.isEmpty()) continue
+                val top = count.values.max()
+                if (count.count { it.value == top } > 1) return true
+            }
+            return false
         }
 
         /**
@@ -1350,6 +1326,21 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          * 依据：列表共 56 套 / 每页 16 套 = 3.5 页 ⇒ 5 页有余量。
          */
         const val MAX_FILTER_PAGE_TURNS = 5
+
+        /**
+         * ★ A41（#147）：套装筛选**整页读数自洽度**下限 —— 判"这页读稳了没"的内容判据。
+         *
+         * 定义：`认出套装名的行数 / 读到非空文本的行数`。套装子面板列的是**全部**套装，
+         * 正常页应接近 1.0；残余慢漂（实测 ~1-2px/120ms，24×16 缩略图量化不出来）把 90px
+         * 行带切成跨行 ⇒ 整页"自信乱码"⇒ 比值塌向 0。
+         * 取 0.75 而不是 1.0：留 4 行余量给个别读坏但仍算稳定的行，避免正常页白重读；
+         * 灰化套（count=0）读成**空**，不进分母 ⇒ 底部那页不会被这条判据误伤（那是 #147 ⑥ 的另一条洞）。
+         */
+        const val FILTER_PAGE_CONSISTENCY_MIN = 0.75f
+
+        /** 自洽度不达标时**重读本页**的次数与间隔（ms）。间隔取天赋重读同一档节奏 700ms。 */
+        const val FILTER_PAGE_CONSISTENCY_RETRY = 2
+        const val FILTER_PAGE_CONSISTENCY_WAIT_MS = 700L
         /**
          * §14 flow 未声明 `dict` 时的回落词典（**仅作默认**，flow 已声明一律以声明为准）。
          * 与 `GoodNames.kindOf` 的键名一致。

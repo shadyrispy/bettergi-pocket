@@ -21,7 +21,7 @@ import kotlin.math.abs
  * | 3 | 正向子串取**最长**键（OCR 加噪声前后缀） | ·神里绫华 |
  * | 4 | 反向子串（OCR 截断） | 昔日宗室之→昔日宗室之仪 |
  * | 5 | 编辑距离 ≤ max(1, 名称长度 30%)，并列按视觉相似组打分 | 渝告之钟→谕告之钟 |
- * | 6 | 最长公共连续子串 ≥3 且**唯一**命中 | 忆之注连→追忆之注连 |
+ * | 6 | 最长公共连续子串 ≥2 且**唯一**命中（=参考实现 LCS_MIN_CHARS） | 海染碎碟→海染砗磲 |
  * | 7 | 单字 Dice ≥ 0.55（兜底） | 深廊的回秦之歌→深廊的回奏之歌 |
  *
  * ⚠️ 子串级必须**取最长**且迭代顺序无关：原实现用 `HashMap.firstOrNull` 命中即返回，
@@ -89,8 +89,13 @@ object NameMatcher {
     // ---- 阈值（2615 样本扰动压测标定，见 NameMatcherTest 的守门用例）----
     /** 编辑距离阈值 = max(1, 名称长度 * 30%)。 */
     private const val LEV_RATIO = 0.30
-    /** LCS 唯一性最短公共子串（≥3：irminsul 口径，实测负样本零误配）。 */
-    private const val LCS_MIN = 3
+    /**
+     * LCS 唯一性最短公共子串。对齐 GOODScanner `fuzzy_match.rs` 的 `LCS_MIN_CHARS = 2`
+     * （2026-10-02 从 irminsul 口径的 3 下调：筛选页探针实测「海染碎碟」与「海染砗磲」
+     * 的公共子串只有「海染」=2，3 恰好漏配；多出来的负样本面由本文件扰动压测与
+     * garbage 用例共同守门，A22 Dice 用例的 fixture 也随之改为交错序以真正落到 Dice 层）。
+     */
+    private const val LCS_MIN = 2
     /** 单字 Dice 兜底阈值。 */
     /**
      * 字集合 Dice 兜底阈值。

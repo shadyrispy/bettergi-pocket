@@ -156,7 +156,7 @@
           ],
           "derive": {
             "setName": "由 name 反推（背包面板 set_name 被遮挡 OCR 不可读，用户定稿 2026-09-01）",
-            "dict": "tools/good_names.json artifactPieces（276 件/56 套）"
+            "dict": "tools/mappings.json artifactPieces（276 件/56 套）"
           },
           "raritySubRule": "5★恒4词条 / 4★初始2最高3（块读取不定条数，GT 定标 2026-09-16）/3★纳入导出（2026-09-19 用户定稿，初始2最高3；引擎判据=星带 starCount>=3，banner 误降由星带纠正）/仅 1★/2★ 止扫不解析（GT 无，纯保险）",
           "dict": {

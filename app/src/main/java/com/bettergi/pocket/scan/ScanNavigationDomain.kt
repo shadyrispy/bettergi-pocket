@@ -651,7 +651,10 @@ internal suspend fun ScanEngine.dialog(step: JSONObject) {
 
 /**
  * P3 setFilter：entry=BACKPACK/PILL 套装筛选——chain 各项文本含 (x,y) 正则点；selectByOcr 遍历 grid 行 OCR 套装名匹配目标（vars.currentTask.setName）→ 点 checkboxX（BACKPACK 点左列、PILL 两列都查）。
- * 弹窗结构：profiles.grids.set_filter_popup → rowYTop (8 行) + cols {left, right} {nameBox + checkboxX}。
+ * 弹窗结构：profiles.grids.set_filter_popup → rowYTop (8 行) + rowHeight/rowPitch + labelAnchor（行顶→
+ * 套名文本行中心，供 GridAlign.textLineCrop 逐行锚定）+ columns {left, right} {nameBox + checkboxX}；
+ * 三档另注册卡片几何（cols/cardSize/cardOrigin/pitch/visibleRows，见各键 geomNote；#169 起 2244，
+ * #174 起 3200/2560）。注册只喂 `GridGeometry`，本面板的运行路径仍读 rowYTop/columns/bounds/advance。
  */
 /**
  * §12.4 筛选面板中心点（profiles.screens.dialogs.filterPanel.<key> = [x0,y0,x1,y1]）。

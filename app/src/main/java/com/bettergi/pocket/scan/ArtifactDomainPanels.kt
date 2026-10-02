@@ -576,7 +576,7 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //   ❌ **不受影响（绝不可平移）**：**单件名 name、部位 slot、主词条名 mainName、
     //      主词条值 mainValue、管理界面的 set_name** —— 这些槽位在横幅以上/之外，位置固定。
     //   ⚠️ 单件名槽尤其关键：我们**不读 set_name**，setKey 全靠「单件名 → 套装」反推
-    //      （good_names.artifactPieces，305 件，由游戏 Reliquary 表生成；用户 2026-09-01 定稿）
+    //      （mappings.artifactPieces，305 件，由游戏 Reliquary 表生成；用户 2026-09-01 定稿）
     //      ⇒ 一旦把 name 槽也平移，
     //      祝圣件的单件名会读成别的行 ⇒ 反推链直接断掉。**不要"顺手"给 name/slot/main 加 shift。**
     val yShift = if (vars.crafted) profile.zhushengShiftPx else 0
@@ -851,16 +851,17 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //   真机全量对账实证：尾部 9 件 3★（冒险家 / 祭火礼冠）面板 OCR **完全正确**
     //   （`slot=circlet main=atk_ 词条=2条`），只是单件名→套装反查不到 ⇒ setKey=null ⇒
     //   被上面那条判据当"读失败"丢弃 ⇒ **词典每少一套就静默少扫一批件**，而日志只说读失败。
-    //   GOOD 的 artifactSets 只列 4★/5★ 的 56 套，3★ 层整层不在其中（词典侧已补 30 件名，
-    //   见 gen_good_names.py 的 extraPieceToSetId）⇒ 这里保留该件并计数，让缺口看得见。
+    //   GOOD 的 artifactSets 只列 4★/5★（56 套）；词典侧已补两层：30 件单件名（gen_mappings.py
+    //   的 build_pieces，2026-09-24）与低星 9 套的套装名（build_low_star_sets，2026-10-02），
+    //   均来自游戏 Reliquary 全表而非 GOOD ⇒ 这里保留该件并计数，让残余缺口看得见。
     if (setKey.isNullOrEmpty()) {
         unknownSetPieces++
         Log.w(
             TAG,
             "套装词典未命中：piece=${pieceName ?: "?"} rarity=$rarity 词条 ${substats.size} 条 " +
                 "⇒ **照常入库**（setKey 留空），累计未命中 $unknownSetPieces 件" +
-                "（词典是生成的：先跑 dsl/scripts/gen_mappings.py --refresh 重生成 mappings.json，" +
-                "再跑 gen_good_names.py；仍缺 ⇒ 游戏 Reliquary 表或 data_cache 落后于版本）",
+                "（词典是生成的：先跑 dsl/scripts/gen_mappings.py --refresh 重生成并同步 mappings.json；" +
+                "仍缺 ⇒ 游戏 Reliquary 表或 data_cache 落后于版本）",
         )
     }
     // ★★ 件身份（用户方案 2026-09-17）：**必须在去重判断之前记录** ★★

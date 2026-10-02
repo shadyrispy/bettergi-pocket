@@ -176,6 +176,79 @@ class ProfileGridAuditTest {
         }
     }
 
+    /**
+     * `selectByOcr` 面板的**形状契约**（#169 补，2026-10-02）。
+     *
+     * 为什么单独一条：#169 把 `set_filter_popup` 的按列样式键从 `cols`（对象）改名为 **`columns`**
+     * （`cols` 让给列数 int），而运行侧是 `grid.getJSONObject("columns")` —— **缺键直接抛**，
+     * 整步筛选当场断。更糟的是这条路径**干跑不覆盖**（`ScanEngineDryRunTest` 只跑
+     * artifact_scan/weapon_scan，两条都不带 selectByOcr），所以改名当时唯一的护栏是真机探针。
+     * 加一档 / 再改一次键名都不会红 ⇒ 这里把"flow 引用到的每个 selectByOcr 网格，
+     * 在三档 profile 里都必须齐键"钉成断言。
+     *
+     * `labelAnchor` 是 #169 新加的必要键：缺它 = 未标定 ⇒ `GridAlign.textLineCrop` 恒 null ⇒
+     * 每行"不读不点" ⇒ 恒 `selected=0` ⇒ not_applied（**故意**的保守面，见 ScanControlDomain 注释）。
+     */
+    @Test
+    fun `selectByOcr grid has the row-text contract in every profile`() {
+        val grids = HashMap<String, MutableSet<String>>()   // gridKey → 引用它的 flow
+        for (f in File(assetsDir(), "flows").listFiles { x -> x.name.endsWith(".json") }?.sorted()
+            ?: emptyList()) {
+            collectSelectByOcrGrids(JSONObject(f.readText()), f.name, grids)
+        }
+        assertTrue("没有任何 flow 用 selectByOcr —— 本条用例的覆盖面已失效，去查引用方", grids.isNotEmpty())
+        for ((file, w, _) in profiles) {
+            val g = raw(file).getJSONObject("grids")
+            for ((key, from) in grids) {
+                assertTrue("$file: flows($from) 引用 grids.$key，但该档无此网格", g.has(key))
+                val grid = g.getJSONObject(key)
+                val ys = grid.optJSONArray("rowYTop")
+                    ?: fail("$file::$key 缺 rowYTop（selectByOcr 遍历不了任何行）").let { return }
+                assertTrue("$file::$key rowYTop 只有 ${ys.length()} 行", ys.length() >= 1)
+                val rowHeight = grid.optInt("rowHeight", -1)
+                assertTrue("$file::$key rowHeight=$rowHeight 非正", rowHeight > 0)
+                val anchor = grid.optInt("labelAnchor", -1)
+                // 锚必须落在行带**内部**：>= rowHeight 时裁剪窗中心跑到下一行，等于整页错行
+                assertTrue(
+                    "$file::$key labelAnchor=$anchor 未标定或越出行带 [1,$rowHeight)" +
+                        "（缺键会让每行『量不到 ⇒ 不读不点』⇒ 恒 not_applied）",
+                    anchor in 1 until rowHeight,
+                )
+                val cols = grid.optJSONObject("columns")
+                    ?: fail("$file::$key 缺 columns（#169 起按列样式不再挂在 cols 上）").let { return }
+                for (side in listOf("left", "right")) {
+                    val col = cols.optJSONObject(side)
+                        ?: fail("$file::$key.columns 缺 $side（运行时 getJSONObject 会直接抛）").let { return }
+                    assertTrue("$file::$key.$side checkboxX=${col.optInt("checkboxX", -1)} 非正",
+                        col.optInt("checkboxX", -1) > 0)
+                    val box = col.optJSONArray("nameBox")
+                        ?: fail("$file::$key.$side 缺 nameBox").let { return }
+                    // matchFilterRow 认两种写法：[x0,x1] 或 [x0,y0,x1,y1]（y 取 index 2）
+                    assertTrue("$file::$key.$side nameBox 长度 ${box.length()} 不是 2/4",
+                        box.length() == 2 || box.length() == 4)
+                    val x0 = box.getInt(0)
+                    val x1 = if (box.length() >= 4) box.getInt(2) else box.getInt(1)
+                    assertTrue("$file::$key.$side nameBox x 区间 [$x0,$x1] 非正或越屏($w)",
+                        x0 in 0 until x1 && x1 <= w)
+                }
+            }
+        }
+    }
+
+    /** 递归找 `{"selectByOcr": {"grid": "..."}}`，避免对 JSON 文本做正则（flow 里 "grid" 也出现在别处）。 */
+    private fun collectSelectByOcrGrids(node: Any, flow: String, out: MutableMap<String, MutableSet<String>>) {
+        when (node) {
+            is JSONObject -> {
+                node.optJSONObject("selectByOcr")?.optString("grid")?.takeIf { it.isNotEmpty() }?.let {
+                    out.getOrPut(it) { mutableSetOf() }.add(flow)
+                }
+                for (k in node.keys()) collectSelectByOcrGrids(node.get(k), flow, out)
+            }
+            is JSONArray -> for (i in 0 until node.length()) collectSelectByOcrGrids(node.get(i), flow, out)
+            else -> Unit
+        }
+    }
+
     @Test
     fun `character_scan uses char_strip and auto_equip uses char_popup`() {
         val cs = File(assetsDir(), "flows/character_scan.json").readText()

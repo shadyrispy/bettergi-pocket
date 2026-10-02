@@ -6,7 +6,7 @@ import org.json.JSONObject
 
 /**
  * GOOD v3 导出（filesDir/good_export_<ts>.json）。
- * 与 irminsul 结果对齐为 P1 验收口径（含 setKey 经 good_names.artifactPieces 反推）。
+ * 与 irminsul 结果对齐为 P1 验收口径（含 setKey 经 mappings.artifactPieces 反推）。
  */
 object GoodExporter {
     /** GOOD v3 JSON 构建（纯函数，可离线测试）。artifacts + weapons + characters 分别导出。 */

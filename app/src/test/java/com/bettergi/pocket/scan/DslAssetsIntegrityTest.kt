@@ -29,15 +29,25 @@ class DslAssetsIntegrityTest {
     private fun requiredFiles() = listOf(
         "profiles.json",
         "flows/artifact_scan.json",
-        // 单一名称词典（由 dsl/scripts/gen_good_names.py 生成）：GoodNames 运行时唯一依赖。
+        // 单一名称词典（由 dsl/scripts/gen_mappings.py 一步生成并同步）：GoodNames 运行时唯一依赖。
         // fix45 教训：文件放在 app/assets/（无 src/main 前缀）不进 APK → 词典全部 unavailable。
-        "tools/good_names.json",
+        "tools/mappings.json",
     )
 
-    /** 运行时只吃上面那一份：mappings.json / artifactSetPieces.json 仅为 dsl/ 侧的生成源，不再拷进 app。 */
+    /**
+     * 运行时不吃的文件 —— 出现在 app assets 就是错。
+     * ★ 2026-10-01（#168）方向反过来了一次：`mappings.json` 从"生成源，不得进 APK"升为
+     *   **唯一运行时词典**，而被它取代的那一层 re-encode（`good_names.json`）退役。
+     *   `char_talent_bonus.json` 是 #155 留下的第二真相（命座加成改查字典 c3/c5 后无人读）；
+     *   `primitives.schema.json` 是编辑器/校验用的原语定义，`main` 侧唯一的"读者"是
+     *   本测试自己的清单 —— 取证方式：全仓 grep 该文件名，命中只有 check_dsl_sync/本文件/
+     *   profiles 里 `$schema` 那个**字符串**。
+     */
     private fun retiredFiles() = listOf(
         "tools/artifactSetPieces.json",
-        "tools/mappings.json",
+        "tools/good_names.json",
+        "tools/char_talent_bonus.json",
+        "primitives.schema.json",
     )
 
     @Test
@@ -82,7 +92,7 @@ class DslAssetsIntegrityTest {
         val base = assetsDir()
         for (rel in retiredFiles()) {
             assertFalse(
-                "$rel 不应再出现在 app assets（运行时已统一为 good_names.json；dsl/ 侧仍保留为生成源）",
+                "$rel 不应再出现在 app assets（运行时词典只有 tools/mappings.json 一份）",
                 File(base, rel).exists(),
             )
         }
@@ -90,7 +100,7 @@ class DslAssetsIntegrityTest {
 
     @Test
     fun `name dictionary has artifact pieces entries`() {
-        val dict = JSONObject(File(assetsDir(), "tools/good_names.json").readText())
+        val dict = JSONObject(File(assetsDir(), "tools/mappings.json").readText())
         val pieces = dict.getJSONArray("artifactPieces")
         assertTrue("artifactPieces should have 306 entries", pieces.length() >= 300)
         assertTrue(
@@ -108,7 +118,7 @@ class DslAssetsIntegrityTest {
      */
     @Test
     fun `low rarity artifact piece names resolve to a set`() {
-        val dict = JSONObject(File(assetsDir(), "tools/good_names.json").readText())
+        val dict = JSONObject(File(assetsDir(), "tools/mappings.json").readText())
         val pieces = dict.getJSONArray("artifactPieces")
         val byPiece = HashMap<String, String>()
         for (i in 0 until pieces.length()) {
@@ -160,7 +170,6 @@ class DslAssetsIntegrityTest {
             "profiles.json" to "profiles.json",
             "profiles_2560x1440.json" to "profiles_2560x1440.json",
             "profiles_2244x1080.json" to "profiles_2244x1080.json",
-            "primitives.schema.json" to "primitives.schema.json",
         )
         val drifted = ArrayList<String>()
         for ((c, a) in pairs) {
@@ -168,7 +177,7 @@ class DslAssetsIntegrityTest {
             val rhs = File(assets, a)
             if (lhs.readBytes().contentEquals(rhs.readBytes()).not()) drifted += "json/$c ≠ assets/$a"
         }
-        for (rel in listOf("good_names.json", "rollTable.json", "char_talent_bonus.json")) {
+        for (rel in listOf("mappings.json", "rollTable.json")) {
             val lhs = File(json.parentFile, "tools/$rel")
             val rhs = File(assets, "tools/$rel")
             if (lhs.isFile && rhs.isFile && lhs.readBytes().contentEquals(rhs.readBytes()).not()) {

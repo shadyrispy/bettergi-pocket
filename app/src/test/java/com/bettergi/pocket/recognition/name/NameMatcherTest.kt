@@ -76,6 +76,17 @@ class NameMatcherTest {
     }
 
     @Test
+    fun `lcs min 2 rescues the double-char garble the confusion table cannot`() {
+        // #169 探针实测（2026-10-01 00:33）：筛选页把「海染砗磲」读成「海染碎碟」——
+        // 砗→碎、磲→碟两个字都错，碟→磲 单对替换救不了；LCS_MIN=3 时公共子串只有
+        // 「海染」=2 也救不了。对齐参考实现降到 2 后由 LCS 唯一性兜住。
+        val n = names()
+        val hit = n.match("海染碎碟", GoodNames.Kind.SET)
+        assertEquals("OceanHuedClam", hit?.key)
+        assertEquals(NameMatcher.Tier.LCS, hit?.tier)
+    }
+
+    @Test
     fun `lcs fallback rejects ambiguous candidates`() {
         // "之心" 被三个候选共享 → 不唯一 → 不匹配
         val hearts = mapOf(
@@ -147,17 +158,18 @@ class NameMatcherTest {
 
     @Test
     fun `A22 tier7 Dice 打平不命中且与数据序无关`() {
-        // "剑刃风"/"风刃剑" 字集合相同 ⇒ 对任意 cleaned Dice 恒相等；
-        // 编辑距离 2 超阈值、LCS 2 < 3 ⇒ 恰好落进 Dice 层。旧实现取首键（依赖数据序），
-        // 新实现唯一性校验拦截（对齐 LCS 层先例）。
-        val forward = linkedMapOf("剑刃风" to "A", "风刃剑" to "B")
+        // LCS 降到 2（对齐 fuzzy_match.rs）后，旧 fixture「剑刃风/风刃剑」会在 LCS 层被
+        // 2 字公共子串截走、落不到 Dice。改用交错序字形：与两键的公共连续子串都只有 1，
+        // 字集合交集数相同 ⇒ Dice 打平（2*2/7≈0.571 ≥0.55）；编辑距离 2 超阈值。
+        // 旧实现取首键（依赖数据序），新实现唯一性校验拦截（对齐 LCS 层先例）。
+        val forward = linkedMapOf("甲乙丙丁" to "A", "甲乙戊己" to "B")
         val reversed = forward.reversedOrder()
-        assertNull(NameMatcher.match("刃风歌", forward))
-        assertNull(NameMatcher.match("刃风歌", reversed))
+        assertNull(NameMatcher.match("甲丙戊", forward))
+        assertNull(NameMatcher.match("甲丙戊", reversed))
         // 唯一最大 + 超阈值仍命中（Dice 层是被单测守护的有效能力，不得误伤）：
-        // "刃风歌" vs "剑刃风"：编辑距离 2 超阈值、LCS 2<3，Dice=2*2/5=0.8 ≥0.55 → DICE 命中
-        val solo = linkedMapOf("剑刃风" to "SoloHit")
-        val soloHit = NameMatcher.match("刃风歌", solo)
+        // 同输入对唯一键：LCS 1 <2、编辑距离 2 超阈值、Dice=2*2/7≈0.571 ≥0.55 → DICE 命中
+        val solo = linkedMapOf("甲乙丙丁" to "SoloHit")
+        val soloHit = NameMatcher.match("甲丙戊", solo)
         assertEquals("SoloHit", soloHit?.key)
         assertEquals(NameMatcher.Tier.DICE, soloHit?.tier)
     }
@@ -170,47 +182,69 @@ class NameMatcherTest {
         repeat(4) {
             val candidate = File(dir, "src/main/assets/dsl")
             if (candidate.isDirectory) {
-                return JSONObject(File(candidate, "tools/good_names.json").readText())
+                return JSONObject(File(candidate, "tools/mappings.json").readText())
             }
             dir = dir.parentFile ?: return@repeat
         }
         error("src/main/assets/dsl not found")
     }
 
+    /**
+     * 2026-10-02 起这 9 套低星套已由 `gen_mappings.py` B' 段升为正式套装词典条目
+     * （此前 GOOD 只列 4★/5★，这 9 套只存在于单件名段 ⇒ 套装筛选页「祭火之人」「冒险家」
+     * 等行整页 key=null）。留这份名单当"低星段必须真的在词典里"的哨兵。
+     */
+    private val lowRaritySetIds = setOf(
+        "Adventurer", "LuckyDog", "TinyMiracle", "TravelingDoctor",
+        "PrayersForDestiny", "PrayersForIllumination", "PrayersForWisdom",
+        "PrayersToSpringtime", "PrayersToTheFirmament",
+    )
+
     @Test
-    fun `dictionary counts match generated meta`() {
+    fun `dictionary counts stay in the recorded range`() {
         val n = names()
-        val meta = dictJson().getJSONObject("_meta").getJSONObject("counts")
-        assertEquals(meta.getInt("artifactPieces"), n.pieces.size)
-        assertEquals(meta.getInt("weapons"), n.weapons.size)
-        assertEquals(meta.getInt("characters"), n.characters.size)
-        assertEquals(meta.getInt("artifactSets"), n.sets.size)
-        assertEquals(meta.getInt("slots"), n.slots.size)
-        // 低星段必须真的进词典（2026-09-24 对账：缺这一段 ⇒ 9 件 3★ 被静默丢弃）。
-        // 25 = 4 个多件低星套 ×5 件 + 5 个「祭X之人」套各只有理之冠 1 件；
-        // 2026-09-27 单件名改由游戏表生成后，手写版的 30 条里有 5 条其实也属于这 9 套。
+        // 条数下限取自 2026-10-02 实测（123/242/65/305）；`mappings.json` 里没有 `_meta`
+        // 可以自证（gen_mappings.py 是 minified 输出，加日期字段会让"双侧逐字节一致"天天红），
+        // 所以这道闸只能由测试侧记数。真缩水时先在这里响，而不是等到对账少件。
+        assertTrue("characters ${n.characters.size} < 120", n.characters.size >= 120)
+        assertTrue("weapons ${n.weapons.size} < 240", n.weapons.size >= 240)
+        assertTrue("artifactPieces ${n.pieces.size} < 300", n.pieces.size >= 300)
+        assertEquals("artifactSets 恒 65 套（GOOD 56 + B' 段低星 9）", 65, n.sets.size)
+        assertEquals("slots", 5, n.slots.size)
+        // 低星 9 套必须真的进套装段（见 [lowRaritySetIds] 的来历），且单件名段 ≥25 不回缩
         assertTrue(
-            "3★/4★ 低星单件名段不得为空",
-            meta.getInt("artifactPiecesLowRarity") >= 25,
+            "低星 9 套必须都在 artifactSets 里（缺：${lowRaritySetIds - n.sets.values.toSet()}）",
+            n.sets.values.containsAll(lowRaritySetIds),
         )
+        val lowPieces = n.pieces.values.filter { it in lowRaritySetIds }
+        assertTrue("3★/4★ 低星单件名段不得为空（实测 ≥25）", lowPieces.size >= 25)
         assertTrue("stats should include aliases", n.stats.size >= 16)
     }
 
     /**
-     * 每件单件名必须指向"已知套"：GOOD artifactSets 里的 4★/5★，或 `_meta.lowRaritySetIds`
-     * 里**声明过**的 3★ 套（GOOD 只列 56 套，3★ 层整层不在其中）。豁免取自生成器写进文件的
-     * 机器可读字段，而不是测试里另抄一份清单 —— 词典加套时测试不会悄悄失真。
+     * 每件单件名必须指向套装词典里真实存在的套。2026-10-02 低星 9 套升级后，
+     * 单件名段与套装段的集合差必须为空 —— 多出来的那个就是上游表变了要复核的信号。
      */
     @Test
     fun `every piece maps to a known artifact set`() {
         val n = names()
-        val exempt = dictJson().getJSONObject("_meta").optJSONArray("lowRaritySetIds")
-            ?.let { a -> (0 until a.length()).map { a.getString(it) }.toSet() }
-            ?: emptySet()
-        val setIds = n.sets.values.toSet() + exempt
-        for ((piece, setId) in n.pieces) {
-            assertTrue("piece '$piece' → unknown set '$setId'", setId in setIds)
-        }
+        val setIds = n.sets.values.toSet()
+        val unknown = n.pieces.values.toSet() - setIds
+        assertTrue(
+            "单件名段出现套装词典之外的套 $unknown（多了=上游变了要复核）",
+            unknown.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `low star sets resolve from their filter page names`() {
+        val n = names()
+        // 2026-10-02 B' 段收录前，这几行在真机筛选页整页 key=null（20261002_0046 基线）
+        assertEquals("PrayersForIllumination", n.match("祭火之人", GoodNames.Kind.SET)?.key)
+        assertEquals("PrayersToSpringtime", n.match("祭冰之人", GoodNames.Kind.SET)?.key)
+        assertEquals("PrayersToTheFirmament", n.match("祭风之人", GoodNames.Kind.SET)?.key)
+        assertEquals("Adventurer", n.match("冒险家", GoodNames.Kind.SET)?.key)
+        assertEquals("TinyMiracle", n.match("奇迹", GoodNames.Kind.SET)?.key)
     }
 
     @Test
@@ -232,9 +266,9 @@ class NameMatcherTest {
         val n = names()
         val garbage = listOf(
             "認的条名浩成t的佐主類合坦4の",
-            "回gfdskjh秦之歌",
             "哈哈哈呵呵呵",
             "12345678",
+            "gfdskjhqwasdf",
         )
         for (g in garbage) {
             assertNull("garbage '$g' should not match pieces", n.match(g, GoodNames.Kind.PIECE))
@@ -242,6 +276,17 @@ class NameMatcherTest {
             assertNull("garbage '$g' should not match weapons", n.match(g, GoodNames.Kind.WEAPON))
             assertNull("garbage '$g' should not match sets", n.match(g, GoodNames.Kind.SET))
         }
+    }
+
+    @Test
+    fun `lcs 2 treats a unique bigram as confident per reference tier5 semantics`() {
+        // 原 garbage 用例成员「回gfdskjh秦之歌」：全 305 个单件名里「之歌」只出现在
+        // 「深廊的回奏之歌」——按 fuzzy_match.rs 第 5 层的设计（唯一公共子串 ⇒ 置信命中）
+        // 它**应该**命中；LCS_MIN=3 时代恰好判 null，降到 2 后行为改为正向记录在这里。
+        val n = names()
+        val hit = n.match("回gfdskjh秦之歌", GoodNames.Kind.PIECE)
+        assertEquals("FinaleOfTheDeepGalleries", hit?.key)
+        assertEquals(NameMatcher.Tier.LCS, hit?.tier)
     }
 
     // ---------- 确定性扰动压测（防阈值/分级日后漂移）----------

@@ -13,6 +13,9 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.CLICK_SETTLE_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.GRID_END_DIFF
 import com.bettergi.pocket.scan.ScanEngine.Companion.GRID_SIMILAR_DIFF
 import com.bettergi.pocket.scan.ScanEngine.Companion.MAX_FILTER_PAGES
+import com.bettergi.pocket.scan.ScanEngine.Companion.FILTER_PAGE_CONSISTENCY_MIN
+import com.bettergi.pocket.scan.ScanEngine.Companion.FILTER_PAGE_CONSISTENCY_RETRY
+import com.bettergi.pocket.scan.ScanEngine.Companion.FILTER_PAGE_CONSISTENCY_WAIT_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.MAX_FILTER_PAGE_TURNS
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_CHANGE_WAIT_MAX_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_REFRESH_MS
@@ -97,13 +100,9 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
         constellation = charConstellation,
         // ascension：由 `parseCharacterPanel` 算好（优先面板等级上限 Lv.X/Y 的 Y，缺失按 level 分层）
         ascension = lastCharAscension,
-        // ★ 2026-09-17 **减去命座对天赋的加成**（游戏面板显示"含加成值"，GT/GOOD 是"基础值"）
-        //   规则由 GT 监督离线拟合（92 角色 × 3 天赋）：
-        //     c0~2 ⇒ **无加成**（0 差异 100% ✓）
-        //     c≥5  ⇒ skill/burst **各 +3**（94% ✓）
-        //     c3~4 ⇒ **混合**（各角色命座加成对象不同 ✗）⇒ 取多数派 c≥3 即 −3（≈88%）
-        //   ⇒ 近似规则：`c≥3 ⇒ skill −3` / `c≥5 ⇒ burst −3`（auto 无加成）
-        //   ⚠️ 精确化需读"命座文本"（GOODScanner 做法）或内置逐角色表（待办）
+        // ★ 2026-09-30 #155：面板显示的是**含命座加成**的值，GT/GOOD 要基础值 ⇒ 减法在 `readTalent`
+        //   里做（`applyConstellationTalentBonus`，查字典 c3/c5 是哪一行 + 旅行者那条特例），
+        //   这里拿到的已经是基础值。旧的"c≥3⇒skill、c≥5⇒burst"近似规则连同那张 GT 反推的手表一起删了。
         talents = charTalents.toList(),
     )
     // ── 连续重复角色判据（2026-09-11 用户定：连续 3 个重复 = 遍历完）──
@@ -111,6 +110,12 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
     // 会连续读到已扫过的角色；`reachedEnd`（指纹到底）对回卷列表永不触发，故此为**主判据**。
     // ⚠️ 按**词典 key**判重（角色身份），不按名字：名字可能读错/两名相撞 → 按名字会误杀丢件。
     // key == null（未解析出身份）→ 判据不介入，且**照常入库**（宁可多一件也不丢）。
+    //   ⚠️ 故意**不**退到"按显示名去重"：CharDupJudge 的 KDoc 记着实测风险 —— 两个不同角色
+    //   的 OCR 名可能撞在一起，按名去重会**静默少一件**，比"多一件待办"更糟（#146 定的口径）。
+    //   #156 剩下的那半条（多条无 key 记录在下游按 key 并成一条）改在**下游**修：
+    //   `good_vs_gt.py::cha_key` 现在对未解析记录退回显示名当临时键，N 条不再并成 1 条，
+    //   同显示名重复出现仍然报 🔁。这里只补一个**摘要计数**，让"本轮有 N 位没解析出身份"
+    //   一眼可见，不用去翻逐条 Log.w。
     val seenKeys = resultsCharacters.mapNotNull { it.key }
     val dup = c.key != null && seenKeys.contains(c.key)
     lastCharName = c.name
@@ -122,6 +127,9 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
         return
     }
     resultsCharacters.add(c)
+    // ★ #156：数一下"没有 GOOD key 的入库件"，进 `scan finished` 摘要（逐条只有 Log.w，
+    //   翻日志才看得见；对账侧表现为"多 N 条未解析 + 缺 N 个真角色"）。
+    if (c.key == null) charUnresolved++
     // #122：给「格级:」日志一个**与本格入库同源**的标签（由 pagedGrid 在本格日志后清）
     lastCharCellLabel = "c:${c.key ?: c.name}/lv${c.level}"
     Log.i(TAG, "char emit #${resultsCharacters.size}: ${c.name} lv=${c.level} c${c.constellation} t=${c.talents}")
@@ -260,14 +268,45 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
         return
     }
     val grid = profile.rawObject("grids.$gridKey") ?: return
-    val cols = grid.getJSONObject("cols")
+    val columns = grid.getJSONObject("columns")
     val rowYTop = grid.getJSONArray("rowYTop")
-    val leftX = cols.getJSONObject("left").getInt("checkboxX")
-    val rightX = cols.getJSONObject("right").getInt("checkboxX")
-    val leftBox = cols.getJSONObject("left").getJSONArray("nameBox")
-    val rightBox = cols.getJSONObject("right").getJSONArray("nameBox")
+    val leftX = columns.getJSONObject("left").getInt("checkboxX")
+    val rightX = columns.getJSONObject("right").getInt("checkboxX")
+    val leftBox = columns.getJSONObject("left").getJSONArray("nameBox")
+    val rightBox = columns.getJSONObject("right").getJSONArray("nameBox")
     if (ocrGateway == null) return
     val rowHeight = grid.optInt("rowHeight", 120)
+    // 行距以 `rowYTop` 相邻差为准（缺 rowYTop 时回退 profile 的 rowPitch 键）。
+    // 三档实测：2244=102、2560=136、3200=136（2560 那份 2026-10-02 傍晚前是 133，
+    // 与逐行字心差 136 不符 ⇒ 每行欠 3px、第 8 行欠 21px，已按实测改格点，见该档 labelAnchorNote）。
+    // ⚠️ 本值同时是**选取窗半宽**（±pitch/2）⇒ 改 pitch 会动"末行落点离重置钮还有多少余量"，
+    //   见审计 §8-5。
+    val rowPitch = if (rowYTop.length() > 1) rowYTop.getInt(1) - rowYTop.getInt(0) else grid.optInt("rowPitch", 0)
+    // ★ #169：「名义行顶 → 文本行中心」的实测锚（与 GridAlign 的 labelAnchor 同一套路）。
+    //   缺键 = 未标定 ⇒ textLineCrop 直接返回 null ⇒ 每行都走"量不到 ⇒ 不读不点" ⇒ 恒 selected=0 ⇒ not_applied。
+    //   ⚠️ 这**不是**"退回改动前的行为"（2026-10-02 审计更正本注释）：旧写法会拿名义行带硬读，
+    //   而名义带在落点偏时装的是**相邻卡被裁掉的下半截字**，能"认出"套名却点在本行中心 ⇒ 读 B 点 A。
+    //   未标定的档**宁可不筛**，也不静默选错套装；故本分支用 Log.w 让它一眼可见，别让"没生效"再隐身。
+    val labelAnchor = grid.optInt("labelAnchor", -1)
+    // ★ #169 §8-5：列表视口（bounds 的 y 向）。落点越出去就**整格不做**，不钳到边界内继续点。
+    val panelBounds = grid.optJSONArray("bounds")
+    val panelTop = panelBounds?.optInt(1, 0) ?: 0
+    val panelBottom = panelBounds?.optInt(3, Int.MAX_VALUE) ?: Int.MAX_VALUE
+    if (panelBounds == null) {
+        Log.w(TAG, "setFilter: $gridKey 缺 bounds ⇒ 落点越界无从判定，末行可能点到面板外的「重置」")
+    }
+    if (labelAnchor < 0) {
+        Log.w(TAG, "setFilter: $gridKey 未标定 labelAnchor ⇒ 整页不读不点 ⇒ 本档筛选不会生效（not_applied）；请先标定该档 labelAnchor")
+    } else {
+        Log.i(TAG, "setFilter: 行文本锚 labelAnchor=$labelAnchor band=$rowHeight pitch=$rowPitch")
+        // ★ #169 的相位只在本键按 1:1 标定时成立：textLineCrop 拿**原始 profile 整数**索引 Mat，
+        //   而 clickAt/checkboxChecked 会 profile.scale ⇒ scale≠1 时"读的带"与"点的位"分叉。
+        //   三档各有专属 profile 文件 ⇒ 今天恒 1.0；只有非整档设备回落 baseline 才可能不为 1，
+        //   那种配置下本路径未测过 ⇒ 只告警、不改算法（盲改缩放会把所有裁剪框整体平移，风险更大）。
+        if (profile.scaleX != 1.0 || profile.scaleY != 1.0) {
+            Log.w(TAG, "setFilter: $gridKey scale=${profile.scaleX}x${profile.scaleY} ≠ 1 ⇒ 行位相位按 1:1 标定，本档未测，读数与落点可能分叉")
+        }
+    }
     // §12.4-② 目标名空间归一：plan 注入的是中文显示名，matchFilterRow 比对的是词典 key
     // （如 绝缘之旗印→EmblemOfSeveredFate），必须先经词典 lookup 归一，否则恒 miss。
     val pending = LinkedHashSet<String>()
@@ -291,36 +330,119 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
     val topRowKey = grid.optString("topRowKey", "")
     if (topRowKey.isNotEmpty()) {
         val yTopProbe = rowYTop.getInt(0)
-        filterTopRowIs(ocrGateway, lookup, leftBox, yTopProbe, rowHeight, topRowKey)
-        filterTopRowIs(ocrGateway, lookup, rightBox, yTopProbe, rowHeight, topRowKey)
+        logTopRowRead(ocrGateway, lookup, leftBox, yTopProbe, rowHeight, rowPitch, labelAnchor, topRowKey)
+        logTopRowRead(ocrGateway, lookup, rightBox, yTopProbe, rowHeight, rowPitch, labelAnchor, topRowKey)
     }
     var guard = 0
     var turns = 0
-    var rescanUsed = false
     var selected = 0
+    // ★ A41（#147）：本页因"自洽度不足"重读的次数 + 上一次读数的逐行文本（翻页成功后都复位）
+    var selfConsistRetry = 0
+    var lastPageReads: List<String>? = null
+    // ★ #169 §6-1：本页已用过的"半行轻推"次数（翻页成功后复位）
+    var pageNudges = 0
     while (pending.isNotEmpty() && guard++ < MAX_FILTER_PAGES) {
         if (vars.stopRequested) break
-        var hits = 0
+        var rowsRead = 0
+        var rowsBlank = 0
+        var rowsResolved = 0
+        val pageReads = ArrayList<String>()
+        fun note(side: String, y: Int, r: RowRead) {
+            rowsRead++
+            if (r.blank) rowsBlank++
+            if (r.resolved) rowsResolved++
+            if (r.matched) selected++
+            pageReads += "$side$y${r.text}"
+        }
         for (i in 0 until rowYTop.length()) {
             if (pending.isEmpty()) break
             val y = rowYTop.getInt(i)
             val rowCenterY = y + rowHeight / 2
-            if (matchFilterRow(ocrGateway, lookup, leftBox, y, rowHeight, leftX, rowCenterY, pending, "left")) {
-                hits++; selected++
-            }
+            note("L", y, matchFilterRow(ocrGateway, lookup, leftBox, y, rowHeight, rowPitch, labelAnchor, leftX, rowCenterY, panelTop, panelBottom, pending, "left"))
             if (pending.isEmpty()) break
-            if (matchFilterRow(ocrGateway, lookup, rightBox, y, rowHeight, rightX, rowCenterY, pending, "right")) {
-                hits++; selected++
-            }
+            note("R", y, matchFilterRow(ocrGateway, lookup, rightBox, y, rowHeight, rowPitch, labelAnchor, rightX, rowCenterY, panelTop, panelBottom, pending, "right"))
         }
         if (pending.isEmpty() || vars.stopRequested) break
-        // §15 P1-2：本页零命中多为翻页残差致行 OCR 劣化 → 重扫本页一次再翻页
-        if (hits == 0 && !rescanUsed) {
-            rescanUsed = true
-            Log.i(TAG, "setFilter: 本页零命中，重扫一次")
+        // ── ★ A41（#147）：**页级自洽度 + 跨次读数对比**闸门 —— 判"这页读稳了没"改看内容 ──
+        //   旧判据是 `hits == 0 ⇒ 重扫一次`（§15 P1-2）：一页本来就可能**没有待选目标**（56+ 套里
+        //   只挑 1~2 个），于是它把正常页当劣化页白读一整页（实测本轮 6 页全部零命中 ⇒ 全白读一遍），
+        //   又看不见"整页乱码"本身（乱码页与无目标页同形）。
+        //
+        //   两道信号（00:33 轮 2244 实测逼出来的，单看第一道会误伤）：
+        //   ① **自洽度** = 认出套装名的行数 / 读到非空文本的行数。正常页 1.00/0.81/0.94，
+        //      劣化页 0.29~0.77。
+        //   ② **跨次读数是否逐字相同**：不同 ⇒ 列表还在漂，等一等再读；相同 ⇒ 再等也不会变。
+        //   ⚠️ ②里当初写的成因（"灰化低对比度 + 形近字"，指 '经冰之人'/'终火之人' 那批尾部套）
+        //   **是错的**，2026-10-02 #169 复查推翻：同一批行在邻页一字不差地读对过，而"逐字相同的
+        //   乱码页"每次都被**整页**命中 —— 真因是 rec-only 没有 det、名义行带又远高于一行字，
+        //   列表落点偏出行带余量就把整页切成半字（见 [GridAlign.textLineCrop] 的 KDoc：离线把真截图
+        //   平移即可复现，δ=−30 时 16 行只剩 1 行）。灰化只是**同时**发生在尾部，不是原因。
+        //   ⇒ 行裁剪修好后这条闸门仍留着：它现在兜的是"词典缺口 / 相位确实没量到"（ph=0 且乱码）。
+        //   所以：不达标 ⇒ 先重读**一次**拿第二份读数；两份逐字相同 ⇒ 判"稳定但读不出"，立刻收手
+        //   （只花 1 次重读，不再打满预算）；不同 ⇒ 仍在漂，继续等到预算打满，最后 loud 带页继续。
+        val nonBlank = rowsRead - rowsBlank
+        val consistency = filterPageConsistency(rowsRead, rowsBlank, rowsResolved)
+        Log.i(
+            TAG,
+            "setFilter 页#${turns + 1}: 读 $rowsRead 行（空 $rowsBlank）⇒ 认出套装 $rowsResolved/$nonBlank " +
+                "自洽度=${"%.2f".format(consistency)} 重读 $selfConsistRetry/$FILTER_PAGE_CONSISTENCY_RETRY",
+        )
+        if (consistency < FILTER_PAGE_CONSISTENCY_MIN) {
+            val settled = filterPageStable(lastPageReads, pageReads)
+            if (lastPageReads != null && settled) {
+                Log.i(
+                    TAG,
+                    "setFilter: 第${turns + 1}页两次读数**逐字相同**（自洽度 ${"%.2f".format(consistency)}）" +
+                        "⇒ 列表已静止，再读也不会变（读得出的行都认得 / 读不出的全是词典或行格漂移）⇒ 停止重读",
+                )
+            } else if (selfConsistRetry < FILTER_PAGE_CONSISTENCY_RETRY) {
+                selfConsistRetry++
+                Log.w(
+                    TAG,
+                    "setFilter: 第${turns + 1}页自洽度 ${"%.2f".format(consistency)} < " +
+                        "$FILTER_PAGE_CONSISTENCY_MIN（乱码 ${nonBlank - rowsResolved} 行）" +
+                        (if (lastPageReads == null) "⇒ 先重读一次拿对比基准"
+                         else "⇒ 两次读数不同，判列表仍在慢漂") +
+                        "，等 ${FILTER_PAGE_CONSISTENCY_WAIT_MS}ms 重读本页（第 $selfConsistRetry/" +
+                        "$FILTER_PAGE_CONSISTENCY_RETRY 次）",
+                )
+                lastPageReads = pageReads
+                delay(FILTER_PAGE_CONSISTENCY_WAIT_MS)
+                continue
+            } else {
+                Log.w(
+                    TAG,
+                    "setFilter: 第${turns + 1}页重读满 $FILTER_PAGE_CONSISTENCY_RETRY 次，自洽度仍 " +
+                        "${"%.2f".format(consistency)} 且读数仍在变 ⇒ 带着本页继续（未点完=$pending）",
+                )
+            }
+        }
+        selfConsistRetry = 0
+        lastPageReads = null
+        // ★ #169 §6-1：整页大面积"量不到" ⇒ 落点挤在 ±半行距 的**窗沿**，本行与邻行的字带离锚
+        //   几乎等距，被歧义门成批拒判（2560 尾页实测 7/16；代价口径见审计 §10-附2 —— 漏格不是
+        //   "慢一点"，是这一轮的目标达不成）。沿 advance 同一 x **往回**轻推半行，把 δ 从窗沿挪到
+        //   窗中间，再读**同一页**。
+        //   ⚠️ 必须是**往回**推：往前推会把本页总前进量抬到计划之外，那正是 #75
+        //   「指纹没变就重发 ⇒ 一页滑两次 ⇒ 静默跳 2 页」的形状；往回推只多重叠半行（白花时间，不丢内容）。
+        //   每页最多 1 次：推完还读不到，说明不是窗沿问题，继续推只会白烧。
+        if (advance != null && pending.isNotEmpty() &&
+            shouldNudgeFilterPage(rowsRead, rowsBlank, pageNudges, FILTER_PAGE_NUDGE_BUDGET)
+        ) {
+            pageNudges++
+            val nx = profile.scale(advance.getJSONArray("from").getInt(0), profile.scaleX)
+            val ny = profile.scale(advance.getJSONArray("to").getInt(1), profile.scaleY)
+            Log.i(
+                TAG,
+                "setFilter: 第${turns + 1}页 $rowsBlank/$rowsRead 行量不到 ⇒ 往回轻推半行重读本页" +
+                    "（第 $pageNudges/$FILTER_PAGE_NUDGE_BUDGET 次）",
+            )
+            actions.swipe(nx, ny, nx, ny + profile.scale(rowPitch / 2, profile.scaleY))
+            // 半行位移喂给 24×16 缩略图的"确实变了"判据太弱 ⇒ 这里只等画面静止。
+            awaitGridStable(profile, gridKey).release()
             continue
         }
-        rescanUsed = false
+        pageNudges = 0
         // §12.4-⑤ 本页未点完 → 翻页继续
         if (advance == null) break
         // ★ 2026-09-18（P0③）：改用**固定页数上限**（对齐 GOODScanner 的 max_scrolls=5），
