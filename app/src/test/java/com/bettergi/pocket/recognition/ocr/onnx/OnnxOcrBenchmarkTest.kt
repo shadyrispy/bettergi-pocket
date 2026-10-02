@@ -399,6 +399,31 @@ class OnnxOcrBenchmarkTest {
         assertEquals(listOf(2), EpTierPicker.intraOpCandidates(caps("unknown", big = 0)))
     }
 
+    /**
+     * #74：intra-op **换档**必须带余量（"取最小中位数"会把生产永久调到慢档）。
+     * 数值全部来自 2026-09-26 华为 P20 同机构建的五轮实测（见 `EpTierPicker.intraOpCandidates` 的表）。
+     */
+    @Test
+    fun `intra-op 只在挑战者快出余量时才换档`() {
+        // 四里的慢档：4 比 2 慢 2.2~2.3× ⇒ 留 2
+        assertEquals("慢档不许换", 2, EpTierPicker.pickIntraOp(mapOf(2 to 643L, 4 to 1420L), incumbent = 2))
+        assertEquals("慢档不许换(第二轮)", 2, EpTierPicker.pickIntraOp(mapOf(2 to 406L, 4 to 940L), incumbent = 2))
+        // 优势不足 20%（340 比 406 只快 16.3%）⇒ 不换
+        assertEquals("优势 16% < 余量 20% ⇒ 不换", 2, EpTierPicker.pickIntraOp(mapOf(2 to 406L, 4 to 340L), incumbent = 2))
+        // 恰好差 20%（320 = 400×0.8）⇒ 边界算"优势不足"，不换
+        assertEquals("恰好 20% 属边界，按不换", 2, EpTierPicker.pickIntraOp(mapOf(2 to 400L, 4 to 320L), incumbent = 2))
+        // 15:57 那次孤例（254 vs 384 = 快 34%）⇒ **余量拦不住**，这条如实记下：
+        //   对它的防御是 runs 3→15 的中位数，而不是余量。别把本用例读成"换错已被杜绝"。
+        assertEquals("快 34% 会换档（余量拦不住孤例读数，防御靠 runs=15 中位）", 4,
+            EpTierPicker.pickIntraOp(mapOf(2 to 384L, 4 to 254L), incumbent = 2))
+        // 保守退化：表空 / 打平 / incumbent 没测到 / incumbent 建会话失败
+        assertEquals("无基准 ⇒ 不动", 2, EpTierPicker.pickIntraOp(emptyMap(), incumbent = 2))
+        assertEquals("打平 ⇒ 留住 incumbent", 2, EpTierPicker.pickIntraOp(mapOf(2 to 500L, 4 to 500L), incumbent = 2))
+        assertEquals("incumbent 没测到 ⇒ 取唯一实测者", 4, EpTierPicker.pickIntraOp(mapOf(4 to 500L), incumbent = 2))
+        assertEquals("incumbent 建会话失败 ⇒ 必须换", 4,
+            EpTierPicker.pickIntraOp(mapOf(2 to Long.MAX_VALUE, 4 to 500L), incumbent = 2))
+    }
+
     @Test
     fun `EP 降档沿调用方给的候选序，到兜底不再降`() {
         val order = listOf(EpTierPicker.Tier.QNN, EpTierPicker.Tier.CPU)

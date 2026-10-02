@@ -1,6 +1,7 @@
 package com.bettergi.pocket.scan
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -167,5 +168,42 @@ class GridAdvancePlanTest {
         val (cmd3, carry3) = plan(2.0, driftOver)
         assertEquals(TARGET, cmd3)
         assertEquals(0, carry3)
+    }
+
+    // ---------- rowsAdvanced（#70 几何先验）----------
+
+    @Test
+    fun `per-page rounding absorbs the band's fixed under-read`() {
+        // 真机三份日志里条带每页都少读 ~0.15–0.2 行（3200 档 L/pitch 实测 2.68–2.98），
+        // 幅度 < 0.5 行 ⇒ 逐页取整正好吸收，39/39 与 57/57 页都回到 traverseRows=3。
+        assertEquals(3, GridAlign.rowsAdvanced(876, PITCH)!!)
+        assertEquals(3, GridAlign.rowsAdvanced(785, PITCH)!!)
+        assertEquals(3, GridAlign.rowsAdvanced(782, PITCH)!!)
+        // lockfix 那轮唯一的不稳页：L/pitch=2.34 ⇒ 取整成 2。这正是"先验不能当判决"的样本。
+        assertEquals(2, GridAlign.rowsAdvanced(682, PITCH)!!)
+    }
+
+    @Test
+    fun `accumulating pixels instead of rounding per page loses rows`() {
+        // 把 #70 的教训钉成可执行断言：同一条带、同样 39 页，累加 `Σ L / pitch` 会少算 13 行，
+        // 而逐页取整一行不少。谁将来想把 L 累加当绝对行号（#104 那轮的 7 处假碰撞就这么来的），
+        // 这条会红。
+        val pages = 39
+        val landing = 785
+        val perPage = (1..pages).sumOf { GridAlign.rowsAdvanced(landing, PITCH)!! }
+        val accumulated = pages * landing / PITCH
+        assertEquals(pages * 3, perPage)
+        assertEquals("累加必须比逐页取整少一截，否则本用例没在测任何东西", 104, accumulated)
+    }
+
+    @Test
+    fun `unpitched grid reports no prior instead of guessing`() {
+        assertNull(GridAlign.rowsAdvanced(876, 0))
+        assertNull(GridAlign.rowsAdvanced(876, -292))
+    }
+
+    private companion object {
+        /** 3200 档实测行距（traverseRows=3 ⇒ 整页 876）。 */
+        const val PITCH = 292
     }
 }

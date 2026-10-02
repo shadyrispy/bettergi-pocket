@@ -329,6 +329,40 @@
                     android:textSize="12sp" />
             </LinearLayout>
 
+            <!-- #105 角色昵称：旅行者/流浪者/奇偶的显示名由玩家自定义，而词典以**官方中文名**为键
+                 ⇒ 结构性不可能命中。内置猜测表的方向和 GT 对不上，已删（见 NameOverrides 的 KDoc），
+                 改成让用户填。行由代码按 NameOverrides.FIELDS 生成，与抓包权限小节同一套做法。 -->
+            <LinearLayout
+                android:id="@+id/name_section"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="角色昵称"
+                    android:textColor="@color/pocket_text"
+                    android:textSize="16sp" />
+
+                <LinearLayout
+                    android:id="@+id/name_override_list"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="vertical" />
+
+                <TextView
+                    android:id="@+id/name_override_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:lineSpacingExtra="3dp"
+                    android:textColor="@color/pocket_text_muted"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
             <LinearLayout
                 android:id="@+id/swipe_row"
                 android:contentDescription="展开或收起滑动测试"

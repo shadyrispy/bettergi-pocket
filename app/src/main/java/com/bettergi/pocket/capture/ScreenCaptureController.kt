@@ -64,6 +64,22 @@ class ScreenCaptureController(
     private var frameThread: Thread? = null
 
     /**
+     * #109：轮询线程的**代次**。循环条件必须是"我这一代还是当前代"，不能只看
+     * [frameThreadRunning] 这个共享开关 —— 否则会发生两件事：
+     *
+     * ① [stopFramePollerLocked] 的 `join(1000)` 超时（线程正阻塞在 `acquireLatestImage()` 上很常见）
+     *    后就把线程判死并置 `frameThread=null`，可它其实还活着；下一次 start 把
+     *    [frameThreadRunning] 又置回 true ⇒ **旧线程下一圈读到 true，永远不退出** ⇒ 两条轮询并存。
+     *    2026-09-28 实机就是这样：一条 `frame acquired` 正常出帧，另一条
+     *    `frame poll null (count=…)` 单调涨到上千且永远拿不到帧（帧都被新一代消费了）。
+     * ② 线程体的 `finally` 无条件把 [frameThreadRunning] 置 false ⇒ 一具**旧代尸体**
+     *    可以把**新一代**刚置起来的开关抹掉，于是 `ensureFramePollerLocked` 再拉一条，
+     *    变成三条并存。同一个根因：开关是共享的，退出条件却该是每线程自己的。
+     */
+    @Volatile
+    private var pollerGeneration = 0
+
+    /**
      * 独立消费线程：循环 acquireLatestImage()，始终把最新帧拷进缓存。
      *
      * 不依赖 OnImageAvailableListener —— 华为 EMUI 上该回调经常不触发，导致
@@ -73,11 +89,25 @@ class ScreenCaptureController(
      */
     private fun startFramePollerLocked() {
         if (frameThreadRunning) return
+        // ⚠️ 顺序要紧：**先换代再抬开关**。反过来的话中间那段窗口里仍有一条旧尸体的
+        //   `finally` 能看到 `gen == pollerGeneration`（还没换），把刚抬起来的开关又抹掉。
+        val gen = ++pollerGeneration
         frameThreadRunning = true
         val thread = Thread({
             var nullCount = 0
+            // ★ #46 ⑥：这两条 D 级逐帧日志原来**每次状态跳变都打**。实测 40 分钟一轮
+            //   `frame poll null (count=1)` 6.5 万行 + `frame acquired` 6.5 万行 ≈ 11MB，
+            //   是全量 logcat 里**我方 tag 中最大的一项**（游戏/系统 tag 另计）。
+            //   诊断价值只在"帧率/卡顿趋势"，按秒限流足够（8ms 轮询下 1 秒可跳变上百次）。
+            var lastFrameLogMs = 0L
+            fun frameLogDue(): Boolean {
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastFrameLogMs < FRAME_LOG_MIN_INTERVAL_MS) return false
+                lastFrameLogMs = now
+                return true
+            }
             try {
-                while (frameThreadRunning) {
+                while (frameThreadRunning && gen == pollerGeneration) {
                     val reader = synchronized(lock) { imageReader } ?: break
                     val image = try {
                         reader.acquireLatestImage()
@@ -105,7 +135,7 @@ class ScreenCaptureController(
                                 if (!firstFrameLogged) {
                                     firstFrameLogged = true
                                     Log.i(TAG, "first frame acquired ${w}x$h ts=${image.timestamp}")
-                                } else if (nullCount > 0) {
+                                } else if (nullCount > 0 && frameLogDue()) {
                                     Log.d(TAG, "frame acquired ${w}x$h after $nullCount nulls")
                                     nullCount = 0
                                 }
@@ -124,7 +154,10 @@ class ScreenCaptureController(
                         }
                     } else {
                         nullCount++
-                        if (nullCount == 1 || nullCount % 100 == 0) {
+                        // ★ #46 ⑥：原来 `count==1 || count%100==0` ⇒ 每段无帧期开头都必打一行
+                        //   （8ms 轮询下"1 个 null"极常见）⇒ 实测 6.5 万行。改为纯按秒限流：
+                        //   连续无帧时长本身就是"卡住多久"的信号，不必逐次记录。
+                        if (frameLogDue()) {
                             Log.d(TAG, "frame poll null (count=$nullCount)")
                         }
                         try {
@@ -142,9 +175,11 @@ class ScreenCaptureController(
                 Log.e(TAG, "frame poller crashed", t)
             } finally {
                 // 不持 [lock]：[stopFramePollerLocked] 可能在持锁时 join，这里取锁会互堵 1s。
-                frameThreadRunning = false
+                // ⚠️ 只允许**当前代**清这个共享开关：一具被换代淘汰的旧尸体若把它抹掉，
+                //   `ensureFramePollerLocked` 就会再拉一条，变成三条并存（#109 同一根因的另一半）。
+                if (gen == pollerGeneration) frameThreadRunning = false
             }
-            Log.d(TAG, "frame poller exited")
+            Log.d(TAG, "frame poller exited (gen=$gen, current=$pollerGeneration)")
         }, "BetterGICaptureFrames")
         thread.start()
         frameThread = thread
@@ -164,6 +199,10 @@ class ScreenCaptureController(
     }
 
     private fun stopFramePollerLocked() {
+        // 先换代：`join(1000)` 超时（线程阻塞在 acquireLatestImage 上很常见）时，这具尸体
+        // 醒来读到 `gen != pollerGeneration` 也会自己退出，不会因为在下一轮 start 之后
+        // 看到 frameThreadRunning 又被置回 true 而永远跑下去（#109 实测攒出的僵尸轮询）。
+        pollerGeneration++
         frameThreadRunning = false
         val t = frameThread
         frameThread = null
@@ -734,6 +773,13 @@ class ScreenCaptureController(
         const val TAG = "BetterGI.Capture"
         const val IMAGE_READER_MAX_IMAGES = 2
         const val FRAME_POLL_MS = 8L
+        /**
+         * 取帧循环逐帧 D 级日志的**最小间隔**（#46 ⑥）。
+         *
+         * 实测未限流时一轮 40 分钟打出 6.5 万行 `frame poll null` + 6.5 万行 `frame acquired`
+         * ≈ 11MB，是全量 logcat 里我方 tag 的最大项。诊断只需"帧率/卡顿趋势"，1 秒一行足够。
+         */
+        const val FRAME_LOG_MIN_INTERVAL_MS = 1000L
         const val RECOVER_AFTER_MS = 800L
         const val RECOVER_COOLDOWN_MS = 2500L
 

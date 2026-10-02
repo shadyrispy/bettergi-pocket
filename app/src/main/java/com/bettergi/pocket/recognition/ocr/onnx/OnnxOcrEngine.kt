@@ -90,10 +90,21 @@ class OnnxOcrEngine(
             val e = OrtEnvironment.getEnvironment()
             val detOpts = buildOptions(targetTier, intraThreads)
             val recOpts = buildOptions(targetTier, intraThreads)
-            val d = e.createSession(detModel.absolutePath, detOpts)
-            val r = e.createSession(recModel.absolutePath, recOpts)
-            detOpts.close()
-            recOpts.close()
+            var d: OrtSession? = null
+            var r: OrtSession? = null
+            try {
+                d = e.createSession(detModel.absolutePath, detOpts)
+                r = e.createSession(recModel.absolutePath, recOpts)
+            } catch (t: Throwable) {
+                // options 与"已经建好的那一半 session"都持 native 内存，而本方法每次换档/
+                // 重试都会再走一遍 ⇒ 半途失败必须收干净，否则泄漏会累积。
+                runCatching { r?.close() }
+                runCatching { d?.close() }
+                throw t
+            } finally {
+                runCatching { detOpts.close() }
+                runCatching { recOpts.close() }
+            }
             env = e
             detSession = d
             recSession = r
@@ -129,15 +140,19 @@ class OnnxOcrEngine(
      * 为什么必须实测而不能按核数拍：见 [EpTierPicker.intraOpCandidates] —— 同一台机同一个构建，
      * intra=2 的绝对值跨会话能漂 406~818ms，按机型/核数推出来的数没有依据。
      *
-     * ⚠️ `runs = 3` **偏少**：真机实测里有一次（2026-09-26 15:57）把 intra=4 判成了赢家，
-     * 而它随后四轮复测都是**慢 2.2~2.3×**。择优目前既没有重复次数下限、也没有"挑战者须明显更优
-     * 才换"的余量 ⇒ 换错方向的概率不低，改这里之前先看 `intraOpCandidates` 的那张五轮表。
+     * ★ 2026-09-28（#74）：`runs` 由 **3 提到 15**，并且调用侧的换档判据从"取最小中位数"换成
+     * [EpTierPicker.pickIntraOp]（挑战者须比当前档快 ≥20% 才换）。
+     * 背景：真机有一次（2026-09-26 15:57）把 intra=4 判成赢家，而它随后四轮复测都是**慢 2.2~2.3×**
+     * ⇒ 3 次采样的中位数不足以挡住这种读数，而换档在服务生命周期内不可逆。
+     * 代价（可接受）：初始化多花 `候选数 × 16 次 rec run` 的墙钟。按真机 CPU 档 4 槽一轮 ~400ms 估，
+     *   3 个候选 ≈ **2~20s 一次性**；换来的是整轮扫描（数十万格）不再被永久调到慢档。
+     *   日志里会打出各候选的中位值（`基准=2=…ms`），跑过就能核这个估。
      *
      * ⚠️ 只测 rec、不测 det：det 恒为固定形状、对线程数不敏感（实测 1.20→1.30 只随版本变），
      *    而 rec 是稳态每格 9 次的主开销，选它做基准才有意义。
      * ⚠️ 这里**不试新 EP**，只换线程数 ⇒ 没有 `createSession` 挂起/SIGSEGV 的风险。
      */
-    fun benchmarkIntra(candidates: List<Int>, width: Int = 320, runs: Int = 3): Map<Int, Long> {
+    fun benchmarkIntra(candidates: List<Int>, width: Int = 320, runs: Int = 15): Map<Int, Long> {
         if (candidates.isEmpty()) return emptyMap()
         val e = runCatching { OrtEnvironment.getEnvironment() }.getOrNull() ?: return emptyMap()
         val wi = width.coerceIn(1, OnnxPaddleOcrService.REC_W_MAX)
@@ -147,8 +162,12 @@ class OnnxOcrEngine(
         for (n in candidates) {
             val ms = runCatching {
                 val opts = buildOptions(tier, n)
-                val s = e.createSession(recModel.absolutePath, opts)
-                opts.close()
+                // 建会话失败时 opts 同样要关 —— 这里整段包在 runCatching 里，抛出去就是静默泄漏。
+                val s = try {
+                    e.createSession(recModel.absolutePath, opts)
+                } finally {
+                    runCatching { opts.close() }
+                }
                 try {
                     val name = s.inputInfo.keys.firstOrNull() ?: "x"
                     LongArray(runs + 1) {

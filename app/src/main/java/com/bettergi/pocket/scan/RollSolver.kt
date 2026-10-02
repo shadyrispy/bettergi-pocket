@@ -9,10 +9,17 @@ import android.util.Log
  * 并给出整件的 `totalRolls` —— 即 GOOD v3 里 Irminsul 会写的那几个字段
  * （GT 实测每条 substat 带 `initialValue`、每件带 `totalRolls`，我方此前**全缺**）。
  *
- * 判据（与原实现一致）：
+ * 判据（与参考实现同源，含下面标 ⚠️ 的那条 init 顺序）：
  * - 每个词条的显示值必须能在 [RollTable] 的档位表里找到分解（⇒ 该词条的**合法强化次数集合**）；
  * - 星级 5 的等级 → 强化次数 `upgrades = level / 4`；初始词条数 `init ∈ {4,3}`（5★）/ `{3,2}`（4★），
- *   且 `level == 0` 时 `init` 优先取大（面板行数=初始条数）、`level > 0` 时优先取小（3 条更常见）；
+ *   且 `level == 0` 时优先取大（面板行数 = 初始条数）；
+ * - ⚠️ **`level > 0` 时两解都自洽就先取小**（`init=3` ⇒ `totalRolls` 少 1）。
+ *   这条**与参考实现一致**：GOODScanner `roll_solver.rs:459-464` 在 `rarity==5 && level>0` 时
+ *   取 `&[3, 4]`，注释原文 "At level > 0, prefer lower init (better GT accuracy)" —— 它只给了结论，
+ *   本仓把它**量化**了（`dsl/scripts/rollsolver_probe.py`，本账号真值 894 件、其中 105 件两解都成立）：
+ *   **先取小错 8 件，翻成先取大错 97 件**（GT 970 件口径：8 vs 98）⇒ 反过来排会多错 12 倍。
+ *   该顺序由 `RollSolverTest` 守住（聚合精确钉 8 + 单件 `ambiguous init resolves to the smaller count by policy`）；
+ *   移植忠实度自证：该脚本按现序复算扫描导出 968 件，**968/968 与 Kotlin 结果一致**。
  * - 所有词条的强化次数之和必须**恰好等于** `init + upgrades`（回溯求解，无解则整件放弃）；
  * - `initialValue` = 该词条**首次**强化档位的显示值（表里多条分解时取唯一值；并列歧义 → null）。
  */
@@ -113,6 +120,7 @@ object RollSolver {
             intArrayOf(subs.size - inactiveCount)
         } else when {
             rarity == 5 && lv == 0 -> intArrayOf(4, 3)
+            // ⚠️ 顺序承重（见类头那条 ⚠️）：先试 3 是为了让"两解都自洽"的 105 件落在错得少的一侧（8 vs 97）
             rarity == 5 -> intArrayOf(3, 4)
             lv == 0 -> intArrayOf(3, 2)
             else -> intArrayOf(2, 3)

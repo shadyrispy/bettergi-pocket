@@ -148,7 +148,17 @@ class ScanEngineDryRunTest {
     // ---- 页序列 harness：swipe 联动切帧 + 切 OCR 文本 ----
     private class Page(val frame: Mat, val ocrLines: Map<FrameRect, String>, val ocrNumber: Int?)
 
-    private class Harness(pages: List<Page>) {
+    private class Harness(
+        pages: List<Page>,
+        /**
+         * #48 夹具开关：`true` = **第 `entryClicks + 1` 次点击（即网格里第一个格）不改面板名**，
+         * 模拟"打开背包时游戏已自动选中第一件"⇒ 就绪判据看不到变化 ⇒ 只能靠「本轮首格豁免」收尾。
+         * 没有这个开关时，名字路径的豁免分支在干跑里永远不执行（每条用例的名字都照常变）。
+         */
+        val firstCellNameStuck: Boolean = false,
+        /** 入口链的点击数（`clicks.size` 用它区分"前置链点击"与"第一个格"）。 */
+        val entryClicks: Int = 0,
+    ) {
         var pageIndex = 0
             private set
 
@@ -222,6 +232,9 @@ class ScanEngineDryRunTest {
                 val col = ((x - CARD_ORIGIN[0]) / CARD_PITCH[0]).coerceIn(0, GRID_COLS - 1)
                 val row = ((y - CARD_ORIGIN[1]) / CARD_PITCH[1]).coerceIn(0, GRID_TRAVERSE_ROWS - 1)
                 cellIdx = row * GRID_COLS + col
+                // #48：首格豁免夹具 —— 第一个格的点击**不**推进面板名（其余照旧）
+                if (firstCellNameStuck && clicks.size == entryClicks + 1) return true
+                lastNameCell = "晨光的明誓#${x * 10000 + y}"
                 return true
             }
 
@@ -314,6 +327,10 @@ class ScanEngineDryRunTest {
         dedupe: Boolean = false,
         numberScript: List<Int?> = emptyList(),
         maxPages: Int = Int.MAX_VALUE,
+        /** #83：前台闸门探针。null = 不判（默认，保持既有用例行为不变）。 */
+        foregroundOk: (() -> Boolean?)? = null,
+        /** #48：把第一个格做成"名字不变"，用来逼出名字路径的**首格豁免**分支。 */
+        firstCellNameStuck: Boolean = false,
     ): RunResult {
         // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
@@ -332,7 +349,7 @@ class ScanEngineDryRunTest {
             null
         }
 
-        val h = Harness(pages)
+        val h = Harness(pages, firstCellNameStuck, ENTER_CHAIN_CLICKS)
         numberScript.forEach { h.numberScript.addLast(it) }
         // dedupe=false：dry-run 的 21 格 mock OCR 文本相同（人工场景），全量入库便于断言；
         // 真机每件内容不同，生产默认 true。
@@ -352,6 +369,7 @@ class ScanEngineDryRunTest {
             // 2026-09-26：翻页重发回路删除后，`dedupe=false` 的用例不再有"指纹不变⇒收尾"这条出口
             // （去重链永不命中、计数器 1026 也达不到）⇒ 需要显式页数的用例用 maxPages 钉住。
             maxPages = maxPages,
+            foregroundOk = foregroundOk,
         )
         // ⚠️ 护栏（2026-09-11）：engine.run() 出现过「无限等待」把整个单测任务挂死 1 小时+
         //    （jstack：Test worker TIMED_WAITING 停在 BlockingCoroutine.joinBlocking → 内部某处 delay 循环不退出）。
@@ -400,6 +418,26 @@ class ScanEngineDryRunTest {
     }
 
     /**
+     * #48：**名字路径**（干跑恒定走这条 —— `FrameSource.sampleSignature` 是接口默认实现返回 false
+     * ⇒ `sigUsed=false`）原先缺签名路径的两条闸门。这里造出「打开背包时游戏已自动选中第一件」
+     * 那个真机形态：点第一个格**面板名不会变** ⇒ 就绪判据看不到变化。
+     *
+     * 补闸门之前：这被当成"点击被吞" ⇒ 同坐标白烧 `CLICK_RETRY_MAX_ON_NOCHANGE(5)` 次重发
+     * （点击数 = 5 + 21 + 5）；补之后走「本轮首格豁免」⇒ 一次点击都不多。
+     * ⚠️ 本用例**只在豁免分支存在时**才成立：断言的是点击数，不是"有没有报错"，
+     *    所以分支被删掉时会直接红（不是静默通过）。
+     */
+    @Test
+    fun `name path exempts the pre-selected first cell without retrying`() {
+        val (engine, h) = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
+            firstCellNameStuck = true,
+        )
+        assertEquals(ENTER_CHAIN_CLICKS + CELLS_PER_PAGE, h.clicks.size)
+        assertEquals(CELLS_PER_PAGE, engine.results.size)   // 豁免 ≠ 跳过：首格仍要入库
+    }
+
+    /**
      * 断言依据守卫（2026-09-20 用户要求）：本文件所有"每页件数/点击数"断言都由
      * `CELLS_PER_PAGE = cols × traverseRows` 推导 ⇒ 该值必须与**当前被加载的 profile**一致。
      *
@@ -436,7 +474,12 @@ class ScanEngineDryRunTest {
 
     @Test
     fun `first artifact fields complete and correct`() {
-        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)))
+        // 计数器 = 一页件数 ⇒ 主判据在第 1 页末就成立（断言对象是 results[0]，页 1 已产出）。
+        // ⚠️ 这里原先给 1026：夹具只喂 1 页 ⇒ "已入库 ≥ 计数器"永不成立 ⇒ 引擎再翻一页，
+        //    而第 2 页 `pageIndex` 钳在末页 ⇒ 同格名字不变 ⇒ 每格都打满
+        //    `PANEL_CHANGE_WAIT_MAX_MS(6000)` ⇒ 本用例实测 166.6s（改后 ~15s，与
+        //    `full flow produces one page of artifacts` 同量级）。断言不变，只是不再白扫一页。
+        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)))
         val a = engine.results[0]
         assertEquals("plume", a.slotKey)                       // "死之羽"
         assertEquals(5, a.rarity)                              // banner 橙 + 星带 5 格
@@ -456,7 +499,8 @@ class ScanEngineDryRunTest {
 
     @Test
     fun `set_key reverse-derived from piece name via dictionary`() {
-        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)))
+        // 计数器同 `first artifact fields…`：给可达值，别让用例白扫一页（那页每格等满 6s 超时）。
+        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)))
         val a = engine.results[0]
         // "晨光的明誓" → pieceToSetId（词典 276 件）
         assertTrue("setKey should be reverse-derived, got ${a.setKey}", a.setKey != null && a.setKey.isNotEmpty())
@@ -496,7 +540,8 @@ class ScanEngineDryRunTest {
 
     @Test
     fun `crafted flag detected via purple banner`() {
-        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)))
+        // 计数器同上：祝圣紫在页 1 的每一格里都会被投出来，不需要第二页。
+        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)))
         // 合成帧画了祝圣紫三点 → crafted=true；emit 进度含 crafted
         assertTrue(engine.vars.crafted)
         assertTrue(h.progress.isNotEmpty())
@@ -508,7 +553,10 @@ class ScanEngineDryRunTest {
         // 计数器 = 两页件数 ⇒ 收尾走主判据（已入库 ≥ 计数器），且它是 break 不是 stopRequested
         // ⇒ 下面 `stopRequested == false` 的断言仍然成立。
         val page1 = Page(syntheticFrame(5), pageLines("Lv.90"), 2 * CELLS_PER_PAGE)
-        val page2 = Page(syntheticFrame(3, page = 1), pageLines("Lv.0"), 1030)
+        // ★ 计数器是**背包全局总数**（`圣遗物 {n}/{cap}`），不随翻页变。引擎现在会在"件数达标"
+        //   那一刻复读一次以挡住非零欠读（#84），所以两页必须给同一个数 —— 原先页2 给 1030
+        //   等于让夹具扮演"总数会变大"，真机上不存在这种计数器。
+        val page2 = Page(syntheticFrame(3, page = 1), pageLines("Lv.0"), 2 * CELLS_PER_PAGE)
         val (engine, h) = runEngine(listOf(page1, page2))
 
         println("DIAG stop=${engine.vars.stopRequested} finished=${h.finished} clicks=${h.clicks.size} swipes=${h.swipes.size} results=${engine.results.size} rarity=${engine.vars.rarity} level=${engine.vars.level} pagesSeen=${h.pageIndex + 1} rarities=${engine.results.map { it.rarity }.distinct()}")
@@ -542,5 +590,66 @@ class ScanEngineDryRunTest {
             runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90", withCountLine = false), 1026)))
         }.exceptionOrNull()
         assertTrue("expected ScanAbortedException, got $e", e is ScanAbortedException)
+    }
+
+    /**
+     * #83：页首前台闸门说"不是原神" ⇒ 整轮干净收尾（不是异常终止），已入库的件保留。
+     *
+     * 生产动机：用户把游戏切走/游戏被切到后台 ⇒ 注入侧已拦下动作，但引擎若不知情会按同页
+     * 继续重试/回读，白烧几十秒且日志看不出原因。用户口径：**游戏切后台本来就会断线重登**
+     * ⇒ 这一轮没有继续的意义。
+     *
+     * 探针是**逐格**调的（不只页首）：窗口切换事件异步到达 `:a11y`，页首那次取样常还在旧值上
+     * （实测 page3 页首与 HOME 同秒 ⇒ 放行）。故本用例按**调用次数**编脚本：
+     * 页首 1 次 + 首页 21 格 = 22 次放行，之后报 false。
+     *
+     * 断言：① 第 2 页页首即判 false ⇒ 第 2 页一格都不点（clicks 停在首页 21 格 + 入口链）；
+     *      ② 首页已入库的 21 件仍在结果里（干净收尾，不是丢弃整轮）。
+     */
+    @Test
+    fun `foreground gate failure stops run cleanly keeping emitted items`() {
+        val allowed = 1 + CELLS_PER_PAGE // 页首 1 次 + 首页 21 格
+        var probes = 0
+        val (engine, h) = runEngine(
+            listOf(
+                // ⚠️ 计数器不能用 CELLS_PER_PAGE：那会让"已入库 ≥ 计数器"在首页末尾就成立
+                //    ⇒ 永远到不了第 2 页的页首探针，本用例退化成空跑（首版就是这么写的）。
+                Page(syntheticFrame(5), pageLines("Lv.90"), 1026),
+                Page(syntheticFrame(6), pageLines("Lv.90"), 1026),
+            ),
+            foregroundOk = {
+                probes += 1
+                probes <= allowed
+            },
+        )
+        assertEquals("首页应正常入库", CELLS_PER_PAGE, engine.results.size)
+        // 第 2 页一格未点（只有入口链 + 首页 21 格）
+        assertEquals(ENTER_CHAIN_CLICKS + CELLS_PER_PAGE, h.clicks.size)
+        assertTrue("应正常收尾（非异常）", h.finished != null)
+    }
+
+    /**
+     * #83（A 方案的核心场景）：用户**在一页的中途**把游戏切走 ⇒ 本页立即收尾，不再点后面的格。
+     *
+     * 这是逐格探针存在的理由 —— 只看页首的话，这一页剩下的 10 格会照样点下去（注入侧全被拦下，
+     * 每格白等一轮 settle 超时）。脚本按调用次数：页首 1 次 + 前 10 格 = 11 次放行。
+     */
+    @Test
+    fun `foreground gate failure mid page stops clicking remaining cells`() {
+        val allowed = 1 + 10
+        var probes = 0
+        val (engine, h) = runEngine(
+            listOf(
+                Page(syntheticFrame(5), pageLines("Lv.90"), 1026),
+                Page(syntheticFrame(6), pageLines("Lv.90"), 1026),
+            ),
+            foregroundOk = {
+                probes += 1
+                probes <= allowed
+            },
+        )
+        assertEquals("只应入库已点过的 10 格", 10, engine.results.size)
+        assertEquals(ENTER_CHAIN_CLICKS + 10, h.clicks.size)
+        assertTrue("应正常收尾（非异常）", h.finished != null)
     }
 }

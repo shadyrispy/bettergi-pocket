@@ -128,10 +128,12 @@ class NameMatcherTest {
         assertEquals(meta.getInt("characters"), n.characters.size)
         assertEquals(meta.getInt("artifactSets"), n.sets.size)
         assertEquals(meta.getInt("slots"), n.slots.size)
-        // 低星段必须真的进词典（2026-09-24 对账：缺这 30 条 ⇒ 9 件 3★ 被静默丢弃）
+        // 低星段必须真的进词典（2026-09-24 对账：缺这一段 ⇒ 9 件 3★ 被静默丢弃）。
+        // 25 = 4 个多件低星套 ×5 件 + 5 个「祭X之人」套各只有理之冠 1 件；
+        // 2026-09-27 单件名改由游戏表生成后，手写版的 30 条里有 5 条其实也属于这 9 套。
         assertTrue(
             "3★/4★ 低星单件名段不得为空",
-            meta.getInt("artifactPiecesLowRarity") >= 30,
+            meta.getInt("artifactPiecesLowRarity") >= 25,
         )
         assertTrue("stats should include aliases", n.stats.size >= 16)
     }
@@ -162,6 +164,9 @@ class NameMatcherTest {
         // 武器名错字
         assertEquals("万国诸海图谱", "MappaMare", n.match("万国诺海图谱", GoodNames.Kind.WEAPON)?.key)
         assertEquals("风信之锋", "MissiveWindspear", n.match("风信之鋒", GoodNames.Kind.WEAPON)?.key)
+        // 词典 2026-09-27 才补进 SilverLight（上游 mappings.json 停在 7.0），且面板把「釭」读成同音的「缸」
+        // ⇒ 两个缺口必须同时成立才不会漏件（模拟器 3200 实测原文，runlog 20260926_bs3200_planC:99076）
+        assertEquals("银釭", "SilverLight", n.match("银缸", GoodNames.Kind.WEAPON)?.key)
     }
 
     @Test

@@ -61,9 +61,12 @@ class DebugControlReceiver : BroadcastReceiver() {
                     }
                     // §12.1 起点选择：false = 用 profiles 写死翻页起点，true = 用几何推导的卡缝起点
                     //   （只切起点；距离规划/记账与此项无关，见 ScanEngine 的主滑规划）
+                    // ★ 默认必须与产线一致（`TriggerForegroundService` / `ScriptRunner` /
+                    //   `ScanEngine` 三处都是 false）。原先这里默认 true ⇒ 走广播入口不显式带
+                    //   `--ez geoAdvance` 时量到的是产线根本不跑的分支，而日志上两者同形。
                     putExtra(
                         TriggerForegroundService.EXTRA_GEO_ADVANCE,
-                        intent.getBooleanExtra(EXTRA_GEO_ADVANCE, true),
+                        intent.getBooleanExtra(EXTRA_GEO_ADVANCE, false),
                     )
                 }
                 ACTION_REPLAY_PCAP -> {

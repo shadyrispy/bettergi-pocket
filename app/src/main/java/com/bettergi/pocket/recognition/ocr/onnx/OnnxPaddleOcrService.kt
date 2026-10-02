@@ -81,14 +81,29 @@ class OnnxPaddleOcrService(
         }
         val candidates = EpTierPicker.intraOpCandidates(caps)
         val table = if (candidates.size > 1) engine.benchmarkIntra(candidates) else emptyMap()
-        val best = table.entries.minByOrNull { it.value }?.key
-        if (best != null && best != engine.intraOpThreads) {
+        // ★ #74：**取最小中位数**换成了带余量的换档判据 —— 实测最小者只有**比当前档快 ≥20%**
+        //   才换，否则留在原档。理由见 EpTierPicker.pickIntraOp 的 KDoc（同机五轮里 intra=4
+        //   有四轮慢 2.2~2.3×，而换档是服务生命周期内不可逆的）。
+        val incumbent = engine.intraOpThreads
+        val best = if (table.isEmpty()) null else EpTierPicker.pickIntraOp(table, incumbent)
+        if (best != null && best != incumbent) {
             if (engine.initialize(engine.tier, best)) {
-                Log.i(TAG, "intra-op 择优 $candidates → $best（重开会话）")
+                Log.i(
+                    TAG,
+                    "intra-op 择优 $candidates → $best（重开会话；基准=" +
+                        table.entries.joinToString { "${it.key}=${it.value}ms" } + "）",
+                )
             } else {
-                Log.w(TAG, "intra=$best 重开会话失败，沿用 ${engine.intraOpThreads}")
-                engine.initialize(engine.tier, engine.intraOpThreads)
+                Log.w(TAG, "intra=$best 重开会话失败，沿用 $incumbent")
+                engine.initialize(engine.tier, incumbent)
             }
+        } else if (table.isNotEmpty()) {
+            Log.i(
+                TAG,
+                "intra-op 不换档，留住 $incumbent（基准=" +
+                    table.entries.joinToString { "${it.key}=${it.value}ms" } +
+                    "，换档需快 ≥${EpTierPicker.INTRA_SWITCH_MARGIN_PCT}%）",
+            )
         }
         Log.i(
             TAG,

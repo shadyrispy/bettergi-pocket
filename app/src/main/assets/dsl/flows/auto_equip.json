@@ -188,7 +188,7 @@
           "ref": "$screens.artifact_manage.leftBtn",
           "states": {
             "替换": "click→dialog(equipConfirm)",
-            "卸下": "click→preReset 网格复位"
+            "卸下": "#93：读到即 AlreadyCorrect ⇒ **不点**（点下去就把该角色这件卸掉）。复位链因此只在其它路径真点了卸下时才用到"
           },
           "note": "canonical #12：卸下无确认弹窗；卸下后网格不回第一行→复位链"
         },
@@ -211,8 +211,8 @@
   "resultStates": 8,
   "pending": [
     "卸下路径未实现（location:\"\" 需去 artifact.location 记录的当前持有者处卸）—— 未做，属独立增量",
-    "「已正确跳过」未实现（GOODScanner 会先比当前槽位是否已是目标件 ⇒ AlreadyCorrect）—— 未做",
-    "装配不产出快照（GOODScanner 同款行为，非缺口）",
+    "「已正确跳过」改由按钮文本判（#93）：左下钮 OCR 含「卸」⇒ 该件已在此角色身上 ⇒ 不点、记 AlreadyCorrect；读不出 ⇒ 同样不点，记 Failed（对齐 GOODScanner ui_actions.rs 的 bail 支）",
+    "#107 已修：装配有**点击后复核**了 —— foreach 末尾回读 panels.artifact_manage.equipped 的装备者、归一成 GOOD key 后与目标角色比对。Success 从此要求复核给出正面证据；点过但读不出 ⇒ 记新档 ClickedUnverified（我们没看见，不等于没发生），复核说没换上 ⇒ Failed。GOODScanner 的 verify_artifact_equipped 是返回 Ok(true) 的 no-op ⇒ 这一条**有意偏离上游**。",
     "set_filter swipe settle 真机复核"
   ]
 }

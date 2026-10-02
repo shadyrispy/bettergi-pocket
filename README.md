@@ -97,24 +97,47 @@ mise exec -- ./gradlew :app:testDebugUnitTest :app:assembleDebug
 JAVA_HOME=$(mise where java) ./gradlew -p <abs-path> :app:testDebugUnitTest :app:assembleDebug
 ```
 
+### 单测分两层：默认闸门 **不含** 引擎干跑（2026-09-28）
+
+全量 53 类 / 374 条里 `ScanEngineDryRunTest` 占 640.8s，其余 51 类合计 **2.8s**。两个原因：
+
+1. 引擎的 settle 常量是**真实墙钟**（`CLICK_SETTLE_MS=600` / `ENTER_SETTLE_MS=1200` /
+   `SCREEN_SETTLE_MS=1500` …），干跑用 `runBlocking { engine.run() }` 真等 ⇒ 健康路径 ≈0.66s/格 × 21 格/页；
+2. （本轮查出并修掉）三条用例把合成计数器写成**不可达的 1026** ⇒ 「已入库 ≥ 计数器」永不成立 ⇒
+   多扫一页「同帧假页」，那页同格名字不变 ⇒ 每格等满 `PANEL_CHANGE_WAIT_MAX_MS(6000)` ⇒ 单条 ~167s。
+   改成可达计数器后（**断言一字未动**）该类 640.8s → **185.5s**。
+
+干跑仍占 98% ⇒ 分层：
+
+| 跑什么 | 命令 | 实测 |
+|---|---|---|
+| 默认闸门（纯逻辑 + 解析 + profile 对账，**跳过干跑**） | `./gradlew :app:testDebugUnitTest` | 52 类 / 362 条 / 测试 3.0s（BUILD 5s） |
+| **含干跑全量** —— 改了 `ScanEngine` 或 `dsl/json/flows` 必须带 | `./gradlew :app:testDebugUnitTest -Pdryrun` | 374 条 / 测试 188.5s |
+| 只跑干跑 | `./gradlew :app:testDebugUnitTest -PdryrunOnly` | 12 条 / 185.5s |
+
+跳过时 Gradle 会打一行 `BetterGI: 已跳过 …ScanEngineDryRunTest` —— **别把"默认闸门绿"当成"引擎 e2e 绿"**。
+
 - Maven 仓库：阿里云镜像前置（`settings.gradle.kts`，dl.google.com 国内直连不稳）
 - Gradle 分发：腾讯云镜像（`gradle/wrapper/gradle-wrapper.properties`）
 - `local.properties`：`sdk.dir` 指向 mise android-sdk（gitignore，不入库）
 
-### 守门测试（108 例，挂 testDebugUnitTest）
+### 守门测试（374 条 / 53 类，挂 testDebugUnitTest；2026-09-28 实测）
 
 | 测试类 | 例数 | 防护 |
 |---|---|---|
-| DslAssetsIntegrityTest | 4 | dsl JSON 静默丢失/损坏（清单含 mappings.json——曾拷错目录不进 APK） |
-| ProfileFlowConsistencyTest | 6 | 全 flow `$` 引用路径/形态/别名错配 |
+| DslAssetsIntegrityTest | 7 | dsl JSON 静默丢失/损坏（清单含 mappings.json——曾拷错目录不进 APK） |
+| ProfileFlowConsistencyTest | 7 | 全 flow `$` 引用路径/形态/别名错配 |
+| FlowValidatorTest | 20 | flow JSON 结构/原语参数合法性（构建期挡掉真机跑一半才炸） |
 | ParserAndExprTest | 12 | 词条解析 + stopWhen 表达式 |
-| ScanEngineDryRunTest | 9 | 数字孪生：合成帧跑通真实 flow（止扫/多页/去重/坐标） |
-| VoteJudgesRealDataTest | 6 | 判据阈值 vs dsl/verify 实测定稿对账 |
+| ScanEngineDryRunTest | 12 | 数字孪生：合成帧跑通真实 flow（止扫/多页/去重/坐标/前台闸门）——**默认闸门跳过，见上表** |
+| VoteJudgesRealDataTest | 7 | 判据阈值 vs dsl/verify 实测定稿对账 |
 | GoodExporterTest | 1 | GOOD v3 结构 |
 | ProfileScalingTest | 4 | 多分辨率坐标钉值（16:9 失真 25% 实测：点错行） |
-| DictionaryFuzzyTest | 4 | 词典三级匹配（错字命中/乱码不命中/误配防护） |
+| NameMatcherTest | 18 | 名称匹配三级（错字命中/乱码不命中/误配防护）＋套装/单件词典反查 |
+| PlanContractTest | 13 | GOOD 输入契约（lock/unlock/equip/artifacts 四形态与拒绝理由） |
+| EquipActionTest + ManageStatusTest | 13 | 装配回执：按钮文本→动作→结果标签整条链（#93） |
 | DoCoverageTest | 1 | 全 flow do 原语 100% 有实现分支（防静默 skip） |
-| 其余（app 级单元） | 61 | 服务/仓库/网关等 |
+| 其余（几何/滑动/身份/对账/app 级单元） | 259 | 每页 21 格、落地位移、跨页身份、锁态判据等逐条回归 |
 
 **交付 APK 前必须 `unzip -l <apk> | grep assets/dsl` 复验关键资产在包内**（当前应 9 份；git clean ≠ 磁盘文件存在）。
 

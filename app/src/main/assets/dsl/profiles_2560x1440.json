@@ -13,8 +13,8 @@
     "dictionaries": {
       "mappings": "tools/good_names.json",
       "keys": {
-        "weapons": 236,
-        "characters": 121,
+        "weapons": 242,
+        "characters": 123,
         "artifactSets": 56
       },
       "note": "1★/2★武器未收录（止扫靠稀有度判据）"
@@ -83,6 +83,20 @@
           100
         ],
         "format": "武器 {n}/{cap}"
+      },
+      "sort": {
+        "rect": [
+          807,
+          1295,
+          887,
+          1375
+        ],
+        "center": [
+          847,
+          1335
+        ],
+        "template": "template_paixu_1000053497_469_1294_553_1378.jpg",
+        "note": "★2026-09-28 #117 武器扫描开局归零用（同 3200 档）。2560×1440 帧上从 `_shots2560/curated/2560_weapon_backpack.png` 底部工具栏量得：奶油圆钮 x[808,887] y[1296,1375]（80²，与 3200 的 84²、2244 的 60² 随分辨率一致缩放）⇒ 中心 (847,1335)。列段分析确认它是孤立块（左邻「品质顺序」下拉、右邻锁定钮各有间隙）。"
       }
     },
     "artifact_backpack": {
@@ -1095,7 +1109,7 @@
       "setName": {
         "collect": false,
         "reason": "用户定稿(2026-09-01)：背包面板 set_name 被遮挡 OCR 识别不到，不标定不采集；set_name 由圣遗物单件名 name 经词典反推",
-        "reverseDict": "tools/good_names.json（artifactPieces 276 件/56 套，由 dsl/scripts/gen_good_names.py 生成）",
+        "reverseDict": "tools/good_names.json（artifactPieces 305 件/65 套，由 gen_mappings.py→gen_good_names.py 从游戏 Reliquary 表生成）",
         "archivedMeasure": "动态 set_top=800+nSubs*64(±4) 实测留档，勿用于采集"
       },
       "equipped": [

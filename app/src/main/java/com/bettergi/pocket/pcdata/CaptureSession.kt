@@ -171,8 +171,12 @@ object CaptureSession {
      */
     fun stop(context: Context): String {
         val app = context.applicationContext
+        // 只有**本会话**持闸门时才允许拆进程级管线：回放期间 `isCapturing` 同样为真
+        // （文件源也走 start），只看 isRunning 会把别人正在跑的回放掐成"已结束"，
+        // 而那条通路会把半截库存当成跑完落盘。
+        val mine = gateTicket != 0L
         val wasRunning = isRunning()
-        stopTunnel(app)
+        if (mine) stopTunnel(app)
         watcher?.cancel()
         watcher = null
         releaseGate()
@@ -231,7 +235,17 @@ object CaptureSession {
                     NoticeCenter.post(NoticeCenter.Level.WARN, hint, "capture-hint-$sessionToken")
                 }
                 if (IrminsulCapture.completion.value != null && exported.compareAndSet(false, true)) {
-                    val stored = exportAndStore(app, "四段数据齐")
+                    // 「四段齐」只说明四类都到过，不说明没丢过包：live 源按 queueCapacity
+                    // 溢出丢包时同样能凑齐四段。丢包数必须跟着入库那行走，否则这份输入与
+                    // 完整输入在下游（对账、lock/auto_equip）长得一模一样。
+                    // 定策（2026-09-27 用户拍板）：**丢包 >0 也照入库**，只把丢包数标出来 ——
+                    // 不改成"丢包就拒绝"：半截输入带标签，下游还能用来对账；直接拒收反而
+                    // 让用户手里一份都没有。
+                    val droppedNow = IrminsulCapture.droppedPackets.value
+                    val stored = exportAndStore(
+                        app,
+                        if (droppedNow > 0) "四段数据齐·丢包 $droppedNow（可能缺件）" else "四段数据齐",
+                    )
                     stopTunnel(app)
                     if (myToken == sessionToken) watcher = null
                     releaseGate()

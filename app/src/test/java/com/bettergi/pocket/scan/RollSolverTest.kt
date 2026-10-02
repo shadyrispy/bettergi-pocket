@@ -3,6 +3,7 @@ package com.bettergi.pocket.scan
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
 import org.junit.Test
@@ -100,7 +101,12 @@ class RollSolverTest {
                     ambiguousOnly++
                 }
             }
-            // totalRolls 有**固有歧义**（lv>0 时 init 3/4 都可能自洽，GT 真值分布 97:8）⇒ 单列统计
+            // totalRolls 有**固有歧义**：lv>0 时 `init=3`（第 4 条由强化产生）与 `init=4` 可能都自洽，
+            // 显示值本身**分不开**这两种历史。夹具 894 件里 105 件属于这种歧义。
+            // ⇒ 只能选先验：现序（先取小）在夹具上错 8 件。这与参考实现**同序** ——
+            //   `roll_solver.rs:459-464` 在 `rarity==5 && level>0` 时也取 `&[3, 4]`，注释原文
+            //   "At level > 0, prefer lower init (better GT accuracy)"；它只给结论，
+            //   本仓把它量化了：翻成先取大会错 97 件（见下方 `assertEquals(8, rollBad)`）。
             if (sol.totalRolls != a.getInt("totalRolls")) rollBad++
         }
         // ⚠️ 容许 ≤2 件不可解：离线全量实测 **1/894**（sample#449 `def_=18.9`）——
@@ -116,10 +122,56 @@ class RollSolverTest {
             "initialValue 可比对项应 ≥99.9% 一致（实测 ${agreeTot - agreeMiss}/$agreeTot）：$badList",
             agreeMiss <= 3,
         )
-        assertTrue(
-            "totalRolls 差异应 ≤ 1.5%（init 固有歧义），实测 $rollBad/${arr.length()}",
-            rollBad <= arr.length() * 15 / 1000,
+        // totalRolls 的歧义错判**钉成精确值**（#98，2026-09-28 用 scripts/rollsolver_probe.py 量出）：
+        // 夹具 894 件里 105 件两解都自洽，现序（先取小 init）在其中错 8 件。
+        // ⚠️ 别把这条"放宽成百分比"：现序与参考实现同序（`roll_solver.rs:459-464` 的 `&[3, 4]`，
+        //   注释 "prefer lower init (better GT accuracy)"），把它翻成先取大在这份真值上错 **97** 件
+        //   ⇒ 顺序一改此数就跳，正是要它跳。若哪天**重造了夹具**（换账号快照），这里的 8 要重量一次再改。
+        assertEquals(
+            "totalRolls 歧义错判必须 =8（现序=先取小 init；改序会变 97），见 dsl/scripts/rollsolver_probe.py",
+            8, rollBad,
         )
+    }
+
+    /**
+     * #98：**歧义消解顺序是一条策略，不是巧合** ⇒ 单独钉一条（聚合断言只说"错 8 件"，
+     * 看不出这 8 件是"先取小 init"这条规则的代价）。
+     *
+     * 真机 GT 样例 `NoblesseOblige|flower|20|hp`：`atk_=4.1 / critRate_=3.5 / def=39 / enerRech_=25.9`。
+     * 这组显示值**同时**自洽于 init=3（8 次）与 init=4（9 次）—— 面板上没有别的信息能区分这两种历史，
+     * 所以 8/9 只能按先验选。选小的实测收益：夹具 894 件里歧义 105 件，先取小错 8、先取大错 97。
+     * （GT 真值是 9 ⇒ 本用例断言的 8 **就是那 8 件已知错判之一**，钉的是"我们明知会错这 8 件、
+     *   仍选错得更少的那一侧"，不是"这组值只能解出 8"。）
+     */
+    @Test
+    fun `ambiguous init resolves to the smaller count by policy`() {
+        val subs = listOf(
+            RollSolver.In("atk_", 4.1),
+            RollSolver.In("critRate_", 3.5),
+            RollSolver.In("def", 39.0),
+            RollSolver.In("enerRech_", 25.9),
+        )
+        val sol = RollSolver.solve(5, 20, subs)
+        assertNotNull(sol)
+        assertEquals("先取小的那条（3 + 5 次强化 = 8）", 3, sol!!.initialSubstatCount)
+        assertEquals(8, sol.totalRolls)
+        // 歧义前提**必须用真值证**，不许写成恒真断言：这组显示值在冻结夹具里确有 GT=9 的那一件
+        // ⇒ 说明"9 也自洽"不是嘴上说说，而我们仍选了 8（换序会多错 89 件）。
+        val arr = fixture()
+        val truth = (0 until arr.length())
+            .map(arr::getJSONObject)
+            .filter { it.getInt("rarity") == 5 && it.getInt("level") == 20 }
+            .firstOrNull { a ->
+                val s = a.getJSONArray("substats")
+                s.length() == subs.size && subs.all { want ->
+                    (0 until s.length()).any { j ->
+                        val o = s.getJSONObject(j)
+                        o.getString("key") == want.key && Math.abs(o.getDouble("value") - want.value) < 0.001
+                    }
+                }
+            }
+        assertNotNull("夹具里找不到这件歧义样本 ⇒ 本用例的前提已失效（夹具被换过？）", truth)
+        assertEquals("GT 真值必须是 9（否则这条链就不是歧义，#98 的成因得重写）", 9, truth!!.getInt("totalRolls"))
     }
 
     @Test

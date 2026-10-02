@@ -104,14 +104,19 @@ tap_overlay() {
   adb shell input tap "$x" "$y"
 }
 
-# 通过 receiver 广播（receiver 内部 startForegroundService 是同进程允许，绕过 shell UID 限制）
-# 前置：确保服务在跑（am start MainActivity → 拉起 TriggerForegroundService）
+# 直发 TriggerForegroundService（debug 构建已把它 `android:exported="true"`，见
+# app/src/debug/AndroidManifest.xml）。**不要用 `am broadcast -p $PKG`**：
+# ① 下面这些动作名（`com.bettergi.pocket.action.DEBUG_*`）是**服务**的常量，
+#    而唯一的 receiver（DebugControlReceiver）intent-filter 声明的是
+#    `com.bettergi.pocket.debug.*` ⇒ 动作名对不上；
+# ② BlueStacks 上后台广播还会被 `Background execution not allowed` 静默丢弃
+#    （`Broadcast completed: result=0` 照打，看起来像成功）。
+# ⇒ 旧写法每个阶段都是 no-op（2026-09-02 那版脚本用的是能对上的 `debug.*` 动作，
+#   2026-09-04 重写时改成服务常量后即失效）。唯一能到服务的通道就是下面这条，
+#   与 `_dev/recover_bs.sh` 一致。
 svc_cmd() {
-  if ! adb shell dumpsys activity services "$PKG" | grep -q "service.TriggerForegroundService"; then
-    adb shell am start -n "$PKG/.MainActivity" >/dev/null 2>&1
-    sleep 2
-  fi
-  adb shell am broadcast -a "$1" "${@:2}" -p "$PKG" 2>&1 | tail -1 | tee -a "$LOG"
+  adb shell am start-foreground-service -n "$PKG/.service.TriggerForegroundService" -a "$1" "${@:2}" \
+    2>&1 | tail -1 | tee -a "$LOG"
 }
 
 stage_bubble() {

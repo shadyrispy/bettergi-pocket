@@ -400,6 +400,38 @@
                             android:textSize="12sp" />
                     </LinearLayout>
 
+                    <!-- #105 角色昵称：见 layout/ 同名小节的注释。两个变体各自维护，改一处要改两处。 -->
+                    <LinearLayout
+                        android:id="@+id/name_section"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="20dp"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="角色昵称"
+                            android:textColor="@color/pocket_text"
+                            android:textSize="16sp" />
+
+                        <LinearLayout
+                            android:id="@+id/name_override_list"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:orientation="vertical" />
+
+                        <TextView
+                            android:id="@+id/name_override_hint"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:lineSpacingExtra="3dp"
+                            android:textColor="@color/pocket_text_muted"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
                     <LinearLayout
                         android:id="@+id/swipe_row"
                         android:contentDescription="展开或收起滑动测试"

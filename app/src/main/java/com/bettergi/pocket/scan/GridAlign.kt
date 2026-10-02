@@ -162,6 +162,24 @@ object GridAlign {
         return if (m > pitch / 2) m - pitch else m
     }
 
+    /**
+     * 本滑**实际推进的行数**（几何先验；#70）。
+     *
+     * ⚠️ 只能逐页取整，**不许累加**：三份真机日志逐页 `round(L/pitch)` 得到 39/39、57/57 页
+     * 都等于遍历行数，而 `Σ L / pitch` 在 40 页上少算 10.46 行 —— 条带有每页 ~0.15–0.2 行的
+     * 固定欠读，取整吸收得掉、累加吸收不掉。
+     *
+     * 它是**先验不是判决**：lockfix 那轮有 1 页 L/pitch=2.34，离线分不清"真滑空半页"还是量错，
+     * 所以跳格仍由 identity 锚定（#66）把关。本值的用途是把两个估计摆进同一行日志，
+     * 让"几何说推进了几行"在事后对账时可见。
+     *
+     * @return null = 行距不可用（未标定网格），调用方按"没测"处理。
+     */
+    fun rowsAdvanced(landingPx: Int, pitch: Int): Int? {
+        if (pitch <= 0) return null
+        return Math.round(landingPx.toDouble() / pitch).toInt()
+    }
+
     // ==== ★ 2026-09-25 底栏锚定的**绝对**行相位（run9 像素自标定后换源）====================
     //
     // 为什么换：fpband 给的是**相邻两帧之间的位移**（L − target），而 `withGridRowOffset(φ)` 需要的是

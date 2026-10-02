@@ -1,23 +1,20 @@
 {
   "_meta": {
     "generator": "dsl/scripts/gen_good_names.py",
-    "generatedAt": "2026-09-24",
+    "generatedAt": "2026-09-27",
     "sources": [
       {
         "file": "dsl/tools/mappings.json",
-        "upstream": "https://ggartifact.com/good/mappings.json"
-      },
-      {
-        "file": "dsl/tools/artifactSetPieces.json",
-        "upstream": "wiki 圣遗物套装模板"
+        "upstream": "dsl/scripts/gen_mappings.py",
+        "detail": "characters/weapons/artifactSets ← 游戏数据；artifactPieces ← Snap.Metadata Reliquary.json + ggartifact data_cache.json"
       }
     ],
     "counts": {
-      "characters": 121,
-      "weapons": 236,
+      "characters": 123,
+      "weapons": 242,
       "artifactSets": 56,
-      "artifactPieces": 306,
-      "artifactPiecesLowRarity": 30,
+      "artifactPieces": 305,
+      "artifactPiecesLowRarity": 25,
       "stats": 23,
       "slots": 5
     },
@@ -33,9 +30,10 @@
       "TravelingDoctor"
     ],
     "notes": [
-      "artifactPieces 为 GOOD mappings 未覆盖的补充段：背包详情面板 set_name 被遮挡，",
+      "artifactPieces 是 GOOD mappings 没有的一段：背包详情面板 set_name 被遮挡，",
       "须由单件名反推 setKey（用户定稿 2026-09-01）。字典全表由 NameMatcher 做模糊匹配。",
-      "其中 30 条为 3★/4★ 低星套单件名，涉及的 9 个 setId 不在 GOOD artifactSets 内（Adventurer, LuckyDog, PrayersForDestiny, PrayersForIllumination, PrayersForWisdom, PrayersToSpringtime, PrayersToTheFirmament, TinyMiracle, TravelingDoctor）—— GOOD 只列 4★/5★ 的 56 套。"
+      "其中 25 条属于 3★/4★ 低星套，涉及的 9 个 setId 不在 GOOD artifactSets 内（Adventurer, LuckyDog, PrayersForDestiny, PrayersForIllumination, PrayersForWisdom, PrayersToSpringtime, PrayersToTheFirmament, TinyMiracle, TravelingDoctor）—— GOOD 只列 4★/5★ 的 56 套；后 5 个 Prayers* 套按游戏表就只有理之冠一件。",
+      "2026-09-27 起单件名由 dsl/scripts/gen_mappings.py 从游戏 Reliquary 表生成（set 字段是 data_cache 的英文套装名，运行时不读，仅诊断）；旧手写源 artifactSetPieces.json 退役 —— 它把「赌徒的骰盅」抄成了「骰蛊」。"
     ]
   },
   "characters": [
@@ -664,6 +662,18 @@
       "zh": "温迪"
     },
     {
+      "id": "Vesna",
+      "r": 5,
+      "e": "anemo",
+      "zh": "薇斯纳"
+    },
+    {
+      "id": "Vodyanitsa",
+      "r": 5,
+      "e": "hydro",
+      "zh": "沃雅妮莎"
+    },
+    {
       "id": "Wanderer",
       "r": 5,
       "e": "anemo",
@@ -876,6 +886,12 @@
       "zh": "苇海信标"
     },
     {
+      "id": "BeyondTheChrysalis",
+      "r": 5,
+      "wt": "sword",
+      "zh": "蝶变"
+    },
+    {
       "id": "BlackTassel",
       "r": 3,
       "wt": "polearm",
@@ -934,6 +950,12 @@
       "r": 3,
       "wt": "claymore",
       "zh": "沐浴龙血的剑"
+    },
+    {
+      "id": "BreezeborneRefrain",
+      "r": 4,
+      "wt": "bow",
+      "zh": "柔风游弦"
     },
     {
       "id": "CalamityOfEshu",
@@ -1338,6 +1360,12 @@
       "zh": "猎人之径"
     },
     {
+      "id": "HymnOfTheMaelstrom",
+      "r": 5,
+      "wt": "catalyst",
+      "zh": "漩流颂歌"
+    },
+    {
       "id": "IbisPiercer",
       "r": 4,
       "wt": "bow",
@@ -1528,6 +1556,12 @@
       "r": 4,
       "wt": "bow",
       "zh": "曚云之月"
+    },
+    {
+      "id": "NewBough",
+      "r": 4,
+      "wt": "sword",
+      "zh": "新枝"
     },
     {
       "id": "NightweaversLookingGlass",
@@ -1792,6 +1826,12 @@
       "r": 3,
       "wt": "bow",
       "zh": "神射手之誓"
+    },
+    {
+      "id": "SilverLight",
+      "r": 4,
+      "wt": "sword",
+      "zh": "银釭"
     },
     {
       "id": "SilvershowerHeartstrings",
@@ -2166,6 +2206,12 @@
       "zh": "暗巷的酒与诗"
     },
     {
+      "id": "WintersHeavyHeart",
+      "r": 4,
+      "wt": "catalyst",
+      "zh": "凝雪沉心"
+    },
+    {
       "id": "WolfFang",
       "r": 4,
       "wt": "sword",
@@ -2470,1837 +2516,1831 @@
     {
       "piece": "不动玄石之相",
       "setId": "ArchaicPetra",
-      "set": "悠古的磐岩",
+      "set": "Archaic Petra",
       "slot": "circlet"
     },
     {
       "piece": "不死者的哀铃",
       "setId": "LongNightsOath",
-      "set": "长夜之誓",
+      "set": "Long Night's Oath",
       "slot": "sands"
     },
     {
       "piece": "举业的识刻",
       "setId": "UnfinishedReverie",
-      "set": "未竟的遐思",
+      "set": "Unfinished Reverie",
       "slot": "sands"
     },
     {
       "piece": "久远花落之时",
       "setId": "VourukashasGlow",
-      "set": "花海甘露之光",
+      "set": "Vourukasha's Glow",
       "slot": "sands"
     },
     {
       "piece": "乐团的晨光",
       "setId": "WanderersTroupe",
-      "set": "流浪大地的乐团",
+      "set": "Wanderer's Troupe",
       "slot": "flower"
     },
     {
       "piece": "众王之都的开端",
       "setId": "DesertPavilionChronicle",
-      "set": "沙上楼阁史话",
+      "set": "Desert Pavilion Chronicle",
       "slot": "flower"
     },
     {
       "piece": "众生之谣",
       "setId": "HuskOfOpulentDreams",
-      "set": "华馆梦醒形骸记",
+      "set": "Husk of Opulent Dreams",
       "slot": "sands"
     },
     {
       "piece": "停摆之刻",
       "setId": "PaleFlame",
-      "set": "苍白之火",
+      "set": "Pale Flame",
       "slot": "sands"
     },
     {
       "piece": "冒险家之花",
       "setId": "Adventurer",
-      "set": null,
-      "slot": null
+      "set": "Adventurer",
+      "slot": "flower"
     },
     {
       "piece": "冒险家头带",
       "setId": "Adventurer",
-      "set": null,
-      "slot": null
+      "set": "Adventurer",
+      "slot": "circlet"
     },
     {
       "piece": "冒险家尾羽",
       "setId": "Adventurer",
-      "set": null,
-      "slot": null
+      "set": "Adventurer",
+      "slot": "plume"
     },
     {
       "piece": "冒险家怀表",
       "setId": "Adventurer",
-      "set": null,
-      "slot": null
+      "set": "Adventurer",
+      "slot": "sands"
     },
     {
       "piece": "冒险家金杯",
       "setId": "Adventurer",
-      "set": null,
-      "slot": null
+      "set": "Adventurer",
+      "slot": "goblet"
     },
     {
       "piece": "冰河之冠",
       "setId": "GlacierAndSnowfield",
-      "set": null,
-      "slot": null
+      "set": "Glacier and Snowfield",
+      "slot": "circlet"
     },
     {
       "piece": "冰雪故园的终期",
       "setId": "BlizzardStrayer",
-      "set": "冰风迷途的勇士",
+      "set": "Blizzard Strayer",
       "slot": "sands"
     },
     {
       "piece": "凛冬霜心",
       "setId": "GlacierAndSnowfield",
-      "set": null,
-      "slot": null
+      "set": "Glacier and Snowfield",
+      "slot": "flower"
     },
     {
       "piece": "凝冰成砂",
       "setId": "GlacierAndSnowfield",
-      "set": null,
-      "slot": null
+      "set": "Glacier and Snowfield",
+      "slot": "sands"
     },
     {
       "piece": "凝结的时刻",
       "setId": "FlowerOfParadiseLost",
-      "set": "乐园遗落之花",
+      "set": "Flower of Paradise Lost",
       "slot": "sands"
     },
     {
       "piece": "切落之羽",
       "setId": "EmblemOfSeveredFate",
-      "set": "绝缘之旗印",
+      "set": "Emblem of Severed Fate",
       "slot": "plume"
     },
     {
       "piece": "勇士的冠冕",
       "setId": "BraveHeart",
-      "set": "勇士之心",
+      "set": "Brave Heart",
       "slot": "circlet"
     },
     {
       "piece": "勇士的勋章",
       "setId": "BraveHeart",
-      "set": "勇士之心",
+      "set": "Brave Heart",
       "slot": "flower"
     },
     {
       "piece": "勇士的坚毅",
       "setId": "BraveHeart",
-      "set": "勇士之心",
+      "set": "Brave Heart",
       "slot": "sands"
     },
     {
       "piece": "勇士的壮行",
       "setId": "BraveHeart",
-      "set": "勇士之心",
+      "set": "Brave Heart",
       "slot": "goblet"
     },
     {
       "piece": "勇士的期许",
       "setId": "BraveHeart",
-      "set": "勇士之心",
+      "set": "Brave Heart",
       "slot": "plume"
     },
     {
       "piece": "勇者们的茶会",
       "setId": "NymphsDream",
-      "set": "水仙之梦",
+      "set": "Nymph's Dream",
       "slot": "goblet"
     },
     {
       "piece": "勋绩之花",
       "setId": "TenacityOfTheMillelith",
-      "set": "千岩牢固",
+      "set": "Tenacity of the Millelith",
       "slot": "flower"
     },
     {
       "piece": "北风之盏",
       "setId": "GlacierAndSnowfield",
-      "set": "冰之川与雪之砂",
+      "set": "Glacier and Snowfield",
       "slot": "goblet"
     },
     {
       "piece": "华饰之兜",
       "setId": "EmblemOfSeveredFate",
-      "set": "绝缘之旗印",
+      "set": "Emblem of Severed Fate",
       "slot": "circlet"
     },
     {
       "piece": "华馆之羽",
       "setId": "HuskOfOpulentDreams",
-      "set": "华馆梦醒形骸记",
+      "set": "Husk of Opulent Dreams",
       "slot": "plume"
     },
     {
       "piece": "历经风雪的思念",
       "setId": "BlizzardStrayer",
-      "set": "冰风迷途的勇士",
+      "set": "Blizzard Strayer",
       "slot": "flower"
     },
     {
       "piece": "受福者的白羽",
       "setId": "SilkenMoonsSerenade",
-      "set": "纺月的夜歌",
+      "set": "Silken Moon's Serenade",
       "slot": "plume"
     },
     {
       "piece": "古海玄幽的夜想",
       "setId": "FragmentOfHarmonicWhimsy",
-      "set": "谐律异想断章",
+      "set": "Fragment of Harmonic Whimsy",
       "slot": "plume"
     },
     {
       "piece": "司信者的圣冕",
       "setId": "SilkenMoonsSerenade",
-      "set": "纺月的夜歌",
+      "set": "Silken Moon's Serenade",
       "slot": "circlet"
     },
     {
       "piece": "吟游者之壶",
       "setId": "WanderersTroupe",
-      "set": "流浪大地的乐团",
+      "set": "Wanderer's Troupe",
       "slot": "goblet"
     },
     {
       "piece": "命途轮转的谐谑",
       "setId": "FragmentOfHarmonicWhimsy",
-      "set": "谐律异想断章",
+      "set": "Fragment of Harmonic Whimsy",
       "slot": "sands"
     },
     {
       "piece": "哀慕的恋歌",
       "setId": "ADayCarvedFromRisingWinds",
-      "set": "风起之日",
+      "set": "A Day Carved From Rising Winds",
       "slot": "circlet"
     },
     {
       "piece": "唤雷的头冠",
       "setId": "ThunderingFury",
-      "set": "如雷的盛怒",
+      "set": "Thundering Fury",
       "slot": "circlet"
     },
     {
       "piece": "嗤笑之面",
       "setId": "PaleFlame",
-      "set": "苍白之火",
+      "set": "Pale Flame",
       "slot": "circlet"
     },
     {
       "piece": "坏巫师的羽杖",
       "setId": "NymphsDream",
-      "set": "水仙之梦",
+      "set": "Nymph's Dream",
       "slot": "plume"
     },
     {
       "piece": "坚铜罗盘",
       "setId": "HeartOfDepth",
-      "set": "沉沦之心",
+      "set": "Heart of Depth",
       "slot": "sands"
     },
     {
       "piece": "垂玉之叶",
       "setId": "EchoesOfAnOffering",
-      "set": "来歆余响",
+      "set": "Echoes of an Offering",
       "slot": "plume"
     },
     {
       "piece": "夏祭之刻",
       "setId": "RetracingBolide",
-      "set": "逆飞的流星",
+      "set": "Retracing Bolide",
       "slot": "sands"
     },
     {
       "piece": "夏祭之花",
       "setId": "RetracingBolide",
-      "set": "逆飞的流星",
+      "set": "Retracing Bolide",
       "slot": "flower"
     },
     {
       "piece": "夏祭之面",
       "setId": "RetracingBolide",
-      "set": "逆飞的流星",
+      "set": "Retracing Bolide",
       "slot": "circlet"
     },
     {
       "piece": "夏祭水玉",
       "setId": "RetracingBolide",
-      "set": "逆飞的流星",
+      "set": "Retracing Bolide",
       "slot": "goblet"
     },
     {
       "piece": "夏祭终末",
       "setId": "RetracingBolide",
-      "set": "逆飞的流星",
+      "set": "Retracing Bolide",
       "slot": "plume"
     },
     {
       "piece": "夜域的迷思",
       "setId": "ObsidianCodex",
-      "set": "黑曜秘典",
+      "set": "Obsidian Codex",
       "slot": "sands"
     },
     {
       "piece": "夜鸣莺的尾羽",
       "setId": "LongNightsOath",
-      "set": "长夜之誓",
+      "set": "Long Night's Oath",
       "slot": "plume"
     },
     {
       "piece": "天授之令",
       "setId": "CelestialGift",
-      "set": "天之美赐",
+      "set": "Celestial Gift",
       "slot": "sands"
     },
     {
       "piece": "天授之冕",
       "setId": "CelestialGift",
-      "set": "天之美赐",
+      "set": "Celestial Gift",
       "slot": "circlet"
     },
     {
       "piece": "天授之殁",
       "setId": "CelestialGift",
-      "set": "天之美赐",
+      "set": "Celestial Gift",
       "slot": "plume"
     },
     {
       "piece": "天授之禄",
       "setId": "CelestialGift",
-      "set": "天之美赐",
+      "set": "Celestial Gift",
       "slot": "goblet"
     },
     {
       "piece": "天授之馨",
       "setId": "CelestialGift",
-      "set": "天之美赐",
+      "set": "Celestial Gift",
       "slot": "flower"
     },
     {
       "piece": "失冕的宝冠",
       "setId": "UnfinishedReverie",
-      "set": "未竟的遐思",
+      "set": "Unfinished Reverie",
       "slot": "circlet"
     },
     {
       "piece": "失落迷途的机芯",
       "setId": "DesertPavilionChronicle",
-      "set": "沙上楼阁史话",
+      "set": "Desert Pavilion Chronicle",
       "slot": "sands"
     },
     {
       "piece": "奇迹之杯",
       "setId": "TinyMiracle",
-      "set": null,
-      "slot": null
+      "set": "Tiny Miracle",
+      "slot": "goblet"
     },
     {
       "piece": "奇迹之沙",
       "setId": "TinyMiracle",
-      "set": null,
-      "slot": null
+      "set": "Tiny Miracle",
+      "slot": "sands"
     },
     {
       "piece": "奇迹之羽",
       "setId": "TinyMiracle",
-      "set": null,
-      "slot": null
+      "set": "Tiny Miracle",
+      "slot": "plume"
     },
     {
       "piece": "奇迹之花",
       "setId": "TinyMiracle",
-      "set": null,
-      "slot": null
+      "set": "Tiny Miracle",
+      "slot": "flower"
     },
     {
       "piece": "奇迹耳坠",
       "setId": "TinyMiracle",
-      "set": null,
-      "slot": null
+      "set": "Tiny Miracle",
+      "slot": "circlet"
     },
     {
       "piece": "如蜜的终宴",
       "setId": "GildedDreams",
-      "set": "饰金之梦",
+      "set": "Gilded Dreams",
       "slot": "goblet"
     },
     {
       "piece": "学士的书签",
       "setId": "Scholar",
-      "set": "学士",
+      "set": "Scholar",
       "slot": "flower"
     },
     {
       "piece": "学士的墨杯",
       "setId": "Scholar",
-      "set": "学士",
+      "set": "Scholar",
       "slot": "goblet"
     },
     {
       "piece": "学士的时钟",
       "setId": "Scholar",
-      "set": "学士",
+      "set": "Scholar",
       "slot": "sands"
     },
     {
       "piece": "学士的羽笔",
       "setId": "Scholar",
-      "set": "学士",
+      "set": "Scholar",
       "slot": "plume"
     },
     {
       "piece": "学士的镜片",
       "setId": "Scholar",
-      "set": "学士",
+      "set": "Scholar",
       "slot": "circlet"
     },
     {
       "piece": "守护之皿",
       "setId": "DefendersWill",
-      "set": "守护之心",
+      "set": "Defender's Will",
       "slot": "goblet"
     },
     {
       "piece": "守护之花",
       "setId": "DefendersWill",
-      "set": "守护之心",
+      "set": "Defender's Will",
       "slot": "flower"
     },
     {
       "piece": "守护座钟",
       "setId": "DefendersWill",
-      "set": "守护之心",
+      "set": "Defender's Will",
       "slot": "sands"
     },
     {
       "piece": "守护徽印",
       "setId": "DefendersWill",
-      "set": "守护之心",
+      "set": "Defender's Will",
       "slot": "plume"
     },
     {
       "piece": "守护束带",
       "setId": "DefendersWill",
-      "set": "守护之心",
+      "set": "Defender's Will",
       "slot": "circlet"
     },
     {
       "piece": "守秘的魔瓶",
       "setId": "FlowerOfParadiseLost",
-      "set": "乐园遗落之花",
+      "set": "Flower of Paradise Lost",
       "slot": "goblet"
     },
     {
       "piece": "宗室之翎",
       "setId": "NoblesseOblige",
-      "set": "昔日宗室之仪",
+      "set": "Noblesse Oblige",
       "slot": "plume"
     },
     {
       "piece": "宗室之花",
       "setId": "NoblesseOblige",
-      "set": "昔日宗室之仪",
+      "set": "Noblesse Oblige",
       "slot": "flower"
     },
     {
       "piece": "宗室时计",
       "setId": "NoblesseOblige",
-      "set": "昔日宗室之仪",
+      "set": "Noblesse Oblige",
       "slot": "sands"
     },
     {
       "piece": "宗室银瓮",
       "setId": "NoblesseOblige",
-      "set": "昔日宗室之仪",
+      "set": "Noblesse Oblige",
       "slot": "goblet"
     },
     {
       "piece": "宗室面具",
       "setId": "NoblesseOblige",
-      "set": "昔日宗室之仪",
+      "set": "Noblesse Oblige",
       "slot": "circlet"
     },
     {
       "piece": "将帅兜鍪",
       "setId": "TenacityOfTheMillelith",
-      "set": "千岩牢固",
+      "set": "Tenacity of the Millelith",
       "slot": "circlet"
     },
     {
       "piece": "少女易逝的芳颜",
       "setId": "MaidenBeloved",
-      "set": "被怜爱的少女",
+      "set": "Maiden Beloved",
       "slot": "circlet"
     },
     {
       "piece": "少女片刻的闲暇",
       "setId": "MaidenBeloved",
-      "set": "被怜爱的少女",
+      "set": "Maiden Beloved",
       "slot": "goblet"
     },
     {
       "piece": "少女苦短的良辰",
       "setId": "MaidenBeloved",
-      "set": "被怜爱的少女",
+      "set": "Maiden Beloved",
       "slot": "sands"
     },
     {
       "piece": "少女飘摇的思念",
       "setId": "MaidenBeloved",
-      "set": "被怜爱的少女",
+      "set": "Maiden Beloved",
       "slot": "plume"
     },
     {
       "piece": "嵯峨群峰之翼",
       "setId": "ArchaicPetra",
-      "set": "悠古的磐岩",
+      "set": "Archaic Petra",
       "slot": "plume"
     },
     {
       "piece": "巉岩琢塑之樽",
       "setId": "ArchaicPetra",
-      "set": "悠古的磐岩",
+      "set": "Archaic Petra",
       "slot": "goblet"
     },
     {
       "piece": "巡山客的信标",
       "setId": "ScrollOfTheHeroOfCinderCity",
-      "set": "烬城勇者绘卷",
+      "set": "Scroll of the Hero of Cinder City",
       "slot": "plume"
     },
     {
       "piece": "平雷之冠",
       "setId": "Thundersoother",
-      "set": "平息鸣雷的尊者",
+      "set": "Thundersoother",
       "slot": "circlet"
     },
     {
       "piece": "平雷之刻",
       "setId": "Thundersoother",
-      "set": "平息鸣雷的尊者",
+      "set": "Thundersoother",
       "slot": "sands"
     },
     {
       "piece": "平雷之器",
       "setId": "Thundersoother",
-      "set": "平息鸣雷的尊者",
+      "set": "Thundersoother",
       "slot": "goblet"
     },
     {
       "piece": "平雷之心",
       "setId": "Thundersoother",
-      "set": "平息鸣雷的尊者",
+      "set": "Thundersoother",
       "slot": "flower"
     },
     {
       "piece": "平雷之羽",
       "setId": "Thundersoother",
-      "set": "平息鸣雷的尊者",
+      "set": "Thundersoother",
       "slot": "plume"
     },
     {
       "piece": "幸运儿之杯",
       "setId": "LuckyDog",
-      "set": null,
-      "slot": null
+      "set": "Lucky Dog",
+      "slot": "goblet"
     },
     {
       "piece": "幸运儿沙漏",
       "setId": "LuckyDog",
-      "set": null,
-      "slot": null
+      "set": "Lucky Dog",
+      "slot": "sands"
     },
     {
       "piece": "幸运儿绿花",
       "setId": "LuckyDog",
-      "set": null,
-      "slot": null
+      "set": "Lucky Dog",
+      "slot": "flower"
     },
     {
       "piece": "幸运儿银冠",
       "setId": "LuckyDog",
-      "set": null,
-      "slot": null
+      "set": "Lucky Dog",
+      "slot": "circlet"
     },
     {
       "piece": "幸运儿鹰羽",
       "setId": "LuckyDog",
-      "set": null,
-      "slot": null
+      "set": "Lucky Dog",
+      "slot": "plume"
     },
     {
       "piece": "异国之盏",
       "setId": "ResolutionOfSojourner",
-      "set": "行者之心",
+      "set": "Resolution of Sojourner",
       "slot": "goblet"
     },
     {
       "piece": "异想零落的圆舞",
       "setId": "FragmentOfHarmonicWhimsy",
-      "set": "谐律异想断章",
+      "set": "Fragment of Harmonic Whimsy",
       "slot": "circlet"
     },
     {
       "piece": "异种的期许",
       "setId": "ObsidianCodex",
-      "set": "黑曜秘典",
+      "set": "Obsidian Codex",
       "slot": "flower"
     },
     {
       "piece": "归乡之羽",
       "setId": "ResolutionOfSojourner",
-      "set": "行者之心",
+      "set": "Resolution of Sojourner",
       "slot": "plume"
     },
     {
       "piece": "形骸之笠",
       "setId": "HuskOfOpulentDreams",
-      "set": "华馆梦醒形骸记",
+      "set": "Husk of Opulent Dreams",
       "slot": "circlet"
     },
     {
       "piece": "忠实的砂时计",
       "setId": "NighttimeWhispersInTheEchoingWoods",
-      "set": "回声之林夜话",
+      "set": "Nighttime Whispers in the Echoing Woods",
       "slot": "sands"
     },
     {
       "piece": "思忆之矢",
       "setId": "ShimenawasReminiscence",
-      "set": "追忆之注连",
+      "set": "Shimenawa's Reminiscence",
       "slot": "plume"
     },
     {
       "piece": "恶龙的单片镜",
       "setId": "NymphsDream",
-      "set": "水仙之梦",
+      "set": "Nymph's Dream",
       "slot": "circlet"
     },
     {
       "piece": "感别之冠",
       "setId": "ResolutionOfSojourner",
-      "set": "行者之心",
+      "set": "Resolution of Sojourner",
       "slot": "circlet"
     },
     {
       "piece": "感谢你的奉献",
       "setId": "ScarletProof",
-      "set": "血红之证",
+      "set": "Scarlet Proof",
       "slot": "flower"
     },
     {
       "piece": "慈爱的淑女帽",
       "setId": "NighttimeWhispersInTheEchoingWoods",
-      "set": "回声之林夜话",
+      "set": "Nighttime Whispers in the Echoing Woods",
       "slot": "circlet"
     },
     {
       "piece": "慷慨的墨水瓶",
       "setId": "NighttimeWhispersInTheEchoingWoods",
-      "set": "回声之林夜话",
+      "set": "Nighttime Whispers in the Echoing Woods",
       "slot": "goblet"
     },
     {
       "piece": "战狂的时计",
       "setId": "Berserker",
-      "set": "战狂",
+      "set": "Berserker",
       "slot": "sands"
     },
     {
       "piece": "战狂的翎羽",
       "setId": "Berserker",
-      "set": "战狂",
+      "set": "Berserker",
       "slot": "plume"
     },
     {
       "piece": "战狂的蔷薇",
       "setId": "Berserker",
-      "set": "战狂",
+      "set": "Berserker",
       "slot": "flower"
     },
     {
       "piece": "战狂的骨杯",
       "setId": "Berserker",
-      "set": "战狂",
+      "set": "Berserker",
       "slot": "goblet"
     },
     {
       "piece": "战狂的鬼面",
       "setId": "Berserker",
-      "set": "战狂",
+      "set": "Berserker",
       "slot": "circlet"
     },
     {
       "piece": "执灯人的誓词",
       "setId": "LongNightsOath",
-      "set": "长夜之誓",
+      "set": "Long Night's Oath",
       "slot": "flower"
     },
     {
       "piece": "指挥的礼帽",
       "setId": "WanderersTroupe",
-      "set": "流浪大地的乐团",
+      "set": "Wanderer's Troupe",
       "slot": "circlet"
     },
     {
       "piece": "授予你的年华",
       "setId": "ScarletProof",
-      "set": "血红之证",
+      "set": "Scarlet Proof",
       "slot": "sands"
     },
     {
       "piece": "摧冰而行的执望",
       "setId": "BlizzardStrayer",
-      "set": "冰风迷途的勇士",
+      "set": "Blizzard Strayer",
       "slot": "plume"
     },
     {
       "piece": "故人之心",
       "setId": "ResolutionOfSojourner",
-      "set": "行者之心",
+      "set": "Resolution of Sojourner",
       "slot": "flower"
     },
     {
       "piece": "教官的帽子",
       "setId": "Instructor",
-      "set": "教官",
+      "set": "Instructor",
       "slot": "circlet"
     },
     {
       "piece": "教官的怀表",
       "setId": "Instructor",
-      "set": "教官",
+      "set": "Instructor",
       "slot": "sands"
     },
     {
       "piece": "教官的羽饰",
       "setId": "Instructor",
-      "set": "教官",
+      "set": "Instructor",
       "slot": "plume"
     },
     {
       "piece": "教官的胸花",
       "setId": "Instructor",
-      "set": "教官",
+      "set": "Instructor",
       "slot": "flower"
     },
     {
       "piece": "教官的茶杯",
       "setId": "Instructor",
-      "set": "教官",
+      "set": "Instructor",
       "slot": "goblet"
     },
     {
       "piece": "旅途中的鲜花",
       "setId": "NymphsDream",
-      "set": "水仙之梦",
+      "set": "Nymph's Dream",
       "slot": "flower"
     },
     {
       "piece": "无垢之花",
       "setId": "PaleFlame",
-      "set": "苍白之火",
+      "set": "Pale Flame",
       "slot": "flower"
     },
     {
       "piece": "无常之面",
       "setId": "ShimenawasReminiscence",
-      "set": "追忆之注连",
+      "set": "Shimenawa's Reminiscence",
       "slot": "circlet"
     },
     {
       "piece": "无私的妆饰花",
       "setId": "NighttimeWhispersInTheEchoingWoods",
-      "set": "回声之林夜话",
+      "set": "Nighttime Whispers in the Echoing Woods",
       "slot": "flower"
     },
     {
       "piece": "无边酣乐之筵",
       "setId": "VourukashasGlow",
-      "set": "花海甘露之光",
+      "set": "Vourukasha's Glow",
       "slot": "goblet"
     },
     {
       "piece": "明威之镡",
       "setId": "EmblemOfSeveredFate",
-      "set": "绝缘之旗印",
+      "set": "Emblem of Severed Fate",
       "slot": "flower"
     },
     {
       "piece": "昔时传奏之诗",
       "setId": "SongOfDaysPast",
-      "set": "昔时之歌",
+      "set": "Song of Days Past",
       "slot": "circlet"
     },
     {
       "piece": "昔时回映之音",
       "setId": "SongOfDaysPast",
-      "set": "昔时之歌",
+      "set": "Song of Days Past",
       "slot": "sands"
     },
     {
       "piece": "昔时应许之梦",
       "setId": "SongOfDaysPast",
-      "set": "昔时之歌",
+      "set": "Song of Days Past",
       "slot": "goblet"
     },
     {
       "piece": "昔时浮想之思",
       "setId": "SongOfDaysPast",
-      "set": "昔时之歌",
+      "set": "Song of Days Past",
       "slot": "plume"
     },
     {
       "piece": "昔时遗落之誓",
       "setId": "SongOfDaysPast",
-      "set": "昔时之歌",
+      "set": "Song of Days Past",
       "slot": "flower"
     },
     {
       "piece": "星罗圭璧之晷",
       "setId": "ArchaicPetra",
-      "set": "悠古的磐岩",
+      "set": "Archaic Petra",
       "slot": "sands"
     },
     {
       "piece": "春律的片刻",
       "setId": "ADayCarvedFromRisingWinds",
-      "set": "风起之日",
+      "set": "A Day Carved From Rising Winds",
       "slot": "sands"
     },
     {
       "piece": "昭武翎羽",
       "setId": "TenacityOfTheMillelith",
-      "set": "千岩牢固",
+      "set": "Tenacity of the Millelith",
       "slot": "plume"
     },
     {
       "piece": "晨光的明誓",
       "setId": "ADayCarvedFromRisingWinds",
-      "set": "风起之日",
+      "set": "A Day Carved From Rising Winds",
       "slot": "plume"
     },
     {
       "piece": "暗结的明花",
       "setId": "UnfinishedReverie",
-      "set": "未竟的遐思",
+      "set": "Unfinished Reverie",
       "slot": "flower"
     },
     {
       "piece": "月女的华彩",
       "setId": "FlowerOfParadiseLost",
-      "set": "乐园遗落之花",
+      "set": "Flower of Paradise Lost",
       "slot": "flower"
     },
     {
       "piece": "月桂的宝冠",
       "setId": "DeepwoodMemories",
-      "set": "深林的记忆",
+      "set": "Deepwood Memories",
       "slot": "circlet"
     },
     {
       "piece": "朝露之时",
       "setId": "ShimenawasReminiscence",
-      "set": "追忆之注连",
+      "set": "Shimenawa's Reminiscence",
       "slot": "sands"
     },
     {
       "piece": "未吹响的号角",
       "setId": "LongNightsOath",
-      "set": "长夜之誓",
+      "set": "Long Night's Oath",
       "slot": "goblet"
     },
     {
       "piece": "未言的宴话",
       "setId": "ADayCarvedFromRisingWinds",
-      "set": "风起之日",
+      "set": "A Day Carved From Rising Winds",
       "slot": "goblet"
     },
     {
       "piece": "杰作的序曲",
       "setId": "MarechausseeHunter",
-      "set": "逐影猎人",
+      "set": "Marechaussee Hunter",
       "slot": "plume"
     },
     {
       "piece": "染血的铁之心",
       "setId": "BloodstainedChivalry",
-      "set": "染血的骑士道",
+      "set": "Bloodstained Chivalry",
       "slot": "flower"
     },
     {
       "piece": "染血的铁假面",
       "setId": "BloodstainedChivalry",
-      "set": "染血的骑士道",
+      "set": "Bloodstained Chivalry",
       "slot": "circlet"
     },
     {
       "piece": "染血的黑之羽",
       "setId": "BloodstainedChivalry",
-      "set": "染血的骑士道",
+      "set": "Bloodstained Chivalry",
       "slot": "plume"
     },
     {
       "piece": "染血骑士之杯",
       "setId": "BloodstainedChivalry",
-      "set": "染血的骑士道",
+      "set": "Bloodstained Chivalry",
       "slot": "goblet"
     },
     {
       "piece": "梦中的铁花",
       "setId": "GildedDreams",
-      "set": "饰金之梦",
+      "set": "Gilded Dreams",
       "slot": "flower"
     },
     {
       "piece": "梦醒之瓢",
       "setId": "HuskOfOpulentDreams",
-      "set": "华馆梦醒形骸记",
+      "set": "Husk of Opulent Dreams",
       "slot": "goblet"
     },
     {
       "piece": "止于妙想成型的锋毫",
       "setId": "DisenchantmentInDeepShadow",
-      "set": "影中沉凝的幻灭",
+      "set": "Disenchantment in Deep Shadow",
       "slot": "plume"
     },
     {
       "piece": "止于宏伟梦醒的时刻",
       "setId": "DisenchantmentInDeepShadow",
-      "set": "影中沉凝的幻灭",
+      "set": "Disenchantment in Deep Shadow",
       "slot": "sands"
     },
     {
       "piece": "止于祝庆的喝礼",
       "setId": "DisenchantmentInDeepShadow",
-      "set": "影中沉凝的幻灭",
+      "set": "Disenchantment in Deep Shadow",
       "slot": "goblet"
     },
     {
       "piece": "止于荣礼的缎彩",
       "setId": "DisenchantmentInDeepShadow",
-      "set": "影中沉凝的幻灭",
+      "set": "Disenchantment in Deep Shadow",
       "slot": "flower"
     },
     {
       "piece": "止于阔步跌坠的灵摆",
       "setId": "DisenchantmentInDeepShadow",
-      "set": "影中沉凝的幻灭",
+      "set": "Disenchantment in Deep Shadow",
       "slot": "circlet"
     },
     {
       "piece": "武人的头巾",
       "setId": "MartialArtist",
-      "set": "武人",
+      "set": "Martial Artist",
       "slot": "circlet"
     },
     {
       "piece": "武人的水漏",
       "setId": "MartialArtist",
-      "set": "武人",
+      "set": "Martial Artist",
       "slot": "sands"
     },
     {
       "piece": "武人的红花",
       "setId": "MartialArtist",
-      "set": "武人",
+      "set": "Martial Artist",
       "slot": "flower"
     },
     {
       "piece": "武人的羽饰",
       "setId": "MartialArtist",
-      "set": "武人",
+      "set": "Martial Artist",
       "slot": "plume"
     },
     {
       "piece": "武人的酒杯",
       "setId": "MartialArtist",
-      "set": "武人",
+      "set": "Martial Artist",
       "slot": "goblet"
     },
     {
       "piece": "水仙的时时刻刻",
       "setId": "NymphsDream",
-      "set": "水仙之梦",
+      "set": "Nymph's Dream",
       "slot": "sands"
     },
     {
       "piece": "永劫之冕",
       "setId": "NightOfTheSkysUnveiling",
-      "set": "穹境示现之夜",
+      "set": "Night of the Sky's Unveiling",
       "slot": "circlet"
     },
     {
       "piece": "沉波之盏",
       "setId": "HeartOfDepth",
-      "set": "沉沦之心",
+      "set": "Heart of Depth",
       "slot": "goblet"
     },
     {
       "piece": "沉金的岁月",
       "setId": "GildedDreams",
-      "set": "饰金之梦",
+      "set": "Gilded Dreams",
       "slot": "sands"
     },
     {
       "piece": "沙王的投影",
       "setId": "GildedDreams",
-      "set": "饰金之梦",
+      "set": "Gilded Dreams",
       "slot": "circlet"
     },
     {
       "piece": "流放者之杯",
       "setId": "TheExile",
-      "set": "流放者",
+      "set": "The Exile",
       "slot": "goblet"
     },
     {
       "piece": "流放者之羽",
       "setId": "TheExile",
-      "set": "流放者",
+      "set": "The Exile",
       "slot": "plume"
     },
     {
       "piece": "流放者之花",
       "setId": "TheExile",
-      "set": "流放者",
+      "set": "The Exile",
       "slot": "flower"
     },
     {
       "piece": "流放者头冠",
       "setId": "TheExile",
-      "set": "流放者",
+      "set": "The Exile",
       "slot": "circlet"
     },
     {
       "piece": "流放者怀表",
       "setId": "TheExile",
-      "set": "流放者",
+      "set": "The Exile",
       "slot": "sands"
     },
     {
       "piece": "流沙贵嗣的遗宝",
       "setId": "DesertPavilionChronicle",
-      "set": "沙上楼阁史话",
+      "set": "Desert Pavilion Chronicle",
       "slot": "circlet"
     },
     {
       "piece": "流离者的晶泪",
       "setId": "SilkenMoonsSerenade",
-      "set": "纺月的夜歌",
+      "set": "Silken Moon's Serenade",
       "slot": "flower"
     },
     {
       "piece": "浮溯之珏",
       "setId": "EchoesOfAnOffering",
-      "set": "来歆余响",
+      "set": "Echoes of an Offering",
       "slot": "circlet"
     },
     {
       "piece": "海染之花",
       "setId": "OceanHuedClam",
-      "set": "海染砗磲",
+      "set": "Ocean-Hued Clam",
       "slot": "flower"
     },
     {
       "piece": "海祇之冠",
       "setId": "OceanHuedClam",
-      "set": "海染砗磲",
+      "set": "Ocean-Hued Clam",
       "slot": "circlet"
     },
     {
       "piece": "涌泉之盏",
       "setId": "EchoesOfAnOffering",
-      "set": "来歆余响",
+      "set": "Echoes of an Offering",
       "slot": "goblet"
     },
     {
       "piece": "深廊的回奏之歌",
       "setId": "FinaleOfTheDeepGalleries",
-      "set": "深廊终曲",
+      "set": "Finale of the Deep Galleries",
       "slot": "flower"
     },
     {
       "piece": "深廊的湮落之刻",
       "setId": "FinaleOfTheDeepGalleries",
-      "set": "深廊终曲",
+      "set": "Finale of the Deep Galleries",
       "slot": "sands"
     },
     {
       "piece": "深廊的漫远之约",
       "setId": "FinaleOfTheDeepGalleries",
-      "set": "深廊终曲",
+      "set": "Finale of the Deep Galleries",
       "slot": "plume"
     },
     {
       "piece": "深廊的遂失之冕",
       "setId": "FinaleOfTheDeepGalleries",
-      "set": "深廊终曲",
+      "set": "Finale of the Deep Galleries",
       "slot": "circlet"
     },
     {
       "piece": "深廊的饫赐之宴",
       "setId": "FinaleOfTheDeepGalleries",
-      "set": "深廊终曲",
+      "set": "Finale of the Deep Galleries",
       "slot": "goblet"
     },
     {
       "piece": "深罪之羽",
       "setId": "NightOfTheSkysUnveiling",
-      "set": "穹境示现之夜",
+      "set": "Night of the Sky's Unveiling",
       "slot": "plume"
     },
     {
       "piece": "渊宫之羽",
       "setId": "OceanHuedClam",
-      "set": "海染砗磲",
+      "set": "Ocean-Hued Clam",
       "slot": "plume"
     },
     {
       "piece": "渡火者的决绝",
       "setId": "Lavawalker",
-      "set": "渡过烈火的贤人",
+      "set": "Lavawalker",
       "slot": "flower"
     },
     {
       "piece": "渡火者的智慧",
       "setId": "Lavawalker",
-      "set": "渡过烈火的贤人",
+      "set": "Lavawalker",
       "slot": "circlet"
     },
     {
       "piece": "渡火者的煎熬",
       "setId": "Lavawalker",
-      "set": "渡过烈火的贤人",
+      "set": "Lavawalker",
       "slot": "sands"
     },
     {
       "piece": "渡火者的解脱",
       "setId": "Lavawalker",
-      "set": "渡过烈火的贤人",
+      "set": "Lavawalker",
       "slot": "plume"
     },
     {
       "piece": "渡火者的醒悟",
       "setId": "Lavawalker",
-      "set": "渡过烈火的贤人",
+      "set": "Lavawalker",
       "slot": "goblet"
     },
     {
       "piece": "渴真之花",
       "setId": "NightOfTheSkysUnveiling",
-      "set": "穹境示现之夜",
+      "set": "Night of the Sky's Unveiling",
       "slot": "flower"
     },
     {
       "piece": "游医的怀钟",
       "setId": "TravelingDoctor",
-      "set": null,
-      "slot": null
+      "set": "Traveling Doctor",
+      "slot": "sands"
     },
     {
       "piece": "游医的方巾",
       "setId": "TravelingDoctor",
-      "set": null,
-      "slot": null
+      "set": "Traveling Doctor",
+      "slot": "circlet"
     },
     {
       "piece": "游医的枭羽",
       "setId": "TravelingDoctor",
-      "set": null,
-      "slot": null
+      "set": "Traveling Doctor",
+      "slot": "plume"
     },
     {
       "piece": "游医的药壶",
       "setId": "TravelingDoctor",
-      "set": null,
-      "slot": null
+      "set": "Traveling Doctor",
+      "slot": "goblet"
     },
     {
       "piece": "游医的银莲",
       "setId": "TravelingDoctor",
-      "set": null,
-      "slot": null
+      "set": "Traveling Doctor",
+      "slot": "flower"
     },
     {
       "piece": "游学者的爪杯",
       "setId": "ScrollOfTheHeroOfCinderCity",
-      "set": "烬城勇者绘卷",
+      "set": "Scroll of the Hero of Cinder City",
       "slot": "goblet"
     },
     {
       "piece": "满溢之壶",
       "setId": "NightOfTheSkysUnveiling",
-      "set": "穹境示现之夜",
+      "set": "Night of the Sky's Unveiling",
       "slot": "goblet"
     },
     {
       "piece": "潜光片羽",
       "setId": "VermillionHereafter",
-      "set": "辰砂往生录",
+      "set": "Vermillion Hereafter",
       "slot": "plume"
     },
     {
       "piece": "灵光明烁之心",
       "setId": "VourukashasGlow",
-      "set": "花海甘露之光",
+      "set": "Vourukasha's Glow",
       "slot": "circlet"
     },
     {
       "piece": "灵光源起之蕊",
       "setId": "VourukashasGlow",
-      "set": "花海甘露之光",
+      "set": "Vourukasha's Glow",
       "slot": "flower"
     },
     {
       "piece": "灵露倾洒的狂诗",
       "setId": "FragmentOfHarmonicWhimsy",
-      "set": "谐律异想断章",
+      "set": "Fragment of Harmonic Whimsy",
       "slot": "goblet"
     },
     {
       "piece": "灵髓的根脉",
       "setId": "ObsidianCodex",
-      "set": "黑曜秘典",
+      "set": "Obsidian Codex",
       "slot": "plume"
     },
     {
       "piece": "焦灼的魔女帽",
       "setId": "CrimsonWitchOfFlames",
-      "set": "炽烈的炎之魔女",
+      "set": "Crimson Witch of Flames",
       "slot": "circlet"
     },
     {
       "piece": "熔铸者的揣度",
       "setId": "HeartOfTheFurnace",
-      "set": "炉火融炼之心",
+      "set": "Heart of the Furnace",
       "slot": "flower"
     },
     {
       "piece": "熔铸者的继志",
       "setId": "HeartOfTheFurnace",
-      "set": "炉火融炼之心",
+      "set": "Heart of the Furnace",
       "slot": "circlet"
     },
     {
       "piece": "熔铸者的观测",
       "setId": "HeartOfTheFurnace",
-      "set": "炉火融炼之心",
+      "set": "Heart of the Furnace",
       "slot": "plume"
     },
     {
       "piece": "熔铸者的计算",
       "setId": "HeartOfTheFurnace",
-      "set": "炉火融炼之心",
+      "set": "Heart of the Furnace",
       "slot": "sands"
     },
     {
       "piece": "熔铸者的雅量",
       "setId": "HeartOfTheFurnace",
-      "set": "炉火融炼之心",
+      "set": "Heart of the Furnace",
       "slot": "goblet"
     },
     {
       "piece": "猎人的胸花",
       "setId": "MarechausseeHunter",
-      "set": "逐影猎人",
+      "set": "Marechaussee Hunter",
       "slot": "flower"
     },
     {
       "piece": "猎人青翠的箭羽",
       "setId": "ViridescentVenerer",
-      "set": "翠绿之影",
+      "set": "Viridescent Venerer",
       "slot": "plume"
     },
     {
       "piece": "献与月的华梦",
       "setId": "AubadeOfMorningstarAndMoon",
-      "set": "晨星与月的晓歌",
+      "set": "Aubade of Morningstar and Moon",
       "slot": "flower"
     },
     {
       "piece": "献与月的离光",
       "setId": "AubadeOfMorningstarAndMoon",
-      "set": "晨星与月的晓歌",
+      "set": "Aubade of Morningstar and Moon",
       "slot": "plume"
     },
     {
       "piece": "献与月的终时",
       "setId": "AubadeOfMorningstarAndMoon",
-      "set": "晨星与月的晓歌",
+      "set": "Aubade of Morningstar and Moon",
       "slot": "sands"
     },
     {
       "piece": "献与月的酹祭",
       "setId": "AubadeOfMorningstarAndMoon",
-      "set": "晨星与月的晓歌",
+      "set": "Aubade of Morningstar and Moon",
       "slot": "goblet"
     },
     {
       "piece": "献与月的银冕",
       "setId": "AubadeOfMorningstarAndMoon",
-      "set": "晨星与月的晓歌",
+      "set": "Aubade of Morningstar and Moon",
       "slot": "circlet"
     },
     {
       "piece": "琦色灵彩之羽",
       "setId": "VourukashasGlow",
-      "set": "花海甘露之光",
+      "set": "Vourukasha's Glow",
       "slot": "plume"
     },
     {
       "piece": "琴师的箭羽",
       "setId": "WanderersTroupe",
-      "set": "流浪大地的乐团",
+      "set": "Wanderer's Troupe",
       "slot": "plume"
     },
     {
       "piece": "生灵之华",
       "setId": "VermillionHereafter",
-      "set": "辰砂往生录",
+      "set": "Vermillion Hereafter",
       "slot": "flower"
     },
     {
       "piece": "盟誓金爵",
       "setId": "TenacityOfTheMillelith",
-      "set": "千岩牢固",
+      "set": "Tenacity of the Millelith",
       "slot": "goblet"
     },
     {
       "piece": "真珠之笼",
       "setId": "OceanHuedClam",
-      "set": "海染砗磲",
+      "set": "Ocean-Hued Clam",
       "slot": "goblet"
     },
     {
       "piece": "破冰踏雪的回音",
       "setId": "BlizzardStrayer",
-      "set": "冰风迷途的勇士",
+      "set": "Blizzard Strayer",
       "slot": "circlet"
     },
     {
       "piece": "磐陀裂生之花",
       "setId": "ArchaicPetra",
-      "set": "悠古的磐岩",
+      "set": "Archaic Petra",
       "slot": "flower"
     },
     {
       "piece": "祈望之心",
       "setId": "ShimenawasReminiscence",
-      "set": "追忆之注连",
+      "set": "Shimenawa's Reminiscence",
       "slot": "goblet"
     },
     {
       "piece": "祝祀之凭",
       "setId": "EchoesOfAnOffering",
-      "set": "来歆余响",
+      "set": "Echoes of an Offering",
       "slot": "sands"
     },
     {
       "piece": "祭冰礼冠",
       "setId": "PrayersToSpringtime",
-      "set": null,
-      "slot": null
+      "set": "Prayers to Springtime",
+      "slot": "circlet"
     },
     {
       "piece": "祭水礼冠",
       "setId": "PrayersForDestiny",
-      "set": null,
-      "slot": null
+      "set": "Prayers for Destiny",
+      "slot": "circlet"
     },
     {
       "piece": "祭火礼冠",
       "setId": "PrayersForIllumination",
-      "set": null,
-      "slot": null
+      "set": "Prayers for Illumination",
+      "slot": "circlet"
     },
     {
       "piece": "祭雷礼冠",
       "setId": "PrayersForWisdom",
-      "set": null,
-      "slot": null
+      "set": "Prayers for Wisdom",
+      "slot": "circlet"
     },
     {
       "piece": "祭霜者的迷狂",
       "setId": "SilkenMoonsSerenade",
-      "set": "纺月的夜歌",
+      "set": "Silken Moon's Serenade",
       "slot": "sands"
     },
     {
       "piece": "祭风礼冠",
       "setId": "PrayersToTheFirmament",
-      "set": null,
-      "slot": null
+      "set": "Prayers to the Firmament",
+      "slot": "circlet"
     },
     {
       "piece": "离别之贝",
       "setId": "OceanHuedClam",
-      "set": "海染砗磲",
+      "set": "Ocean-Hued Clam",
       "slot": "sands"
     },
     {
       "piece": "秘术家的金盘",
       "setId": "ScrollOfTheHeroOfCinderCity",
-      "set": "烬城勇者绘卷",
+      "set": "Scroll of the Hero of Cinder City",
       "slot": "sands"
     },
     {
       "piece": "筹谋的共樽",
       "setId": "UnfinishedReverie",
-      "set": "未竟的遐思",
+      "set": "Unfinished Reverie",
       "slot": "goblet"
     },
     {
       "piece": "紫晶的花冠",
       "setId": "FlowerOfParadiseLost",
-      "set": "乐园遗落之花",
+      "set": "Flower of Paradise Lost",
       "slot": "circlet"
     },
     {
       "piece": "纷争的前宴",
       "setId": "ObsidianCodex",
-      "set": "黑曜秘典",
+      "set": "Obsidian Codex",
       "slot": "goblet"
     },
     {
       "piece": "终幕的时计",
       "setId": "WanderersTroupe",
-      "set": "流浪大地的乐团",
+      "set": "Wanderer's Troupe",
       "slot": "sands"
     },
     {
       "piece": "结契之刻",
       "setId": "VermillionHereafter",
-      "set": "辰砂往生录",
+      "set": "Vermillion Hereafter",
       "slot": "goblet"
     },
     {
       "piece": "绯花之壶",
       "setId": "EmblemOfSeveredFate",
-      "set": "绝缘之旗印",
+      "set": "Emblem of Severed Fate",
       "slot": "goblet"
     },
     {
       "piece": "缅怀你的信仰",
       "setId": "ScarletProof",
-      "set": "血红之证",
+      "set": "Scarlet Proof",
       "slot": "circlet"
     },
     {
       "piece": "羁缠之花",
       "setId": "ShimenawasReminiscence",
-      "set": "追忆之注连",
+      "set": "Shimenawa's Reminiscence",
       "slot": "flower"
     },
     {
       "piece": "翠绿猎人的容器",
       "setId": "ViridescentVenerer",
-      "set": "翠绿之影",
+      "set": "Viridescent Venerer",
       "slot": "goblet"
     },
     {
       "piece": "翠绿猎人的笃定",
       "setId": "ViridescentVenerer",
-      "set": "翠绿之影",
+      "set": "Viridescent Venerer",
       "slot": "sands"
     },
     {
       "piece": "翠绿的猎人之冠",
       "setId": "ViridescentVenerer",
-      "set": "翠绿之影",
+      "set": "Viridescent Venerer",
       "slot": "circlet"
     },
     {
       "piece": "翠蔓的智者",
       "setId": "DeepwoodMemories",
-      "set": "深林的记忆",
+      "set": "Deepwood Memories",
       "slot": "plume"
     },
     {
       "piece": "老兵的容颜",
       "setId": "MarechausseeHunter",
-      "set": "逐影猎人",
+      "set": "Marechaussee Hunter",
       "slot": "circlet"
     },
     {
       "piece": "至纯者的欢荣",
       "setId": "SilkenMoonsSerenade",
-      "set": "纺月的夜歌",
+      "set": "Silken Moon's Serenade",
       "slot": "goblet"
     },
     {
       "piece": "荣花之期",
       "setId": "HuskOfOpulentDreams",
-      "set": "华馆梦醒形骸记",
+      "set": "Husk of Opulent Dreams",
       "slot": "flower"
     },
     {
       "piece": "虺雷之姿",
       "setId": "VermillionHereafter",
-      "set": "辰砂往生录",
+      "set": "Vermillion Hereafter",
       "slot": "circlet"
     },
     {
       "piece": "被浸染的缨盔",
       "setId": "LongNightsOath",
-      "set": "长夜之誓",
+      "set": "Long Night's Oath",
       "slot": "circlet"
     },
     {
       "piece": "裁判的时刻",
       "setId": "MarechausseeHunter",
-      "set": "逐影猎人",
+      "set": "Marechaussee Hunter",
       "slot": "sands"
     },
     {
       "piece": "裁断的翎羽",
       "setId": "GildedDreams",
-      "set": "饰金之梦",
+      "set": "Gilded Dreams",
       "slot": "plume"
     },
     {
       "piece": "褪光的翠尾",
       "setId": "UnfinishedReverie",
-      "set": "未竟的遐思",
+      "set": "Unfinished Reverie",
       "slot": "plume"
     },
     {
       "piece": "角斗士的凯旋",
       "setId": "GladiatorsFinale",
-      "set": "角斗士的终幕礼",
+      "set": "Gladiator's Finale",
       "slot": "circlet"
     },
     {
       "piece": "角斗士的希冀",
       "setId": "GladiatorsFinale",
-      "set": "角斗士的终幕礼",
+      "set": "Gladiator's Finale",
       "slot": "sands"
     },
     {
       "piece": "角斗士的归宿",
       "setId": "GladiatorsFinale",
-      "set": "角斗士的终幕礼",
+      "set": "Gladiator's Finale",
       "slot": "plume"
     },
     {
       "piece": "角斗士的留恋",
       "setId": "GladiatorsFinale",
-      "set": "角斗士的终幕礼",
+      "set": "Gladiator's Finale",
       "slot": "flower"
     },
     {
       "piece": "角斗士的酣醉",
       "setId": "GladiatorsFinale",
-      "set": "角斗士的终幕礼",
+      "set": "Gladiator's Finale",
       "slot": "goblet"
     },
     {
       "piece": "诚恳的蘸水笔",
       "setId": "NighttimeWhispersInTheEchoingWoods",
-      "set": "回声之林夜话",
+      "set": "Nighttime Whispers in the Echoing Woods",
       "slot": "plume"
     },
     {
       "piece": "诸圣的礼冠",
       "setId": "ObsidianCodex",
-      "set": "黑曜秘典",
+      "set": "Obsidian Codex",
       "slot": "circlet"
     },
     {
       "piece": "谐律交响的前奏",
       "setId": "FragmentOfHarmonicWhimsy",
-      "set": "谐律异想断章",
+      "set": "Fragment of Harmonic Whimsy",
       "slot": "flower"
     },
     {
       "piece": "谕告之钟",
       "setId": "NightOfTheSkysUnveiling",
-      "set": "穹境示现之夜",
+      "set": "Night of the Sky's Unveiling",
       "slot": "sands"
     },
     {
       "piece": "谢落的筵席",
       "setId": "FlowerOfParadiseLost",
-      "set": "乐园遗落之花",
+      "set": "Flower of Paradise Lost",
       "slot": "plume"
     },
     {
       "piece": "贤医之羽",
       "setId": "PaleFlame",
-      "set": "苍白之火",
+      "set": "Pale Flame",
       "slot": "plume"
     },
     {
       "piece": "贤智的定期",
       "setId": "DeepwoodMemories",
-      "set": "深林的记忆",
+      "set": "Deepwood Memories",
       "slot": "sands"
     },
     {
       "piece": "赌徒的怀表",
       "setId": "Gambler",
-      "set": "赌徒",
+      "set": "Gambler",
       "slot": "sands"
     },
     {
       "piece": "赌徒的羽饰",
       "setId": "Gambler",
-      "set": "赌徒",
+      "set": "Gambler",
       "slot": "plume"
     },
     {
       "piece": "赌徒的耳环",
       "setId": "Gambler",
-      "set": "赌徒",
+      "set": "Gambler",
       "slot": "circlet"
     },
     {
       "piece": "赌徒的胸花",
       "setId": "Gambler",
-      "set": "赌徒",
+      "set": "Gambler",
       "slot": "flower"
     },
     {
       "piece": "赌徒的骰盅",
       "setId": "Gambler",
-      "set": null,
-      "slot": null
-    },
-    {
-      "piece": "赌徒的骰蛊",
-      "setId": "Gambler",
-      "set": "赌徒",
+      "set": "Gambler",
       "slot": "goblet"
     },
     {
       "piece": "超越之盏",
       "setId": "PaleFlame",
-      "set": "苍白之火",
+      "set": "Pale Flame",
       "slot": "goblet"
     },
     {
       "piece": "远方的少女之心",
       "setId": "MaidenBeloved",
-      "set": "被怜爱的少女",
+      "set": "Maiden Beloved",
       "slot": "flower"
     },
     {
       "piece": "迷宫的游人",
       "setId": "DeepwoodMemories",
-      "set": "深林的记忆",
+      "set": "Deepwood Memories",
       "slot": "flower"
     },
     {
       "piece": "迷误者之灯",
       "setId": "DeepwoodMemories",
-      "set": "深林的记忆",
+      "set": "Deepwood Memories",
       "slot": "goblet"
     },
     {
       "piece": "迷醉长梦的守护",
       "setId": "DesertPavilionChronicle",
-      "set": "沙上楼阁史话",
+      "set": "Desert Pavilion Chronicle",
       "slot": "goblet"
     },
     {
       "piece": "追忆之风",
       "setId": "HeartOfDepth",
-      "set": "沉沦之心",
+      "set": "Heart of Depth",
       "slot": "plume"
     },
     {
       "piece": "逐光之石",
       "setId": "ResolutionOfSojourner",
-      "set": "行者之心",
+      "set": "Resolution of Sojourner",
       "slot": "sands"
     },
     {
       "piece": "遍结寒霜的傲骨",
       "setId": "BlizzardStrayer",
-      "set": "冰风迷途的勇士",
+      "set": "Blizzard Strayer",
       "slot": "goblet"
     },
     {
       "piece": "遗忘的容器",
       "setId": "MarechausseeHunter",
-      "set": "逐影猎人",
+      "set": "Marechaussee Hunter",
       "slot": "goblet"
     },
     {
       "piece": "酒渍船帽",
       "setId": "HeartOfDepth",
-      "set": "沉沦之心",
+      "set": "Heart of Depth",
       "slot": "circlet"
     },
     {
       "piece": "野花记忆的绿野",
       "setId": "ViridescentVenerer",
-      "set": "翠绿之影",
+      "set": "Viridescent Venerer",
       "slot": "flower"
     },
     {
       "piece": "金铜时晷",
       "setId": "TenacityOfTheMillelith",
-      "set": "千岩牢固",
+      "set": "Tenacity of the Millelith",
       "slot": "sands"
     },
     {
       "piece": "铭记你的功勋",
       "setId": "ScarletProof",
-      "set": "血红之证",
+      "set": "Scarlet Proof",
       "slot": "plume"
     },
     {
       "piece": "阳辔之遗",
       "setId": "VermillionHereafter",
-      "set": "辰砂往生录",
+      "set": "Vermillion Hereafter",
       "slot": "sands"
     },
     {
       "piece": "降雷的凶兆",
       "setId": "ThunderingFury",
-      "set": "如雷的盛怒",
+      "set": "Thundering Fury",
       "slot": "goblet"
     },
     {
       "piece": "雪藏之羽",
       "setId": "GlacierAndSnowfield",
-      "set": null,
-      "slot": null
+      "set": "Glacier and Snowfield",
+      "slot": "plume"
     },
     {
       "piece": "雷云之笼",
       "setId": "EmblemOfSeveredFate",
-      "set": "绝缘之旗印",
+      "set": "Emblem of Severed Fate",
       "slot": "sands"
     },
     {
       "piece": "雷灾的孑遗",
       "setId": "ThunderingFury",
-      "set": "如雷的盛怒",
+      "set": "Thundering Fury",
       "slot": "plume"
     },
     {
       "piece": "雷霆的时计",
       "setId": "ThunderingFury",
-      "set": "如雷的盛怒",
+      "set": "Thundering Fury",
       "slot": "sands"
     },
     {
       "piece": "雷鸟的怜悯",
       "setId": "ThunderingFury",
-      "set": "如雷的盛怒",
+      "set": "Thundering Fury",
       "slot": "flower"
     },
     {
       "piece": "风花的箴铭",
       "setId": "ADayCarvedFromRisingWinds",
-      "set": "风起之日",
+      "set": "A Day Carved From Rising Winds",
       "slot": "flower"
     },
     {
       "piece": "饮尽你的血泪",
       "setId": "ScarletProof",
-      "set": "血红之证",
+      "set": "Scarlet Proof",
       "slot": "goblet"
     },
     {
       "piece": "饰金胸花",
       "setId": "HeartOfDepth",
-      "set": "沉沦之心",
+      "set": "Heart of Depth",
       "slot": "flower"
     },
     {
       "piece": "驯兽师的护符",
       "setId": "ScrollOfTheHeroOfCinderCity",
-      "set": "烬城勇者绘卷",
+      "set": "Scroll of the Hero of Cinder City",
       "slot": "flower"
     },
     {
       "piece": "骑士染血之时",
       "setId": "BloodstainedChivalry",
-      "set": "染血的骑士道",
+      "set": "Bloodstained Chivalry",
       "slot": "sands"
     },
     {
       "piece": "魂香之花",
       "setId": "EchoesOfAnOffering",
-      "set": "来歆余响",
+      "set": "Echoes of an Offering",
       "slot": "flower"
     },
     {
       "piece": "魔女常燃之羽",
       "setId": "CrimsonWitchOfFlames",
-      "set": "炽烈的炎之魔女",
+      "set": "Crimson Witch of Flames",
       "slot": "plume"
     },
     {
       "piece": "魔女的心之火",
       "setId": "CrimsonWitchOfFlames",
-      "set": "炽烈的炎之魔女",
+      "set": "Crimson Witch of Flames",
       "slot": "goblet"
     },
     {
       "piece": "魔女的炎之花",
       "setId": "CrimsonWitchOfFlames",
-      "set": "炽烈的炎之魔女",
+      "set": "Crimson Witch of Flames",
       "slot": "flower"
     },
     {
       "piece": "魔女破灭之时",
       "setId": "CrimsonWitchOfFlames",
-      "set": "炽烈的炎之魔女",
+      "set": "Crimson Witch of Flames",
       "slot": "sands"
     },
     {
       "piece": "魔战士的羽面",
       "setId": "ScrollOfTheHeroOfCinderCity",
-      "set": "烬城勇者绘卷",
+      "set": "Scroll of the Hero of Cinder City",
       "slot": "circlet"
     },
     {
       "piece": "黄金之夜的喧嚣",
       "setId": "GoldenTroupe",
-      "set": "黄金剧团",
+      "set": "Golden Troupe",
       "slot": "goblet"
     },
     {
       "piece": "黄金乐曲的变奏",
       "setId": "GoldenTroupe",
-      "set": "黄金剧团",
+      "set": "Golden Troupe",
       "slot": "flower"
     },
     {
       "piece": "黄金剧团的奖赏",
       "setId": "GoldenTroupe",
-      "set": "黄金剧团",
+      "set": "Golden Troupe",
       "slot": "circlet"
     },
     {
       "piece": "黄金时代的先声",
       "setId": "GoldenTroupe",
-      "set": "黄金剧团",
+      "set": "Golden Troupe",
       "slot": "sands"
     },
     {
       "piece": "黄金邦国的结末",
       "setId": "DesertPavilionChronicle",
-      "set": "沙上楼阁史话",
+      "set": "Desert Pavilion Chronicle",
       "slot": "plume"
     },
     {
       "piece": "黄金飞鸟的落羽",
       "setId": "GoldenTroupe",
-      "set": "黄金剧团",
+      "set": "Golden Troupe",
       "slot": "plume"
     }
   ],

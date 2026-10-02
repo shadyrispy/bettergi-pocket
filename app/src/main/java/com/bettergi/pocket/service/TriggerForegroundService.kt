@@ -300,15 +300,17 @@ class TriggerForegroundService : Service() {
                 // 关：摘掉引用并计数（目录与已落文件留在原地，供 adb pull 复盘）。
                 val on = intent.getBooleanExtra(EXTRA_ENABLED, false)
                 if (on) {
+                    // ★ #46 ⑤：目录名原来只到 `HHmmss` ⇒ 同一秒重开会**复用同一目录**，且下面的
+                    //   `manifest.jsonl` delete 会把上一轮的清单抹掉（图还在、索引没了）。
+                    //   补上日期 + 毫秒，让每次开取证都是独立目录。
                     val dir = java.io.File(
                         getExternalFilesDir(null) ?: filesDir,
-                        "panelshots_" + java.text.SimpleDateFormat("HHmmss", java.util.Locale.US)
+                        "panelshots_" + java.text.SimpleDateFormat("MMdd_HHmmss_SSS", java.util.Locale.US)
                             .format(java.util.Date()),
                     )
                     runCatching { dir.mkdirs() }
                     if (dir.isDirectory) {
                         com.bettergi.pocket.scan.ScanEngine.panelShotDir = dir
-                        java.io.File(dir, "manifest.jsonl").delete()
                         Log.i(TAG, "panel shots: ON -> ${dir.absolutePath}")
                     } else {
                         Log.w(TAG, "panel shots: 目录创建失败 ${dir.absolutePath}")
@@ -483,8 +485,9 @@ class TriggerForegroundService : Service() {
                 // ⚠️ 2026-09-17 默认改为 **false**：几何起点（x=638，两卡缝隙）实测让 BS 的滚动**被截断**
                 // （落地条带 L 仅 501~516px = **1.7 行**，而遍历 3 行 ⇒ 重叠 1.3 行 ⇒ 同件大量重复，
                 //  武器扫描"多 126"）；改用 profile 坐标（x=1614）后落地 **777~812px = 2.7 行** ✓ 稳定。
-                // ⚠️ 走本 action 的 ADB 广播由 DebugControlReceiver 以 **true** 为默认值转发 ⇒
-                //   调试跑的是"几何起点"，产线（下方 settingsListener / GoodRepository 入口）是"字面起点"。
+                // ★ 2026-09-27：`DebugControlReceiver` 的转发默认已从 true 一并改成 false —— 原先调试
+                //   跑的是产线不走的"几何起点"，而 `scan finished` 日志上两者同形，A/B 结论因此落到了
+                //   没跑过的分支上。要量几何起点现在必须显式 `--ez geoAdvance true`。
                 val geoAdvance = intent.getBooleanExtra(EXTRA_GEO_ADVANCE, false)
                 // §16.4 标定/调试用 plan 注入：EXTRA_PLAN 直接 JSON（adb shell 会吞双引号→失效），
                 // EXTRA_PLAN_B64 为 base64(JSON)（仅 [A-Za-z0-9+/=]，device sh 不吞，标定稳定通道）。
@@ -504,12 +507,21 @@ class TriggerForegroundService : Service() {
                 }
                 // 时序覆盖：交给 startScan 单入口 apply（其余入口传 null ⇒ 复位，防跨轮残留）
                 val timingSpec = intent.getStringExtra(EXTRA_TIMING)
+                // ★ 没给内联 plan 时**回落到用户在管理器里选好的输入**（与产线 `startFlowIfReady` 同源）。
+                //   原先这条调试通道只能靠 `planB64` 喂，`DEBUG_SET_GOOD` 导入的文件它根本不读 ⇒
+                //   起跑后 `foreach` 见 `$plan` 为空，整轮"跑完了但什么都没做"（07:46 实测：
+                //   returnToHome 8 次 + `foreach: 'plan' not available or empty` + cells=0）。
+                //   与 #94 的 geoAdvance 是同一条教训：**调试入口不能走产线不走的路径**。
+                //   内联 `plan/planB64` 仍然优先 —— 标定跑要用的是"临时改一条计划"，不是换数据源。
+                val planWithFallback = plan ?: GoodRepository.planFor(applicationContext, flow)?.also {
+                    Log.i(TAG, "debug scan flow: plan 取自已导入输入（${it.size} 项，flow=$flow）")
+                }
                 Log.i(TAG, "debug scan flow: flow=$flow maxPages=$maxPages timing='${timingSpec ?: ""}'")
                 if (captureController.isRunning()) {
                     scriptRunner.startScan(
                         flow, maxPages,
                         useGeometryAdvance = geoAdvance,
-                        plan = plan,
+                        plan = planWithFallback,
                         timingSpec = timingSpec,
                     )
                 } else {

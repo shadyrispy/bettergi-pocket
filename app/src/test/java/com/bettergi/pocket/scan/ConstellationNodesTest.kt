@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.BeforeClass
 import org.junit.Test
 import org.opencv.android.Utils
 import org.opencv.core.Mat
@@ -22,6 +23,15 @@ import java.io.File
  * 实测命座页 5 角色命中 4~6、另两页 **0**。
  */
 class ConstellationNodesTest {
+
+    companion object {
+        @JvmStatic
+        @BeforeClass
+        fun loadOpenCv() {
+            nu.pattern.OpenCV.loadLocally()
+            Mat(2, 2, org.opencv.core.CvType.CV_8UC3, Scalar(0.0, 0.0, 0.0)).release()
+        }
+    }
 
     private fun assetsDir(): File {
         var dir = File(System.getProperty("user.dir") ?: ".")

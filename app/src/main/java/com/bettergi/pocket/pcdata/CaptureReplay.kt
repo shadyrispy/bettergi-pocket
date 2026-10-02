@@ -74,7 +74,14 @@ object CaptureReplay {
             is CaptureResult.Err -> return fail("回放没起来：${start.error}")
         }
 
-        val outcome = awaitReplay()
+        val (finished, outcome) = awaitReplay()
+        if (!finished) {
+            // 没跑到文件末尾 ⇒ 这一轮库存必然是半截的，而 `GoodRepository` 是**单文件覆盖写**：
+            // 一存就把上一份完整输入顶掉，随后被 `artifact_lock` / `auto_equip` 当成全库依据。
+            // 与在线会话「只有四段齐才落盘」是同一条定策。
+            IrminsulCapture.stop(context)
+            return fail("$outcome ⇒ 不入库（上一份输入保持不变）")
+        }
         val json = when (val export = IrminsulCapture.exportGood(GOOD_EXPORT_SETTINGS)) {
             is CaptureResult.Err -> {
                 IrminsulCapture.stop(context)
@@ -98,15 +105,21 @@ object CaptureReplay {
      * 住了，"条数不再涨"与"回放结束"长得一模一样 —— 读早一步就是少一类数据。原先这里
      * 用"静默 3s"猜，正是踩在同一个坑上。
      */
-    private suspend fun awaitReplay(): String {
+    private suspend fun awaitReplay(): Pair<Boolean, String> {
         val deadline = System.currentTimeMillis() + MAX_WAIT_MS
         while (System.currentTimeMillis() < deadline) {
             if (IrminsulCapture.replayFinished.value) {
-                return "commands=${IrminsulCapture.packets.value.size}"
+                // `replayFinished` 只说"没有在飞的回放"，不说"整个文件都喂进去了"。
+                // 后者要看 replayError：读坏 / 句柄失效 / 打不开 / 被打断都会在那里留话，
+                // 而每一种都意味着库存是半截的 —— 半截的不能覆盖上一份完整输入。
+                val why = IrminsulCapture.replayError.value
+                return (why == null) to (
+                    why ?: "commands=${IrminsulCapture.packets.value.size}"
+                    )
             }
             delay(POLL_MS)
         }
-        return "到硬上限 ${MAX_WAIT_MS}ms（回放线程没回来）commands=${IrminsulCapture.packets.value.size}"
+        return false to "到硬上限 ${MAX_WAIT_MS}ms 回放线程没回来"
     }
 
     private fun countsOf(json: String): String {

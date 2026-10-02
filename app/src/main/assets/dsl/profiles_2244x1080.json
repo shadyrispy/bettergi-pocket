@@ -13,8 +13,8 @@
   "dictionaries": {
    "mappings": "tools/mappings.json",
    "keys": {
-    "weapons": 236,
-    "characters": 121,
+    "weapons": 242,
+    "characters": 123,
     "artifactSets": 56
    },
    "note": "1★/2★武器未收录（止扫靠稀有度判据）"
@@ -82,6 +82,20 @@
      74
     ],
     "format": "武器 {n}/{cap}"
+   },
+   "sort": {
+    "rect": [
+     695,
+     971,
+     755,
+     1031
+    ],
+    "center": [
+     725,
+     1001
+    ],
+    "template": "template_paixu_1000053497_469_1294_553_1378.jpg",
+    "note": "★2026-09-28 #117 武器扫描开局归零用（同 3200/2560 档）。2244×1080 帧上从 `_shots2244/_tmp/2244_weapon_backpack.png` 底部工具栏量得：奶油圆钮 x[696,755] y[972,1031]（60²，随分辨率缩放，与 3200 的 84²、2560 的 80² 一致）⇒ 中心 (725,1001)。列段分析确认孤立块（左「品质顺序」下拉、右锁定钮各有间隙）。⚠️ 本档 profile 同时服务华为实机，此坐标为 **BlueStacks 侧**实测；实机启用前需复量。"
    }
   },
   "artifact_backpack": {
@@ -1031,7 +1045,7 @@
    "setName": {
     "collect": false,
     "reason": "用户定稿(2026-09-01)：背包面板 set_name 被遮挡 OCR 识别不到，不标定不采集；set_name 由圣遗物单件名 name 经词典反推",
-    "reverseDict": "tools/artifactSetPieces.json（pieceToSet 276 件/56 套，2026-09-02 自 biligame wiki 构建，四图 OCR 回验 4/4 命中）",
+    "reverseDict": "tools/good_names.json（artifactPieces 305 件/65 套，由 gen_mappings.py→gen_good_names.py 从游戏 Reliquary 表生成）",
     "archivedMeasure": "动态 set_top=800+nSubs*64(±4) 实测留档，勿用于采集"
    },
    "equipped": [

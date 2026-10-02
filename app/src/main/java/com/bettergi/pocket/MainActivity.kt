@@ -16,6 +16,8 @@ import com.bettergi.pocket.notice.NoticeRouter
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.core.widget.doAfterTextChanged
+import com.bettergi.pocket.scan.NameOverrides
 import com.bettergi.pocket.capture.CapturePermissionActivity
 import com.bettergi.pocket.pcdata.CaptureConsentActivity
 import com.esc.irminsul.capture.CaptureResult
@@ -267,6 +269,7 @@ class MainActivity : AppCompatActivity() {
         bindSwipeTest()
         renderAll()
         renderCaptureSection()
+        renderNameSection()
         // 悬浮窗点了某个脚本的「导入」动作 ⇒ 进管理器后立刻开选择器
         if (pendingPickGood) {
             pendingPickGood = false
@@ -391,6 +394,51 @@ class MainActivity : AppCompatActivity() {
                 )
             })
             if (!granted) setOnClickListener { openCaptureFix(kind) }
+        }
+    }
+
+    /**
+     * 「角色昵称」小节（#105）。旅行者/流浪者/奇偶的显示名由玩家自定义，词典以**官方中文名**为键
+     * ⇒ 结构性命中不了；原来那张内置猜测表的方向和 GT 对不上，已删（理由见 [NameOverrides]）。
+     *
+     * 每改一个字就落盘：这一页其余开关都是即点即生效，没有"保存"按钮的交互习惯；而引擎是
+     * **每次起扫现读**这张表 ⇒ 不存在"忘了点保存 ⇒ 白扫一轮"。
+     */
+    private fun renderNameSection() {
+        val list = findViewById<android.widget.LinearLayout?>(R.id.name_override_list) ?: return
+        val hint = findViewById<TextView?>(R.id.name_override_hint)
+        val current = NameOverrides.load(this)
+        list.removeAllViews()
+        for ((field, label) in NameOverrides.FIELDS) list.addView(nameOverrideRow(label, field, current.valueOf(field)))
+        hint?.text = "填了才会归一成 GOOD 键；留空则保留原文并在日志里报出来。" +
+            "⚠️ 昵称优先于词典：填成别的角色的名字会把那位认成这位。"
+    }
+
+    private fun nameOverrideRow(label: String, field: String, value: String?): android.view.View {
+        return android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            minimumHeight = dp(48)
+            layoutParams = android.widget.LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) }
+            addView(TextView(this@MainActivity).apply {
+                text = label
+                textSize = 14f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.pocket_text))
+                layoutParams = android.widget.LinearLayout.LayoutParams(dp(130), -2)
+            })
+            // 先 setText 再挂监听：否则回填会立刻触发一次"保存"，把空值写回自己。
+            addView(EditText(this@MainActivity).apply {
+                setText(value.orEmpty())
+                textSize = 14f
+                maxLines = 1
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, -2, 1f)
+                doAfterTextChanged { e ->
+                    NameOverrides.save(
+                        this@MainActivity,
+                        NameOverrides.load(this@MainActivity).withField(field, e?.toString()?.trim()),
+                    )
+                }
+            })
         }
     }
 

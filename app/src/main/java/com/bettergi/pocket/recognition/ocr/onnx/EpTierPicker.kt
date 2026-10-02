@@ -65,13 +65,47 @@ object EpTierPicker {
      * 那为什么还要实测、不直接写死 2：① 上面这组数说明**跨会话绝对值能漂 ±60%**
      * （intra=2 在 406~818ms 之间），写死别的机型/版本没有依据；② 但既然实测本身这么抖，
      * 择优就必须带**余量**和**足够重复次数**，否则它会把 2 换成 4、白丢 2.3×
-     * （15:57 那次就是这么选的）。当前 `benchmarkIntra` 只有 runs=3、且无余量 ⇒ 见 #74。
+     * （15:57 那次就是这么选的）。⇒ 已由 #74 落地：`benchmarkIntra` runs 3→**15**，
+     * 换档判据改走 [pickIntraOp]（挑战者必须比 incumbent 快 ≥20% 才换）。
      *
      * 上界取 `bigCoreCount`（读不到就退回 2，**不猜**）：小核上开满线程只会加剧同步开销。
      */
     fun intraOpCandidates(caps: DeviceCapabilities): List<Int> {
         val ceiling = if (caps.bigCoreCount > 0) caps.bigCoreCount.coerceAtMost(8) else 2
         return listOf(2, 4, 6).map { it.coerceAtMost(ceiling).coerceAtLeast(1) }.distinct()
+    }
+
+    /** 换档所需的最小优势（相对 incumbent 的中位耗时，%）。见 [pickIntraOp]。 */
+    const val INTRA_SWITCH_MARGIN_PCT = 20
+
+    /**
+     * intra-op **换档**判据（#74）：默认留住 incumbent，除非有档位**快出余量**才换。
+     *
+     * 为什么不是"取最小中位数"：真机同机构建的实测里 `intra=4` 五轮有四轮比 2 慢 2.2~2.3×，
+     * 而基准本身只有 3 次、无余量时，一次抖动读数（15:57 那次 254ms）就足以把生产路径
+     * 永久调到慢档。换档是**不可逆的**（服务活多久就多久），所以偏向不动。
+     *
+     * 判式：`best` 为实测最小中位者；仅当 `best` 比 `incumbent` 快 ≥[INTRA_SWITCH_MARGIN_PCT]%
+     * （即 `best·100 ≤ inc·(100−margin)`）才返回 `best`，否则返回 `incumbent`。
+     *
+     * 退化情形一律**保守**：
+     * - 表空 / 只有 incumbent ⇒ incumbent；
+     * - incumbent 没测到（或测得 `Long.MAX_VALUE` = 建会话失败）⇒ 取实测最小者（没得比，不动只会更糟）；
+     * - 恰好等于门槛 ⇒ 不换（`≤` 里取严格更快才换，边界留给"不动"）。
+     */
+    fun pickIntraOp(
+        mediansMs: Map<Int, Long>,
+        incumbent: Int,
+        marginPct: Int = INTRA_SWITCH_MARGIN_PCT,
+    ): Int {
+        if (mediansMs.isEmpty()) return incumbent
+        val best = mediansMs.entries.minByOrNull { it.value }?.key ?: return incumbent
+        val inc = mediansMs[incumbent] ?: return best      // incumbent 没测到 ⇒ 没基准可守
+        val bestMs = mediansMs.getValue(best)              // ⚠️ 比的是**毫秒**；`best` 是线程数，别混用
+        if (inc == Long.MAX_VALUE) return best             // incumbent 建会话失败 ⇒ 必须换
+        if (best == incumbent) return incumbent
+        if (bestMs * 100L >= inc * (100L - marginPct)) return incumbent   // 优势不足（含恰好等于门槛）⇒ 留住原档
+        return best
     }
 
     /** 首启基准：可用档中取中位延迟最小者；无可用数据则落 CPU */

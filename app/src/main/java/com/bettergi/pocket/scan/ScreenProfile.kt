@@ -401,17 +401,13 @@ class ScreenProfile(
      *   **代价**：|δ|>带半高的页仍会漏 —— 解是给该档量出 `clickBand`/`labelAnchor`，不是继续用窗赌。
      *   （六个背包网格已全部标定：#53 = 2560 武器，#56 = 3200/2244 两档四个网格。）
      *
-     * ★★ 已知未修（2026-09-25 审计发现 = 任务 #64）★★
-     * `ScanEngine` 的 `clickFloor` 取 `-clickDy`（回到**名义行顶**），这只对 `clickBand` 上沿为 0
-     * 的网格成立。2244 圣遗物是唯一例外：`clickBand=[53,242]`，因其 `cardOrigin.y=162` 比
-     * **真实卡顶 215** 高 53px（标定时刻意把带顶对到真实卡顶）⇒ 旧下界允许把行 0 的点击放到
-     * 真实卡顶之上 53px 的 UI 区。正确值应为 `-(clickDy - bandTop)`，需要在 [GridGeometry] 里
-     * 带出 `bandTop` 才能算（不能从 [clickHalf] 反推：两侧取 min 会丢掉是哪一侧绑定的）。
-     * ⚠️ 实测：**未观测到实际损害** —— 2244 圣遗物一轮最深 δ=−99，旧下界 −147 从未被触碰。
-     *   我曾把该档"只导出 957 件、3★ 整层缺失"归因到本条，**已被否证**（修前 957 / 修后 958，
-     *   且 5★展示开关 ON、OFF 两种起始态都 ~957）；截断另有成因，见任务 #65。
-     *   因此本条按"未证明有害的几何隐患"暂不修，避免把无事故背书的行为变更混进提交。
-     * 另注：本函数（安全窗）不受影响 —— shiftCap=62 < 带顶到锚点的 94 ✓。
+     * ★ 2244 圣遗物 `clickBand` 上沿为 0 的例外（任务 #64，已修）：
+     * `clickBand=[53,242]`，`cardOrigin.y=162` 比真实卡顶 215 高 53px。本函数的安全窗
+     * 本身不受影响（shiftCap=clickHalf×2/3=62 ≪ clickDy−bandTop=94）；真正受影响的是
+     * `ScanEngine` 的**点击下界**（`clickFloor`），改取 `−(clickDy − bandTop)` = 真实卡顶，
+     * 本 [GridGeometry] 已带出 [GridGeometry.bandTop] 供其计算（旧值 `−clickDy` 会放行到
+     * 名义行顶 162 = 真实卡顶之上 53px）。多数字段 / 未标定带 `bandTop=0`，`−(clickDy−0)=−clickDy`
+     * 与旧值一致。
      */
     fun clickShiftCapFor(gridKey: String): Int {
         val g = gridGeometryFor(gridKey) ?: return 0
@@ -456,7 +452,7 @@ class ScreenProfile(
         if (colX != null && rowY != null && colX.length() >= cols && rowY.length() >= 2) {
             return GridGeometry(
                 cols = cols, cardW = cardW, cardH = cardH,
-                clickDy = clickDy, clickHalf = clickHalf, clickBandCalibrated = bandOk,
+                clickDy = clickDy, clickHalf = clickHalf, bandTop = bandTop, clickBandCalibrated = bandOk,
                 labelAnchor = labelAnchor,
                 colXs = IntArray(cols) { colX.getInt(it) },
                 rowYs = IntArray(rowY.length()) { rowY.getInt(it) + gridRowOffset },
@@ -468,7 +464,7 @@ class ScreenProfile(
         if (vis < 2) return null
         return GridGeometry(
             cols = cols, cardW = cardW, cardH = cardH,
-            clickDy = clickDy, clickHalf = clickHalf, clickBandCalibrated = bandOk,
+            clickDy = clickDy, clickHalf = clickHalf, bandTop = bandTop, clickBandCalibrated = bandOk,
             labelAnchor = labelAnchor,
             colXs = IntArray(cols) { origin.getInt(0) + it * pitch.getInt(0) },
             rowYs = IntArray(vis) { origin.getInt(1) + gridRowOffset + it * pitch.getInt(1) },
@@ -484,6 +480,12 @@ class ScreenProfile(
         val clickDy: Int,
         /** 可点带半高（基准 px）= 点击平移量 |φ| 的上限（标定过带时再乘安全余量）。 */
         val clickHalf: Int,
+        /**
+         * 可点带**上沿**相对行顶的偏移（基准 px）。`ScanEngine` 用它算 `clickFloor`：
+         * 多数字段带卡在 0 ⇒ 地板 = `−clickDy`；2244 圣遗物带 = [53,242]（cardOrigin.y 比真实卡顶
+         * 高 53px）⇒ 地板 = `−(clickDy − bandTop)`。**#64**：未标定带默认 = 0（沿用旧值）。
+         */
+        val bandTop: Int,
         /** 该网格是否标定过 `clickBand`（只有标定过的才施加安全余量）。 */
         val clickBandCalibrated: Boolean,
         /** 行顶 → 卡内底栏（等级标签亮带）中心 的偏移（基准 px）；-1 = 未标定 ⇒ [GridAlign.rowPhase] 不适用。 */

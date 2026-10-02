@@ -7,10 +7,11 @@ import org.json.JSONObject
 /**
  * 单一名称词典（dsl/tools/good_names.json）：角色 / 武器 / 套装 / **单件** / 词条 / 部位。
  *
- * 由 `dsl/scripts/gen_good_names.py` 生成：
- * - characters / weapons / artifactSets 来自 GOOD 官方 mappings
- * - artifactPieces（276 件）来自我们梳理的 `dsl/tools/artifactSetPieces.json`
- *   —— GOOD 未覆盖这一段，而背包详情面板 set_name 被遮挡，须由单件名反推套装
+ * 由 `dsl/scripts/gen_mappings.py` → `dsl/scripts/gen_good_names.py` 生成（全程无手写源）：
+ * - characters / weapons / artifactSets 来自 GenshinTools 游戏数据（AnimeGameData 派生）
+ * - artifactPieces（305 件）：中文名来自游戏 Reliquary 表（Snap.Metadata），
+ *   套装 id 来自 ggartifact.com/good/data_cache.json 的 set_map（GOODScanner 同一张表）
+ *   —— GOOD 未发布这一段，而背包详情面板 set_name 被遮挡，须由单件名反推套装
  * - stats / slots 内置（原 StatParser 表 + irminsul NameMapper 别名）
  *
  * 匹配统一走 [NameMatcher]，本类只负责装载与按类型取表。

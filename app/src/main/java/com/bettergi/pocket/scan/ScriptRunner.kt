@@ -45,6 +45,19 @@ class ScriptRunner(
     private val running: Boolean
         get() = currentJob?.isActive == true
 
+    /**
+     * 学到的**账户级**性质，跨轮持久。目前只有「上锁确认框不再弹」——那是一次性提示，
+     * 账户在本设备确认过就永不复现，每轮从零重学等于每轮白等 1.5s。
+     * 单独一个 prefs 文件：它不是用户设置，清了也不该影响任何开关。
+     */
+    private fun learnedPrefs() = appContext.getSharedPreferences("bp_learned", Context.MODE_PRIVATE)
+
+    private fun lockConfirmAbsentLearned() = learnedPrefs().getBoolean("lock_confirm_absent", false)
+
+    private fun rememberLockConfirmAbsent() {
+        learnedPrefs().edit().putBoolean("lock_confirm_absent", true).apply()
+    }
+
     private val actions = object : ScanEngine.ActionGateway {
         override fun tap(x: Int, y: Int): Boolean {
             val dispatched = dispatchOnMain {
@@ -270,12 +283,19 @@ class ScriptRunner(
                     actions = timedActions, // 只读计时装饰器（委托 actions，行为不变）
                     ocr = OcrGatewayImpl(),
                     names = names,
+                    // #105：玩家自定义昵称（管理器页填，账号相关 ⇒ 每次起扫现读，不做进程内缓存）
+                    nameOverrides = NameOverrides.load(appContext),
                     listener = listener,
                     maxPages = maxPages,
                     useGeometryAdvance = useGeometryAdvance,
                     plan = plan,
                     // §13：流程名 → 识别日志的来源标签（LOCK/EQUIP/CHAR/SCAN）
                     flowName = flowName,
+                    lockConfirmAbsentLearned = lockConfirmAbsentLearned(),
+                    onLockConfirmAbsentLearned = { rememberLockConfirmAbsent() },
+                    // #83：页首前台闸门。null（无障碍未连接/还没观察到窗口切换）= 放行，
+                    // 与注入侧 `allowInject` 对"未知"的口径一致 —— 拦它会把整条流程变全 false。
+                    foregroundOk = { InputAccessibilityService.isGenshinInForeground() ?: true },
                 )
                 // ★ 2026-09-14：取消扫描期常驻穿透，回到逐点 prepare/restore（OverlayWindowController
                 //   内调用点均健在）。e63f7a4 引入常驻穿透是为防悬浮窗盖住操作区时手势 UP 不穿透；

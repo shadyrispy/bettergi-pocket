@@ -360,6 +360,17 @@ class InputAccessibilityService : AccessibilityService() {
                 putInt(KEY_TO_Y, toY)
                 putLong(KEY_DURATION, durationMs)
                 putInt(KEY_SEGMENTS, segments)
+                // ★ #44：这条 extra 原来**没放** ⇒ 接收端 `parseMethod(null)` 落到 else 分支，
+                //   恒用 waypoint_chain —— 而本文件上面 `method` 形参的注释写着 waypoint_chain
+                //   "实测不稳（帧差仅 0.27%）、翻页间歇性落地=0px"、已在 2026-09-14 换成三段式。
+                // ⚠️ 这**不是**冷启动边角：清单里本服务声明了 `android:process=":a11y"`
+                //   （AndroidManifest.xml:98），扫描跑主进程 ⇒ `instance` 在主进程恒 null ⇒
+                //   **Bundle 这条路就是唯一的生产路径**。所以 09-14 那次"改默认"在真机上
+                //   从未生效过，历次扫描一直在用被换掉的那一种。
+                //   设备实证（2026-09-27 修后 3 页扫描）：`swipe3 段1 dispatch accepted=true`
+                //   出自 pid 11141（:a11y），而扫描在 pid 11166（主进程）—— 三段式只有
+                //   靠这条 extra 才能跨过进程桥，修前这条日志根本不会出现。
+                putString(KEY_METHOD, methodKey(method))
             }
             return remoteCall(METHOD_SWIPE, extras)?.getBoolean(KEY_OK, false) == true
         }
@@ -476,17 +487,29 @@ class InputAccessibilityService : AccessibilityService() {
                     .build()
                 return service.dispatchGesture(gesture, callback(onDone), null)
             }
-            if (method == SwipeMethod.THREE_SEGMENT) {
+            // ★ #45：原来这里**无条件 `return true`**，把两条多段路径的真实受理结果丢掉 ⇒
+            //   日志里的 `accepted=true` / `visit cell(...) ok=true` 对三段式与路标链一律无意义
+            //   （只有 `segments <= 1` 那条返回了真的 dispatch 结果）。现在返回首段受理值：
+            //   整链是否闭合仍由 onDone 报，但至少"手势根本没被系统接走"这一步不再被伪装成成功。
+            return if (method == SwipeMethod.THREE_SEGMENT) {
                 swipeThreeSegment(service, fromX, fromY, toX, toY, onDone)
             } else {
                 swipeWaypointChain(service, fromX, fromY, toX, toY, onDone)
             }
-            return true
         }
 
         /**
          * 三段式滑动（对齐 irminsul/genshin-scanner-app 已验证实现）：3 路 continueStroke 链。
          * 段1 快滑 90% → 段2 缓速 10%（越过终点 1px）→ 段3 回退 1px 精确落在终点（末速≈0 无 fling）。
+         *
+         * ★ #83（2026-09-27）：前台闸门**逐段重判**。原来只在 [swipeLocal] 入口判一次，而整链
+         *   ~800ms 是异步的 —— 中途用户切走原神（或弹窗盖住），段2/段3 照样打到新前台，
+         *   等于在别人的 app 上继续拖拽（正是闸门要防的那件事）。
+         *   ⚠️ 被拒时**只停止派发、不补收尾段**：那时前台已经不是原神，补发的任何 gesture 都会
+         *   落进那个陌生 app（1px 拖拽在按钮上照样能激活）⇒ 补发等于自己破功。
+         *   "手指留在按下态"的代价可接受：下一次这类滑动的 ACTION_DOWN 会重置它，且用户实测口径
+         *   是**游戏切后台本来就会断线重登**，那条手势的归宿无关紧要。
+         *   代价必须说清楚：本次滑动**位移不足、页面没翻** ⇒ 如实回报 false，调用方不得重发（#75）。
          */
         private fun swipeThreeSegment(
             service: AccessibilityService,
@@ -495,12 +518,12 @@ class InputAccessibilityService : AccessibilityService() {
             toX: Int,
             toY: Int,
             onDone: ((Boolean) -> Unit)?,
-        ) {
+        ): Boolean {
             val dx = toX - fromX
             val dy = toY - fromY
             if (dx == 0 && dy == 0) {
                 onDone?.invoke(false)
-                return
+                return false
             }
             val midX = fromX + Math.round(dx * SWIPE_FAST_RATIO)
             val midY = fromY + Math.round(dy * SWIPE_FAST_RATIO)
@@ -528,6 +551,21 @@ class InputAccessibilityService : AccessibilityService() {
                 if (state.startsWith("断")) Log.w(TAG, line) else Log.i(TAG, line)
             }
 
+            /**
+             * #83：链中途闸门关闭时的收尾 —— **不再派发任何段**，只如实回报 false。
+             *
+             * 为什么不补一段"零位移收尾"把手指抬起来（我一度这么写过，已否掉）：
+             * 那时**前台已经不是原神**了，补发的任何 gesture 都会落进那个陌生 app
+             * （1px 拖拽在按钮上照样能激活）—— 闸门要防的正是这件事，补发等于自己破功。
+             * 而"手指留在按下态"只需等下一次这类滑动/点击的 ACTION_DOWN 就会重置；
+             * 且用户实测口径：**游戏切后台本来就会断线重登**，那条手势的归宿无关紧要。
+             * 代价是说清楚：本次滑动**位移不足、页面没翻**，调用方不得重发（#75）。
+             */
+            fun abortNoDispatch(seg: Int) {
+                mark(seg, "断：前台已不是原神（闸门关闭）⇒ 停止派发后续段，本次滑动作废")
+                onDone?.invoke(false)
+            }
+
             val s1 = GestureDescription.StrokeDescription(
                 Path().apply {
                     moveTo(fromX.toFloat(), fromY.toFloat())
@@ -546,6 +584,11 @@ class InputAccessibilityService : AccessibilityService() {
                         return@callback
                     }
                     mark(1, "完成")
+                    // ★ #83：段1 用了 ~400ms，闸门可能已经变了 ⇒ 段2 派发前重判
+                    if (!allowInject("swipe 段2")) {
+                        abortNoDispatch(2)
+                        return@callback
+                    }
                     val s2 = s1.continueStroke(
                         Path().apply {
                             moveTo(midX.toFloat(), midY.toFloat())
@@ -564,6 +607,11 @@ class InputAccessibilityService : AccessibilityService() {
                                 return@callback
                             }
                             mark(2, "完成")
+                            // ★ #83：段2 又用了 ~300ms ⇒ 段3 派发前再重判一次
+                            if (!allowInject("swipe 段3")) {
+                                abortNoDispatch(3)
+                                return@callback
+                            }
                             val s3 = s2.continueStroke(
                                 Path().apply {
                                     moveTo(preX.toFloat(), preY.toFloat())
@@ -596,12 +644,21 @@ class InputAccessibilityService : AccessibilityService() {
                 mark(1, "断：dispatch 被拒 ⇒ **手指未抬起**")
                 onDone?.invoke(false)
             }
+            return accepted
         }
 
         /**
          * 路标链滑动（§12.2 改造，2026-09-05）：把三段长笔画降为「快滑 90%（4×80ms）→
          * 缓速 10%（3×120ms）→ 越过终点 1px → 回退 1px（100ms）」的 9 路标点短笔画链，
          * 每路 willContinue 串联，事件密度与 uiauto 标定手势一致（行为确定 std≤4px）。
+         *
+         * 返回值 = **首路** dispatch 是否被受理。后续路点在回调里异步派发，它们的受理结果
+         * 无法在本次调用返回时已知；整链是否闭合由 [onDone] 报（断链同样在那里报 false）。
+         *
+         * ★ #83（2026-09-27）：与 [swipeThreeSegment] 同款 —— **每路派发前重判前台闸门**。
+         *   本链共 9 路、整链 ~800ms 全在异步回调里，只在入口判一次的话，用户中途切走原神后
+         *   剩下的路点照样打在那个陌生 app 上。被拒时只停止派发、不补收尾路（理由见
+         *   `abortNoDispatchWp`）。
          */
         private fun swipeWaypointChain(
             service: AccessibilityService,
@@ -610,12 +667,12 @@ class InputAccessibilityService : AccessibilityService() {
             toX: Int,
             toY: Int,
             onDone: ((Boolean) -> Unit)?,
-        ) {
+        ): Boolean {
             val dx = toX - fromX
             val dy = toY - fromY
             if (dx == 0 && dy == 0) {
                 onDone?.invoke(false)
-                return
+                return false
             }
             val fSteps = com.bettergi.pocket.scan.TimingOverrides.swipeFastSteps
             val fMs = com.bettergi.pocket.scan.TimingOverrides.swipeFastMs
@@ -651,7 +708,22 @@ class InputAccessibilityService : AccessibilityService() {
             }
             waypoints.add(intArrayOf(toX, toY, bMs.toInt()))
 
-            fun dispatchWaypoint(index: Int, stroke: GestureDescription.StrokeDescription) {
+            /**
+             * #83：链中途闸门关闭 ⇒ **不再派发后续路点**，只如实回报 false。
+             * 与三段式的 abortNoDispatch 同一条理由：那时前台已不是原神，
+             * 补发的任何 gesture 都会落进那个陌生 app（1px 拖拽在按钮上照样能激活）。
+             * 代价同样说清楚：本次滑动**位移不足、页面没翻**（`willContinue=true` 的那只手势
+             * 还停在按下态），调用方不得重发（#75）。
+             */
+            fun abortNoDispatchWp(index: Int) {
+                Log.w(
+                    TAG,
+                    "wp[$index/${waypoints.lastIndex}] 断：前台已不是原神（闸门关闭）⇒ 停止派发后续路点，本次滑动作废",
+                )
+                onDone?.invoke(false)
+            }
+
+            fun dispatchWaypoint(index: Int, stroke: GestureDescription.StrokeDescription): Boolean {
                 val isLast = index == waypoints.lastIndex
                 val accepted = service.dispatchGesture(
                     GestureDescription.Builder().addStroke(stroke).build(),
@@ -666,6 +738,13 @@ class InputAccessibilityService : AccessibilityService() {
                             onDone?.invoke(true)
                         } else {
                             val nextIndex = index + 1
+                            // ★ #83：本链共 9 路、整链 ~800ms 且全在异步回调里 ⇒ 与三段式一样，
+                            //   每路派发前必须重判一次闸门，否则用户中途切走原神后剩下的路点
+                            //   会继续打在那个陌生 app 上（闸门要防的正是这件事）。
+                            if (!allowInject("swipe wp[$nextIndex]")) {
+                                abortNoDispatchWp(nextIndex)
+                                return@callback
+                            }
                             val wp = waypoints[nextIndex]
                             val nextStroke = stroke.continueStroke(
                                 Path().apply {
@@ -685,6 +764,7 @@ class InputAccessibilityService : AccessibilityService() {
                     Log.w(TAG, "wp[$index/${waypoints.lastIndex}] dispatch REJECTED")
                     onDone?.invoke(false)
                 }
+                return accepted
             }
 
             val first = waypoints[0]
@@ -697,10 +777,19 @@ class InputAccessibilityService : AccessibilityService() {
                 first[2].toLong(),
                 /* willContinue = */ true,
             )
-            dispatchWaypoint(0, stroke)
+            return dispatchWaypoint(0, stroke)
         }
 
-        /** 方法字符串 → SwipeMethod（未知/空 = 路标链，生产默认）。 */
+        /** SwipeMethod → 跨进程 extra 的线格式；必须与 [parseMethod] 成对改。 */
+        private fun methodKey(method: SwipeMethod): String =
+            if (method == SwipeMethod.THREE_SEGMENT) "three_segment" else "waypoint_chain"
+
+        /**
+         * 线格式 → SwipeMethod。⚠️ else 分支兜到 waypoint_chain，而本服务跑在独立的 `:a11y`
+         * 进程 ⇒ 扫描侧的每次调用**都要**过这条线，所以"extra 没放"等于"生产默认被换掉"，
+         * 不是冷启动才有的小概率兜底。生产默认实际由 `swipe()` 的形参默认值决定，
+         * 但它只有配上 [methodKey] 把值送过来才算数。
+         */
         private fun parseMethod(value: String?): SwipeMethod =
             when (value) {
                 "three_segment" -> SwipeMethod.THREE_SEGMENT

@@ -162,6 +162,21 @@ class GridGeometryTest {
     }
 
     @Test
+    fun `2244 artifact bandTop surfaces in grid geometry for clickFloor fix 64`() {
+        // ★ #64：clickBand=[53,242] 的 bandTop=53 必须带出 GridGeometry，否则 clickFloor
+        //   只能用 −clickDy，会放行到名义行顶 = 真实卡顶之上 53px ⇒ 落到 UI 区。
+        val g = bandProfile(""" ,"clickBand":[53,242]""").gridGeometryFor("artifact_backpack")!!
+        assertEquals(53, g.bandTop)
+        assertEquals(147, g.clickDy)      // (53+242)/2
+        assertEquals(94, g.clickHalf)     // min(147−53, 242−147) = min(94,95)
+        // ScanEngine clickFloor = −(clickDy − bandTop) = −(147−53) = −94 = 真实卡顶
+        assertEquals(94, g.clickDy - g.bandTop)
+        // 一致性：未标定带 bandTop=0 ⇒ clickFloor = −clickDy（旧值不变）
+        val u = bandProfile("").gridGeometryFor("artifact_backpack")!!
+        assertEquals(0, u.bandTop)
+    }
+
+    @Test
     fun `click band drives both the anchor and the safe window`() {
         val p = bandProfile(""" ,"clickBand":[0,210]""")
         // 锚点 = 带中心（相对行顶 105），不再用 cardH/2=126（那会把点击放到卡下沿外）
@@ -282,5 +297,29 @@ class GridGeometryTest {
         assertEquals(227, w.labelAnchor)
         assertEquals(209, a.labelAnchor)
         assertNotEquals("武器档锚不得等于圣遗物档（两面板不同构）", a.labelAnchor, w.labelAnchor)
+    }
+
+    /**
+     * ★2026-09-28 #64：shipped 2244 **圣遗物**档的 `clickBand` 上沿不是 0（[53,242]），
+     * `bandTop` 必须带出 GridGeometry 供 ScanEngine 算 `clickFloor`；同档 **武器**带 [0,176]
+     * 上沿为 0 ⇒ `bandTop=0`，地板仍 = `−clickDy`（证明修复没顺手改掉无例外档的行为）。
+     */
+    @Test
+    fun `shipped 2244 artifact carries bandTop for clickFloor while weapon stays at zero`() {
+        val dir = File(System.getProperty("user.dir") ?: ".", "src/main/assets/dsl")
+        val p = ScreenProfile(JSONObject(File(dir, "profiles_2244x1080.json").readText()))
+            .apply { calibrate(2244, 1080) } // base 2244x1080 ⇒ scaleY=1，几何量 1:1
+        val a = p.gridGeometryFor("artifact_backpack")!!
+        assertEquals(53, a.bandTop)
+        assertEquals(147, a.clickDy)
+        assertEquals(94, a.clickHalf)
+        // clickFloor = −(clickDy − bandTop) = −(147−53) = −94 = 真实卡顶（旧 −147 放行到名义行顶）
+        assertEquals(94, a.clickDy - a.bandTop)
+        // 安全窗本身不受影响（#64 改的是地板不是窗）：shiftCap=94×2/3=62 ≪ 94 ⇒ 落点仍在带内
+        assertEquals(62, p.clickShiftCapFor("artifact_backpack"))
+        // 武器档无例外 ⇒ bandTop=0，clickFloor 与旧值 −clickDy 逐位一致（无回归）
+        val w = p.gridGeometryFor("weapon_backpack")!!
+        assertEquals(0, w.bandTop)
+        assertEquals(w.clickDy, w.clickDy - w.bandTop)
     }
 }
