@@ -60,7 +60,7 @@ class LandingBandProfileTest {
         val p = profile("profiles_2560x1440.json", 2560, 1440)
         val a = p.landingBandFor("artifact_backpack")
         assertNotNull("2560 档须登记（网格层为实机标定，不可由 3200 反推）", a)
-        assertEquals(1000, a!!.x0); assertEquals(1840, a.x1)
+        assertEquals(1000, a!!.x0); assertEquals(1600, a.x1)
         assertEquals(1124, a.y0); assertEquals(1239, a.y1)
         assertEquals(0, a.sy0); assertEquals(1239, a.sy1)
         val w = p.landingBandFor("weapon_backpack")
@@ -117,6 +117,20 @@ class LandingBandProfileTest {
                     Math.abs(b.y0 - expected) <= 2,
                 )
                 assertTrue("$name/$g 条带高应 > 8px（模板太薄无法匹配）", b.y1 - b.y0 > 8)
+                // ★ 2026-09-24 加（水平不变量）：条带 x1 **不得越过网格右缘**。
+                //   越过即把右侧**详情面板**包进模板 —— 面板内容随选中件变化 ⇒ 翻页后必有一块
+                //   对不上（本测试 KDoc 的 risk1b 反例："含静态区的带 score 只有 0.35"；实测 2560
+                //   拒因正是 score=0.34）。2560 原 x1=1840 越出 231px（网格右缘 1609 / 面板左缘 1704），
+                //   而其余五条（3200/2244 各两格）都恰好贴在网格右缘上 ⇒ 用规则而非字面量守住它。
+                val originX = raw.getJSONArray("cardOrigin").getInt(0)
+                val pitchX = raw.getJSONArray("pitch").getInt(0)
+                val cardW = raw.getJSONArray("cardSize").getInt(0)
+                val cols = raw.getInt("cols")
+                val gridRight = originX + (cols - 1) * pitchX + cardW
+                assertTrue(
+                    "$name/$g landingBand.x1=${b.x1} 越过网格右缘 $gridRight（$cols 列）⇒ 会把详情面板纳入模板",
+                    b.x1 <= gridRight,
+                )
                 checked++
             }
         }

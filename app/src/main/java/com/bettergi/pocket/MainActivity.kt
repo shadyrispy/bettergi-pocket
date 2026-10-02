@@ -17,6 +17,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.bettergi.pocket.capture.CapturePermissionActivity
+import com.bettergi.pocket.pcdata.CaptureConsentActivity
+import com.esc.irminsul.capture.CaptureResult
+import com.esc.irminsul.capture.IrminsulCapture
+import com.esc.irminsul.capture.PermissionKind
 import com.bettergi.pocket.scan.GoodRepository
 import com.bettergi.pocket.input.SwipeMethod
 import com.bettergi.pocket.input.SwipeTestRunner
@@ -25,13 +29,17 @@ import com.bettergi.pocket.service.TriggerForegroundService
 /**
  * 启动壳 + service 中转（fix53）：
  * - 正常路径：交棒悬浮窗后即退出（零常驻）
- * - service 兜底拉前台：EXTRA_AUTO_REQUEST_CAPTURE（投影授权，前台内发起）/ EXTRA_AUTO_SHARE（前台起分享 chooser）
+ * - service 兜底拉前台：EXTRA_AUTO_REQUEST_CAPTURE（投影授权，前台内发起）/
+ *   EXTRA_AUTO_REQUEST_VPN（抓包 VPN 授权，同一条兜底）/ EXTRA_AUTO_SHARE（前台起分享 chooser）
  */
 class MainActivity : AppCompatActivity() {
 
     companion object {
         /** service 兜底：拉前台后前台内发起投影授权。 */
         const val EXTRA_AUTO_REQUEST_CAPTURE = "auto_request_capture"
+
+        /** service 兜底：拉前台后前台内发起 VPN 授权（抓包隧道，与投影同一条兜底路子）。 */
+        const val EXTRA_AUTO_REQUEST_VPN = "auto_request_vpn"
 
         /** service 兜底：拉前台后前台内起分享 chooser（值为 files 下文件名）。 */
         const val EXTRA_AUTO_SHARE = "auto_share"
@@ -98,6 +106,7 @@ class MainActivity : AppCompatActivity() {
     /** P3：管理器界面已展示 ⇒ onResume 不得再用旧的「悬浮窗授权」分支覆盖它。 */
     private var managerShown = false
     private var pendingCaptureRequest = false
+    private var pendingVpnRequest = false
     private var pendingShareFile: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -141,6 +150,9 @@ class MainActivity : AppCompatActivity() {
         if (intent.getBooleanExtra(EXTRA_AUTO_REQUEST_CAPTURE, false)) {
             pendingCaptureRequest = true
         }
+        if (intent.getBooleanExtra(EXTRA_AUTO_REQUEST_VPN, false)) {
+            pendingVpnRequest = true
+        }
         intent.getStringExtra(EXTRA_AUTO_SHARE)?.let { pendingShareFile = it }
     }
 
@@ -155,7 +167,11 @@ class MainActivity : AppCompatActivity() {
             return
         }
         // 管理器界面优先，不能被下面两个中转分支顶掉（曾实测被覆盖 ⇒ 首启仍显示别的界面 ✗）
-        if (managerShown) return
+        if (managerShown) {
+            // 从系统设置页回来 ⇒ 抓包权限小节要重新判一遍（其余界面不重绘，避免打断操作）
+            renderCaptureSection()
+            return
+        }
         // ⚠️ 2026-09-18：这里原先还有一个「显示在上层」授权分支 —— 悬浮窗搬到无障碍进程后
         //    （TYPE_ACCESSIBILITY_OVERLAY 零权限）已整体删除，只剩投影授权与分享两个中转。
         when {
@@ -164,6 +180,14 @@ class MainActivity : AppCompatActivity() {
                 pendingCaptureRequest = false
                 startActivity(
                     Intent(this, CapturePermissionActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            }
+            // 前台内发起 VPN 授权（抓包隧道；服务后台拉中转页被 ROM 拦时的同一条兜底）
+            pendingVpnRequest -> {
+                pendingVpnRequest = false
+                startActivity(
+                    Intent(this, CaptureConsentActivity::class.java)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 )
             }
@@ -242,6 +266,7 @@ class MainActivity : AppCompatActivity() {
         bindSwipeRow()
         bindSwipeTest()
         renderAll()
+        renderCaptureSection()
         // 悬浮窗点了某个脚本的「导入」动作 ⇒ 进管理器后立刻开选择器
         if (pendingPickGood) {
             pendingPickGood = false
@@ -275,6 +300,104 @@ class MainActivity : AppCompatActivity() {
             android.content.res.ColorStateList.valueOf(
                 ContextCompat.getColor(this, if (connected) R.color.pocket_ok else R.color.pocket_warn),
             )
+    }
+
+    /**
+     * 「抓包权限」小节（C2 与 bp 授权 UI 的融合点）。
+     *
+     * 两条纪律：① 状态**一律由库判**（`refreshPermissions` 里已含 ROM 差异与"本 app 没声明
+     * 通知权限就不算卡着"这类语义），界面不自己 checkPermission；② 「去开启」只调
+     * `openFixSettings(kind)`，宿主不拼系统 intent —— 否则每家 ROM 的跳转链要在这里重写一遍。
+     *
+     * 整行可点（与顶部状态卡同一交互习惯），所以不为一个按钮再造样式。
+     */
+    private fun renderCaptureSection() {
+        val list = findViewById<android.widget.LinearLayout?>(R.id.capture_list) ?: return
+        val hint = findViewById<TextView?>(R.id.capture_hint)
+        when (val support = IrminsulCapture.probeNativeSupport()) {
+            is CaptureResult.Err -> {
+                list.removeAllViews()
+                hint?.text = "这台设备跑不了抓包（原生库只出 arm64-v8a）：${support.error}"
+                return
+            }
+            is CaptureResult.Ok -> Unit
+        }
+        val p = IrminsulCapture.refreshPermissions(this)
+        list.removeAllViews()
+        list.addView(
+            captureRow(
+                "VPN 隧道",
+                p.vpnPermissionGranted,
+                "抓包要把游戏流量导进隧道",
+                "未授权 · 点此授权",
+                PermissionKind.Vpn,
+            ),
+        )
+        if (!p.batteryOptimizationExempt) {
+            list.addView(
+                captureRow(
+                    "忽略电池优化",
+                    false,
+                    "",
+                    "系统可能中途杀掉长时间抓包 · 点此设置",
+                    PermissionKind.BatteryOptimization,
+                ),
+            )
+        }
+        if (p.needsAutoStart) {
+            list.addView(
+                captureRow(
+                    "允许自启动",
+                    false,
+                    "",
+                    "这台 ROM 不开自启隧道起不来 · 点此设置",
+                    PermissionKind.AutoStart,
+                ),
+            )
+        }
+        val tail = if (p.romHint.isBlank()) "" else "\n${p.romHint}"
+        hint?.text = "抓包开关在悬浮窗「抓包采集」：解齐四段数据后自动入库并收回隧道，" +
+            "不持久化、重启不会自己开$tail"
+    }
+
+    private fun captureRow(
+        title: String,
+        granted: Boolean,
+        okText: String,
+        pendingText: String,
+        kind: PermissionKind,
+    ): android.view.View {
+        return android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            minimumHeight = dp(56)
+            setPadding(dp(14), dp(10), dp(10), dp(10))
+            background = ContextCompat.getDrawable(this@MainActivity, R.drawable.bg_pocket_card_outline)
+            layoutParams = android.widget.LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) }
+            addView(TextView(this@MainActivity).apply {
+                text = title
+                textSize = 16f
+                setTextColor(ContextCompat.getColor(this@MainActivity, R.color.pocket_text))
+                layoutParams = android.widget.LinearLayout.LayoutParams(0, -2, 1f)
+            })
+            addView(TextView(this@MainActivity).apply {
+                text = if (granted) okText.ifBlank { "已就绪" } else pendingText
+                textSize = 12f
+                setTextColor(
+                    ContextCompat.getColor(
+                        this@MainActivity,
+                        if (granted) R.color.pocket_ok else R.color.pocket_warn,
+                    ),
+                )
+            })
+            if (!granted) setOnClickListener { openCaptureFix(kind) }
+        }
+    }
+
+    private fun openCaptureFix(kind: PermissionKind) {
+        if (IrminsulCapture.openFixSettings(this, kind) is CaptureResult.Err) {
+            NoticeCenter.error("这台设备找不到「$kind」对应的设置页")
+        }
     }
 
     // ---- 首次启动引导（只做竖屏：走到这里说明还没启动原神，设备是竖持的）----

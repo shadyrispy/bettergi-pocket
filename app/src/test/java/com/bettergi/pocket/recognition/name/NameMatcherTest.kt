@@ -105,12 +105,14 @@ class NameMatcherTest {
     }
 
     // ---------- 真实词典用例（模拟器实测错字对）----------
-    private fun names(): GoodNames {
+    private fun names(): GoodNames = GoodNames.fromJson(dictJson())
+
+    private fun dictJson(): JSONObject {
         var dir = File(System.getProperty("user.dir") ?: ".")
         repeat(4) {
             val candidate = File(dir, "src/main/assets/dsl")
             if (candidate.isDirectory) {
-                return GoodNames.fromJson(JSONObject(File(candidate, "tools/good_names.json").readText()))
+                return JSONObject(File(candidate, "tools/good_names.json").readText())
             }
             dir = dir.parentFile ?: return@repeat
         }
@@ -120,18 +122,32 @@ class NameMatcherTest {
     @Test
     fun `dictionary counts match generated meta`() {
         val n = names()
-        assertEquals(276, n.pieces.size)
-        assertEquals(236, n.weapons.size)
-        assertEquals(121, n.characters.size)
-        assertEquals(56, n.sets.size)
-        assertEquals(5, n.slots.size)
+        val meta = dictJson().getJSONObject("_meta").getJSONObject("counts")
+        assertEquals(meta.getInt("artifactPieces"), n.pieces.size)
+        assertEquals(meta.getInt("weapons"), n.weapons.size)
+        assertEquals(meta.getInt("characters"), n.characters.size)
+        assertEquals(meta.getInt("artifactSets"), n.sets.size)
+        assertEquals(meta.getInt("slots"), n.slots.size)
+        // 低星段必须真的进词典（2026-09-24 对账：缺这 30 条 ⇒ 9 件 3★ 被静默丢弃）
+        assertTrue(
+            "3★/4★ 低星单件名段不得为空",
+            meta.getInt("artifactPiecesLowRarity") >= 30,
+        )
         assertTrue("stats should include aliases", n.stats.size >= 16)
     }
 
+    /**
+     * 每件单件名必须指向"已知套"：GOOD artifactSets 里的 4★/5★，或 `_meta.lowRaritySetIds`
+     * 里**声明过**的 3★ 套（GOOD 只列 56 套，3★ 层整层不在其中）。豁免取自生成器写进文件的
+     * 机器可读字段，而不是测试里另抄一份清单 —— 词典加套时测试不会悄悄失真。
+     */
     @Test
     fun `every piece maps to a known artifact set`() {
         val n = names()
-        val setIds = n.sets.values.toSet()
+        val exempt = dictJson().getJSONObject("_meta").optJSONArray("lowRaritySetIds")
+            ?.let { a -> (0 until a.length()).map { a.getString(it) }.toSet() }
+            ?: emptySet()
+        val setIds = n.sets.values.toSet() + exempt
         for ((piece, setId) in n.pieces) {
             assertTrue("piece '$piece' → unknown set '$setId'", setId in setIds)
         }

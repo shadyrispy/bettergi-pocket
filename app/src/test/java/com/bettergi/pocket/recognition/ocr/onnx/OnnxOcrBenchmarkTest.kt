@@ -306,23 +306,123 @@ class OnnxOcrBenchmarkTest {
         assertEquals(1, OnnxPaddleOcrService.scaledWidthFor(0, 10))
     }
 
+    private fun caps(
+        vendor: String,
+        big: Int = 4,
+        arm64: Boolean = true,
+        qnn: Boolean = false,
+    ) = DeviceCapabilities(
+        socVendor = vendor,
+        socModel = "test-$vendor",
+        isArm64 = arm64,
+        cpuCount = big * 2,
+        bigCoreCount = big,
+        bigCoreMaxFreqKHz = 2_360_000,
+        qnnLibsLoadable = qnn,
+    )
+
     @Test
-    fun `EP 档位协商纯逻辑`() {
-        // NNAPI 已移出默认序：Bluestacks 上 NNAPI EP 在 libonnxruntime.so 内原生段错误
-        // （SIGSEGV 不可被 Java 捕获，app 启动即死），见 EpTierPicker.DEFAULT_ORDER 注释
+    fun `默认候选序只有 CPU —— 不把启动赌在抓不住的失败上`() {
+        // NNAPI：BlueStacks 与华为 P20 上都是 libonnxruntime.so 内原生 SIGSEGV（Java 抓不到，启动即崩）。
+        // XNNPACK：Kirin 970 上 createSession 挂起（同样抓不到，且会拖住后续建会话）。
+        // ⇒ 两者都要 allowRisky 才进候选；默认序必须与"直接选 CPU"的旧行为逐位一致。
+        listOf("qualcomm", "hisilicon", "mediatek", "samsung", "unknown").forEach { v ->
+            assertEquals(
+                "vendor=$v 默认不该尝试任何风险档",
+                listOf(EpTierPicker.Tier.CPU),
+                EpTierPicker.candidatesFor(caps(v)),
+            )
+        }
+    }
+
+    @Test
+    fun `QNN 只在高通且运行库可加载时进候选，并排在 CPU 前`() {
+        assertEquals(
+            listOf(EpTierPicker.Tier.QNN, EpTierPicker.Tier.CPU),
+            EpTierPicker.candidatesFor(caps("qualcomm", qnn = true)),
+        )
+        // 高通但没带库 ⇒ 不进（AAR 不含 libQnnHtp.so）
+        assertEquals(
+            listOf(EpTierPicker.Tier.CPU),
+            EpTierPicker.candidatesFor(caps("qualcomm", qnn = false)),
+        )
+        // 非高通即使误报"库可加载"也不给 QNN（纯函数自身要守住，不依赖采集层的闸门）
+        assertEquals(
+            listOf(EpTierPicker.Tier.CPU),
+            EpTierPicker.candidatesFor(caps("hisilicon", qnn = true)),
+        )
+    }
+
+    @Test
+    fun `allowRisky 才放出 XNNPACK 与 NNAPI，且海思永远不给 NNAPI`() {
+        // 高通 + 非模拟器：NNAPI 与 XNNPACK 都放出，按优先级排在 CPU 前
+        assertEquals(
+            listOf(EpTierPicker.Tier.NNAPI, EpTierPicker.Tier.XNNPACK, EpTierPicker.Tier.CPU),
+            EpTierPicker.candidatesFor(caps("qualcomm", qnn = false), allowRisky = true),
+        )
+        // 模拟器上即使 allowRisky 也不给 NNAPI（BlueStacks 实测 SIGSEGV）
         assertEquals(
             listOf(EpTierPicker.Tier.XNNPACK, EpTierPicker.Tier.CPU),
-            EpTierPicker.DEFAULT_ORDER,
+            EpTierPicker.candidatesFor(caps("unknown", arm64 = false), allowRisky = true),
         )
-        assertEquals(EpTierPicker.Tier.CPU, EpTierPicker.degrade(EpTierPicker.Tier.XNNPACK))
-        org.junit.Assert.assertNull("NNAPI 不在默认序，不应参与降档", EpTierPicker.degrade(EpTierPicker.Tier.NNAPI))
-        org.junit.Assert.assertNull("CPU 为兜底，不应再降", EpTierPicker.degrade(EpTierPicker.Tier.CPU))
+        // 海思：NNAPI 与 XNNPACK 都被排除（实测挂起），只剩 CPU
+        assertEquals(
+            "海思开了 allowRisky 也不该冒出风险档",
+            listOf(EpTierPicker.Tier.CPU),
+            EpTierPicker.candidatesFor(caps("hisilicon"), allowRisky = true),
+        )
+    }
+
+    @Test
+    fun `大核计数按逐核频率分组，不能按 cpufreq policy 目录数`() {
+        // 华为 P20 实测：4×1844000 + 4×2362000，但 /sys/.../cpufreq/ 下只有 policy0、policy1 两个目录。
+        // 按 policy 数会得出 big=1 ⇒ intra 候选退化成 {1} ⇒ 自动择优静默失效（真实踩过的坑）。
+        val p20 = List(4) { 1_844_000L } + List(4) { 2_362_000L }
+        assertEquals(4, DeviceCapabilities.topCount(p20, caps0 = 8))
+        // 同构核（只有一个值）⇒ 全部算"大核"，把候选放宽，后面有实测择优兜着
+        assertEquals(8, DeviceCapabilities.topCount(List(8) { 2_400_000L }, caps0 = 8))
+        // 真读不到 ⇒ 0，调用方据此退回保守候选，不猜
+        assertEquals(0, DeviceCapabilities.topCount(emptyList(), caps0 = 8))
+        // 2 小 + 6 大
+        assertEquals(6, DeviceCapabilities.topCount(List(2) { 1_800_000L } + List(6) { 2_800_000L }, caps0 = 8))
+    }
+
+    @Test
+    fun `intra-op 候选按大核簇收窄，读不到核数时退回单个 2`() {
+        // 华为 Kirin 970：4 大核 ⇒ 候选 {2,4}（6 被簇宽截断后与 4 重）
+        assertEquals(listOf(2, 4), EpTierPicker.intraOpCandidates(caps("hisilicon", big = 4)))
+        // 8 大核 ⇒ {2,4,6}
+        assertEquals(listOf(2, 4, 6), EpTierPicker.intraOpCandidates(caps("qualcomm", big = 8)))
+        // 双核小机器 ⇒ 只有 2
+        assertEquals(listOf(2), EpTierPicker.intraOpCandidates(caps("unknown", big = 2)))
+        // 读不到拓扑（big=0）⇒ 不猜，退回单候选 2 ⇒ prepare 会跳过基准
+        assertEquals(listOf(2), EpTierPicker.intraOpCandidates(caps("unknown", big = 0)))
+    }
+
+    @Test
+    fun `EP 降档沿调用方给的候选序，到兜底不再降`() {
+        val order = listOf(EpTierPicker.Tier.QNN, EpTierPicker.Tier.CPU)
+        assertEquals(EpTierPicker.Tier.CPU, EpTierPicker.degrade(EpTierPicker.Tier.QNN, order))
+        org.junit.Assert.assertNull("CPU 为兜底，不应再降", EpTierPicker.degrade(EpTierPicker.Tier.CPU, order))
+        org.junit.Assert.assertNull(
+            "不在序里的档不参与降档",
+            EpTierPicker.degrade(EpTierPicker.Tier.NNAPI, order),
+        )
+    }
+
+    @Test
+    fun `EP 基准择优取中位最小者，无数据落 CPU`() {
         assertEquals(
             EpTierPicker.Tier.XNNPACK,
             EpTierPicker.pickByBenchmark(
                 mapOf(EpTierPicker.Tier.XNNPACK to 40L, EpTierPicker.Tier.CPU to 60L),
                 setOf(EpTierPicker.Tier.XNNPACK, EpTierPicker.Tier.CPU),
             ),
+        )
+        assertEquals(
+            "没有任何基准数据时必须落 CPU",
+            EpTierPicker.Tier.CPU,
+            EpTierPicker.pickByBenchmark(emptyMap(), setOf(EpTierPicker.Tier.XNNPACK)),
         )
     }
 

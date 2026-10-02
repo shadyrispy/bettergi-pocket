@@ -171,6 +171,26 @@ class GridAlignTest {
         assertEquals(g0.rowYs.toList(), p.gridGeometryFor("artifact_backpack")!!.rowYs.toList())
     }
 
+    /**
+     * 相位 φ 是**帧**像素（由帧像素量的落地残差算出），而 `gridRowOffset` 加在**基准**坐标上再统一
+     * scale ⇒ [ScreenProfile.withGridRowOffset] 必须换算回基准像素，否则非 1:1 档实际平移 = φ×scaleY
+     * （点击落到卡缝 ⇒ 读邻卡 ⇒ 静默漏件）。三档已标定分辨率 scale=1，只有回退档会踩。
+     */
+    @Test
+    fun `grid row offset is in frame pixels at any scale`() {
+        val p = profile().apply { calibrate(W, 1080) } // base 3200x1440 → scaleY = 0.75
+        assertEquals(0.75, p.scaleY, 1e-9)
+        val phi = 75 // 帧像素
+        val off = p.withGridRowOffset(phi)
+        val c0 = p.cellCenter("artifact_backpack", 3)
+        val c1 = off.cellCenter("artifact_backpack", 3)
+        assertEquals("φ 必须原样落到帧坐标，不受 scaleY 影响", c0.y + phi, c1.y)
+        // 网格行同样：基准偏移 = round(φ / scaleY)
+        val g0 = p.gridGeometryFor("artifact_backpack")!!
+        val g1 = off.gridGeometryFor("artifact_backpack")!!
+        assertEquals(Math.round(phi / 0.75).toInt(), g1.rowYs[0] - g0.rowYs[0])
+    }
+
     @Test
     fun `char popup alignment works with colX rowY geometry`() {        val p = profile()
         val g = p.gridGeometryFor("char_popup")!!

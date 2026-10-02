@@ -2,9 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- 本 app 自 P1 起**不联网**：删除自身 INTERNET，并移除依赖库（com.google.android.datatransport:transport-backend-cct）带入的联网权限 -->
-    <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
+    <!-- 本 app 自身不联网（脚本订阅功能已移除），但抓包数据源是另一回事：
+         :capture 的隧道要把截到的游戏流量**转发出去**（zdtun 开出站 socket +
+         CaptureService.protect()），剥掉 INTERNET 不是"降级抓包"，是游戏掉线。
+         ACCESS_NETWORK_STATE 只影响抓包能否读到本机真 DNS（拿不到就退化成公共
+         解析器），一并恢复。隧道按 addAllowedApplication 只吸原神包，
+         本 app 自己依旧零自建联网行为。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
@@ -70,6 +75,16 @@
             android:taskAffinity=""
             android:theme="@style/Theme.BetterGIPocket.Transparent" />
 
+        <!-- 抓包 VPN 授权中转（透明无内容，拿完结果即 finish）：系统 VPN 弹窗必须由前台
+             Activity 发起，从服务 startActivity 在 Android 10+ 会被静默吞掉。 -->
+        <activity
+            android:name=".pcdata.CaptureConsentActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.BetterGIPocket.Transparent" />
+
         <service
             android:name=".service.TriggerForegroundService"
             android:exported="false"
@@ -128,6 +143,8 @@
                 <action android:name="com.bettergi.pocket.debug.SWIPE_TEST" />
                 <action android:name="com.bettergi.pocket.debug.SCAN_FLOW" />
                 <action android:name="com.bettergi.pocket.debug.STATUS" />
+                <action android:name="com.bettergi.pocket.debug.REPLAY_PCAP" />
+                <action android:name="com.bettergi.pocket.debug.CAPTURE" />
             </intent-filter>
         </receiver>
     </application>

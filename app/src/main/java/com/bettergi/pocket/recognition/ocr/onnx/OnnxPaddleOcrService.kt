@@ -52,18 +52,51 @@ class OnnxPaddleOcrService(
     /** 当前生效 EP 档位（诊断/日志用） */
     val tierLabel: String get() = engine.tier.label
 
+    /** 生产入口：自己采集设备事实。 */
+    fun prepare(): Boolean = prepare(DeviceCapabilities.collect())
+
     /**
-     * 首启 EP 基准定档 + 预热。应在后台线程调用（建会话 + 首次 det 推理为秒级）。
-     * 全部档位均不可用返回 false。
+     * 首启按硬件定档：EP 候选序 + intra-op 线程实测择优 + 预热。
+     * 应在后台线程调用（建会话与基准为秒级）。全部档位均不可用返回 false。
      *
-     * 真机（华为 Kirin 970）上 XNNPACK createSession 会挂起，因此当前策略直接选 CPU
-     * 并跳过多档 benchmark；待后续用超时/白名单评估 NNAPI/XNNPACK 后再恢复择优。
+     * 为什么还要实测 intra：同一条曲线**跨会话能漂 ±60%**（Kirin 970 上 intra=2 实测 406~818ms），
+     * 任何写死值都只在"测它的那一次"成立。⚠️ 但**别**据此以为 4 更好 —— 2026-09-26 五轮复测里
+     * 四轮 intra=4 比 2 慢 2.2~2.3×，理由与数据见 [EpTierPicker.intraOpCandidates]。
+     *
+     * 为什么默认不试 XNNPACK/NNAPI：见 [EpTierPicker.candidatesFor] —— 两者的失败方式
+     * 分别是"挂起"和"原生 SIGSEGV"，都抓不住，拿启动去赌不值。需要时用 [allowRiskyEp] 显式开。
      */
-    fun prepare(): Boolean {
-        val picked = EpTierPicker.Tier.CPU
-        val ok = engine.initialize(picked)
-        Log.i(TAG, "ONNX OCR ready=$ok tier=${engine.tier.label}")
-        return ok
+    fun prepare(caps: DeviceCapabilities, allowRiskyEp: Boolean = false): Boolean {
+        val order = EpTierPicker.candidatesFor(caps, allowRiskyEp)
+        engine.tierOrder = order
+        var ok = false
+        for (tier in order) {
+            ok = runCatching { engine.initialize(tier) }.getOrDefault(false)
+            if (ok) break
+            Log.w(TAG, "EP ${tier.label} 建会话失败，回退下一档")
+        }
+        if (!ok) {
+            Log.e(TAG, "所有 EP 档位均不可用（候选=${order.joinToString { it.label }}），OCR 不可用")
+            return false
+        }
+        val candidates = EpTierPicker.intraOpCandidates(caps)
+        val table = if (candidates.size > 1) engine.benchmarkIntra(candidates) else emptyMap()
+        val best = table.entries.minByOrNull { it.value }?.key
+        if (best != null && best != engine.intraOpThreads) {
+            if (engine.initialize(engine.tier, best)) {
+                Log.i(TAG, "intra-op 择优 $candidates → $best（重开会话）")
+            } else {
+                Log.w(TAG, "intra=$best 重开会话失败，沿用 ${engine.intraOpThreads}")
+                engine.initialize(engine.tier, engine.intraOpThreads)
+            }
+        }
+        Log.i(
+            TAG,
+            "ONNX OCR ready=true ort=1.30.0 ${caps.summary()} 候选=${order.joinToString { it.label }} " +
+                "tier=${engine.tier.label} intra=${engine.intraOpThreads} 基准=" +
+                (if (table.isEmpty()) "跳过(单候选)" else table.entries.joinToString { "${it.key}=${it.value}ms" }),
+        )
+        return true
     }
 
     override fun recognize(mat: Mat): OcrResult {
@@ -166,7 +199,11 @@ class OnnxPaddleOcrService(
         val recIn = FloatBuffer.wrap(FloatArray(3 * REC_H * recW))
         engine.runRec(recIn, recW) // 预热
         val recMs = medianMs(runs) { engine.runRec(recIn, recW) }
-        return "tier=${engine.tier.label} det=${detMs}ms rec=${recMs}ms runs=$runs"
+        // ★ 分段：建张量 / native run / 输出物化 —— 见 OnnxOcrEngine.runSplitProbe 的动机说明
+        val split = listOf(320, 684).joinToString("\n  ") { w ->
+            runCatching { engine.runSplitProbe(w, runs) }.getOrElse { "rec w=$w split probe failed: ${it.message}" }
+        }
+        return "tier=${engine.tier.label} det=${detMs}ms rec=${recMs}ms runs=$runs\n  $split"
     }
 
     private inline fun medianMs(runs: Int, block: () -> Unit): Long {

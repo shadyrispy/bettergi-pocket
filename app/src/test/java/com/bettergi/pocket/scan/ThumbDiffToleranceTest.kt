@@ -100,4 +100,43 @@ class ThumbDiffToleranceTest {
         assertEquals(null, VoteJudges.thumbChangedFraction(a, null))
         assertEquals(1f, VoteJudges.thumbChangedFraction(a, ByteArray(3))!!, 1e-6f)
     }
+
+    // ---- 审计 P1-1（2026-09-23）：签名 scratch 是**复用定长**数组，只比真正写入的前 N 块 ----
+
+    /**
+     * 就绪签名的 `sigBefore/sigA/sigB` 都是 `ByteArray(SIG_LEN_MAX)` 复用缓冲：一次 8×4 采样
+     * 只写前 96 字节，其余是**上一次会话留下的脏尾巴**。整数组比较会把尾巴也算进判定 ⇒
+     * 基准换个网格（圣遗物 16×8）就"全变了" ⇒ `changed` 恒真 ⇒ 「点击被吞」判据在圣遗物
+     * 路径上永不触发（漏件无痕）。
+     */
+    @Test
+    fun `stale tail beyond the sampled grid is ignored when block count is given`() {
+        val blocks = ScanEngine.SIG_BLOCKS_X * ScanEngine.SIG_BLOCKS_Y // 8×4 = 32 块 = 96 字节
+        val a = ByteArray(ScanEngine.SIG_LEN_MAX)
+        val b = ByteArray(ScanEngine.SIG_LEN_MAX)
+        for (i in 0 until blocks * 3) {   // 有效区：同一状态的两次采样
+            a[i] = 100
+            b[i] = 100
+        }
+        for (i in blocks * 3 until ScanEngine.SIG_LEN_MAX) {   // 尾巴：脏且互不相同
+            a[i] = (i % 251).toByte()
+            b[i] = ((i * 7) % 251).toByte()
+        }
+        assertEquals(
+            "给了块数 ⇒ 只看真正写入的前 N 块",
+            0f, VoteJudges.thumbChangedFraction(a, b, blocks = blocks)!!, 1e-6f,
+        )
+        assertTrue(
+            "不给块数 ⇒ 脏尾巴也被算成变化（P1-1 的成因，签名调用方必须传）",
+            VoteJudges.thumbChangedFraction(a, b)!! > 0f,
+        )
+    }
+
+    @Test
+    fun `block count is clamped to the data and tolerates zero`() {
+        val a = thumb { _, _ -> 3 }
+        val b = thumb { _, _ -> 9 }
+        assertEquals(1f, VoteJudges.thumbChangedFraction(a, b, blocks = Int.MAX_VALUE)!!, 1e-6f)
+        assertEquals(0f, VoteJudges.thumbChangedFraction(a, a.copyOf(), blocks = 0)!!, 1e-6f)
+    }
 }

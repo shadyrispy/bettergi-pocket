@@ -27,6 +27,11 @@ plugins {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        // The capture AAR is built and published locally
+        // (irminsul-android: `./gradlew :capture:publishToMavenLocal`); its POM is
+        // what keeps androidx.core/coroutines resolving properly, so the library
+        // must come in as a coordinate rather than a file in libs/.
+        mavenLocal()
         maven("https://maven.aliyun.com/repository/google") {
             content {
                 includeGroupByRegex("com\\.android.*")

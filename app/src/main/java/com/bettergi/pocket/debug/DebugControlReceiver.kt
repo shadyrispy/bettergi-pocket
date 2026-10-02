@@ -12,6 +12,12 @@ import com.bettergi.pocket.service.TriggerForegroundService
  * adb shell am broadcast -a com.bettergi.pocket.debug.SET_SCREEN_SHARE --ez enabled true
  * adb shell am broadcast -a com.bettergi.pocket.debug.SET_SCAN --ez enabled true
  * adb shell am broadcast -a com.bettergi.pocket.debug.STATUS
+ * adb shell am broadcast -a com.bettergi.pocket.debug.REPLAY_PCAP --es path <pcap>
+ * adb shell am start -n com.bettergi.pocket/.pcdata.CaptureConsentActivity   # 抓包 C2：弹 VPN 授权
+ * adb shell am broadcast -a com.bettergi.pocket.debug.CAPTURE --ez enabled false
+ *
+ * ⚠️ 抓包 C2 的**开始**走 CaptureConsentActivity：系统 VPN 弹窗要前台 Activity 发起，
+ *    而 EMUI 连 adb 广播都不拉起进程（实测），后台 startForegroundService 也不可靠。
  *
  * ⚠️ 指令转发给 TriggerForegroundService 执行（不在此新建 TriggerSettingsRepository——
  * 多实例的内存缓存不同步，写入 prefs 不会触发 service 的 settingsListener）。
@@ -53,16 +59,39 @@ class DebugControlReceiver : BroadcastReceiver() {
                     intent.getStringExtra(TriggerForegroundService.EXTRA_TIMING)?.let {
                         putExtra(TriggerForegroundService.EXTRA_TIMING, it)
                     }
-                    // §12.1 A/B：false = 用 profiles 写死翻页坐标，true = 用几何推导落点
+                    // §12.1 起点选择：false = 用 profiles 写死翻页起点，true = 用几何推导的卡缝起点
+                    //   （只切起点；距离规划/记账与此项无关，见 ScanEngine 的主滑规划）
                     putExtra(
                         TriggerForegroundService.EXTRA_GEO_ADVANCE,
                         intent.getBooleanExtra(EXTRA_GEO_ADVANCE, true),
                     )
-                    // §12.2 A/B：false = 固定翻页距离，不做相位误差校正
+                }
+                ACTION_REPLAY_PCAP -> {
+                    action = TriggerForegroundService.ACTION_DEBUG_REPLAY_PCAP
                     putExtra(
-                        TriggerForegroundService.EXTRA_ADAPTIVE_DIST,
-                        intent.getBooleanExtra(EXTRA_ADAPTIVE_DIST, true),
+                        TriggerForegroundService.EXTRA_PCAP_PATH,
+                        intent.getStringExtra(EXTRA_PATH) ?: DEFAULT_PCAP_PATH,
                     )
+                }
+                ACTION_CAPTURE -> {
+                    if (!enabled) {
+                        action = TriggerForegroundService.ACTION_DEBUG_CAPTURE
+                        putExtra(TriggerForegroundService.EXTRA_ENABLED, false)
+                    } else {
+                        // 开始必须走授权中转页：系统 VPN 弹窗要前台 Activity 发起，
+                        // 而且本 Activity 未导出（Android 13 的 shell 也拉不动），只能由本进程拉起。
+                        val launched = runCatching {
+                            app.startActivity(
+                                Intent(app, com.bettergi.pocket.pcdata.CaptureConsentActivity::class.java)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }.onFailure { Log.w(TAG, "capture consent page refused to start", it) }.isSuccess
+                        if (!launched) {
+                            // 拉不动才退回服务：它会回一句"VPN 授权还没给"，不至于静默。
+                            action = TriggerForegroundService.ACTION_DEBUG_CAPTURE
+                            putExtra(TriggerForegroundService.EXTRA_ENABLED, true)
+                        }
+                    }
                 }
                 ACTION_STATUS -> action = TriggerForegroundService.ACTION_DEBUG_STATUS
                 else -> return
@@ -85,6 +114,12 @@ class DebugControlReceiver : BroadcastReceiver() {
         const val ACTION_SWIPE_TEST = "com.bettergi.pocket.debug.SWIPE_TEST"
         const val ACTION_SCAN_FLOW = "com.bettergi.pocket.debug.SCAN_FLOW"
         const val ACTION_STATUS = "com.bettergi.pocket.debug.STATUS"
+        /** 抓包数据源 C1：离线回放一个 pcap → GOOD → 输入仓库（不建隧道、不要授权）。 */
+        const val ACTION_REPLAY_PCAP = "com.bettergi.pocket.debug.REPLAY_PCAP"
+        /** 抓包数据源 C2：在线隧道开关（`--ez enabled true|false`）。 */
+        const val ACTION_CAPTURE = "com.bettergi.pocket.debug.CAPTURE"
+        const val EXTRA_PATH = "path"
+        const val DEFAULT_PCAP_PATH = "/sdcard/Android/data/com.bettergi.pocket/files/resume.pcap"
         const val EXTRA_ENABLED = "enabled"
         const val EXTRA_START_Y = "startY"
         const val EXTRA_DIST = "dist"
@@ -92,6 +127,5 @@ class DebugControlReceiver : BroadcastReceiver() {
         const val EXTRA_FLOW = "flow"
         const val EXTRA_MAX_PAGES = "maxPages"
         const val EXTRA_GEO_ADVANCE = "geoAdvance"
-        const val EXTRA_ADAPTIVE_DIST = "adaptiveDist"
     }
 }

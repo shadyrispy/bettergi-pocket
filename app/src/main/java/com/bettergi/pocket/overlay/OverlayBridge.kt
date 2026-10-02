@@ -36,6 +36,14 @@ class OverlayBridge(private val context: Context) : AutoSkipEvents {
         call(A11yOverlayRuntime.M_COLLAPSE, null)
     }
 
+    /** 抓包会话状态推到面板（会话在主进程、面板在 `:a11y`，两边不共享对象）。 */
+    fun updateCaptureStatus(text: String, running: Boolean) {
+        call(A11yOverlayRuntime.M_CAPTURE, Bundle().apply {
+            putString(A11yOverlayRuntime.K_TEXT, text)
+            putBoolean(A11yOverlayRuntime.K_RUNNING, running)
+        })
+    }
+
     fun updateScanProgress(text: String) {
         call(A11yOverlayRuntime.M_PROGRESS, Bundle().apply { putString(A11yOverlayRuntime.K_TEXT, text) })
     }

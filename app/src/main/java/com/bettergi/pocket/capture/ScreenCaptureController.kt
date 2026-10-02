@@ -76,58 +76,91 @@ class ScreenCaptureController(
         frameThreadRunning = true
         val thread = Thread({
             var nullCount = 0
-            while (frameThreadRunning) {
-                val reader = synchronized(lock) { imageReader } ?: break
-                val image = try {
-                    reader.acquireLatestImage()
-                } catch (_: Throwable) {
-                    null
-                }
-                if (image != null) {
-                    try {
-                        val w = image.width
-                        val h = image.height
-                        val plane = image.planes.firstOrNull()
-                        if (plane != null) {
-                            val rowBytes = w * plane.pixelStride
-                            val size = h * rowBytes
-                            synchronized(lock) {
-                                if (cachedRgba.size != size) cachedRgba = ByteArray(size)
-                                MatOps.copyRgbaImage(image, cachedRgba)
-                                cachedWidth = w
-                                cachedHeight = h
-                                cachedPixelStride = plane.pixelStride
-                                cachedTimestampNs = image.timestamp
-                                hasCachedFrame = true
-                                lastFrameElapsedMs = SystemClock.elapsedRealtime()
+            try {
+                while (frameThreadRunning) {
+                    val reader = synchronized(lock) { imageReader } ?: break
+                    val image = try {
+                        reader.acquireLatestImage()
+                    } catch (_: Throwable) {
+                        null
+                    }
+                    if (image != null) {
+                        try {
+                            val w = image.width
+                            val h = image.height
+                            val plane = image.planes.firstOrNull()
+                            if (plane != null) {
+                                val rowBytes = w * plane.pixelStride
+                                val size = h * rowBytes
+                                synchronized(lock) {
+                                    if (cachedRgba.size != size) cachedRgba = ByteArray(size)
+                                    MatOps.copyRgbaImage(image, cachedRgba)
+                                    cachedWidth = w
+                                    cachedHeight = h
+                                    cachedPixelStride = plane.pixelStride
+                                    cachedTimestampNs = image.timestamp
+                                    hasCachedFrame = true
+                                    lastFrameElapsedMs = SystemClock.elapsedRealtime()
+                                }
+                                if (!firstFrameLogged) {
+                                    firstFrameLogged = true
+                                    Log.i(TAG, "first frame acquired ${w}x$h ts=${image.timestamp}")
+                                } else if (nullCount > 0) {
+                                    Log.d(TAG, "frame acquired ${w}x$h after $nullCount nulls")
+                                    nullCount = 0
+                                }
                             }
-                            if (!firstFrameLogged) {
-                                firstFrameLogged = true
-                                Log.i(TAG, "first frame acquired ${w}x$h ts=${image.timestamp}")
-                            } else if (nullCount > 0) {
-                                Log.d(TAG, "frame acquired ${w}x$h after $nullCount nulls")
-                                nullCount = 0
-                            }
+                        } catch (t: Throwable) {
+                            // ★ 2026-09-24：**这一帧跳过，不能让线程死掉**。
+                            //   原先此处只有 `finally` 没有 `catch` ⇒ 任何单帧异常都会穿透 while、
+                            //   被下面的外层兜底 catch 收掉 ⇒ **整条取帧线程终止**
+                            //   （实测：授权后 VirtualDisplay 重建的 ~3ms 窗口内抛
+                            //   `IllegalStateException: Image is already closed`，此后 4s 内 0 帧，
+                            //    而 `isRunning()` 仍报 true、`screenShare=true` ⇒ 从状态上完全看不出坏了）。
+                            //   外层 catch 仍保留，作为"这帧之外还有救不了的东西"的最后防线。
+                            Log.w(TAG, "frame sample failed, skipped", t)
+                        } finally {
+                            runCatching { image.close() }
                         }
-                    } finally {
-                        image.close()
-                    }
-                } else {
-                    nullCount++
-                    if (nullCount == 1 || nullCount % 100 == 0) {
-                        Log.d(TAG, "frame poll null (count=$nullCount)")
-                    }
-                    try {
-                        Thread.sleep(FRAME_POLL_MS)
-                    } catch (_: InterruptedException) {
-                        break
+                    } else {
+                        nullCount++
+                        if (nullCount == 1 || nullCount % 100 == 0) {
+                            Log.d(TAG, "frame poll null (count=$nullCount)")
+                        }
+                        try {
+                            Thread.sleep(FRAME_POLL_MS)
+                        } catch (_: InterruptedException) {
+                            break
+                        }
                     }
                 }
+            } catch (t: Throwable) {
+                // 采样段会抛穿 while：分辨率突变时 `ByteArray(size)` 可以 OOM，`copyRgbaImage`
+                // 可以越界。历史行为是线程到此为止、**flag 留在 true** ⇒ 下次 start 在
+                // `if (frameThreadRunning) return` 处空转，而 `isRunning()` 只看三个对象非空
+                // 仍报 true ⇒ 缓存帧永久停在最后一帧（下游"正常"跑完整轮，其实读的是旧画）。
+                Log.e(TAG, "frame poller crashed", t)
+            } finally {
+                // 不持 [lock]：[stopFramePollerLocked] 可能在持锁时 join，这里取锁会互堵 1s。
+                frameThreadRunning = false
             }
             Log.d(TAG, "frame poller exited")
         }, "BetterGICaptureFrames")
         thread.start()
         frameThread = thread
+    }
+
+    /**
+     * 投影还在、轮询线程没了 ⇒ 拉起来（配合线程体的 `finally` 复位，崩溃后能自愈）。
+     *
+     * 挂在**每一次取帧/采样**的持锁入口上，而不是只做一次性检查：本类的失效模式是"静默拿旧帧"，
+     * 没有任何下游报错会提醒去重建。守卫用 [imageReader] 而非 [frameThread] ——
+     * [releaseDisplayLocked] 会在停线程后把它置 null，正常收尾路径不会被这里复活。
+     */
+    private fun ensureFramePollerLocked() {
+        if (imageReader == null || frameThreadRunning) return
+        Log.w(TAG, "frame poller dead while projection alive, restarting")
+        startFramePollerLocked()
     }
 
     private fun stopFramePollerLocked() {
@@ -206,6 +239,7 @@ class ScreenCaptureController(
      * 扫描背包/武器界面本来就是静态的，缓存帧即当前屏幕，正是 OCR 需要的。
      */
     fun acquireLatestBgr(): CapturedBgrFrame? = synchronized(lock) {
+        ensureFramePollerLocked()
         maybeRecoverStalledReaderLocked()
         if (!hasCachedFrame) {
             Log.d(TAG, "acquireLatestBgr no cache yet")
@@ -250,6 +284,7 @@ class ScreenCaptureController(
         var h = 0
         var ps = 4
         synchronized(lock) {
+            ensureFramePollerLocked()
             if (!hasCachedFrame) return false
             bufRef = cachedRgba
             w = cachedWidth

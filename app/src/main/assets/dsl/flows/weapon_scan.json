@@ -68,9 +68,9 @@
           "do": "stopWhen",
           "mode": "duplicateStreak",
           "streak": 3,
-          "dupPageConfirm": 2,
+          "dupPageConfirm": 1,
           "action": "Stop",
-          "note": "阈值不再承担「回卷」判据：pagedGrid 内引擎按**该网格一页的卡片数**（cols×traverseRows）自动覆盖（见 ScanEngine.dupLimitEffective）；此处的 3 仅作 snap/rosterFind 等非翻页路径的兜底。"
+          "note": "2026-09-26 方案 C：pagedGrid 内阈值由引擎按**一页 + 一行**（cols×(traverseRows+1)）覆盖且**跨翻页累积**（见 ScanEngine.dupLimitEffective），所以一次命中就等于「点完一整页无新增、再翻一页、第一行仍无新增」⇒ 页级确认置 1。抬这一行的理由：单次滑动没落地只会造出恰好「一页」个重复件，旧阈值 21 会被一次滑空误停。streak=3 仅作 snap/rosterFind 等非翻页路径的兜底。"
         },
         {
           "do": "stopWhen",

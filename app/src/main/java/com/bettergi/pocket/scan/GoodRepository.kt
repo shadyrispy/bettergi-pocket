@@ -52,8 +52,9 @@ object GoodRepository {
         if (!looksLikeData(json)) {
             return false to "形态不对：需要 {lock,unlock} / {equip} / {artifacts} 之一"
         }
-        // ★ 2026-09-18（P2⑫）：导入期就做**载荷合法性**校验（空键 / rarity∉{4,5} / level∉[0,20]）。
-        //   对齐 GOODScanner 的 400 语义。放在这里而不是等到起跑，是因为"坏条目"在真机上
+        // ★ 2026-09-18（P2⑫）：导入期就做**载荷合法性**校验（空键 / rarity∉{3,4,5} / level∉[0,20]）。
+        //   形如 GOODScanner 的 400 语义，但 rarity 下界本仓已放宽到 3★（两条数据源都含 3★，
+        //   见 GoodPlan.validateArtifacts）。放在这里而不是等到起跑，是因为"坏条目"在真机上
         //   的表现是"跑完了却什么都没做"，几乎无法归因。
         GoodPlan.validateArtifacts(json)?.let { return false to "条目不合法：$it" }
         val dir = File(context.filesDir, DIR)

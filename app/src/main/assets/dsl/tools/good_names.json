@@ -1,7 +1,7 @@
 {
   "_meta": {
     "generator": "dsl/scripts/gen_good_names.py",
-    "generatedAt": "2026-09-05",
+    "generatedAt": "2026-09-24",
     "sources": [
       {
         "file": "dsl/tools/mappings.json",
@@ -16,13 +16,26 @@
       "characters": 121,
       "weapons": 236,
       "artifactSets": 56,
-      "artifactPieces": 276,
+      "artifactPieces": 306,
+      "artifactPiecesLowRarity": 30,
       "stats": 23,
       "slots": 5
     },
+    "lowRaritySetIds": [
+      "Adventurer",
+      "LuckyDog",
+      "PrayersForDestiny",
+      "PrayersForIllumination",
+      "PrayersForWisdom",
+      "PrayersToSpringtime",
+      "PrayersToTheFirmament",
+      "TinyMiracle",
+      "TravelingDoctor"
+    ],
     "notes": [
       "artifactPieces 为 GOOD mappings 未覆盖的补充段：背包详情面板 set_name 被遮挡，",
-      "须由单件名反推 setKey（用户定稿 2026-09-01）。字典全表由 NameMatcher 做模糊匹配。"
+      "须由单件名反推 setKey（用户定稿 2026-09-01）。字典全表由 NameMatcher 做模糊匹配。",
+      "其中 30 条为 3★/4★ 低星套单件名，涉及的 9 个 setId 不在 GOOD artifactSets 内（Adventurer, LuckyDog, PrayersForDestiny, PrayersForIllumination, PrayersForWisdom, PrayersToSpringtime, PrayersToTheFirmament, TinyMiracle, TravelingDoctor）—— GOOD 只列 4★/5★ 的 56 套。"
     ]
   },
   "characters": [
@@ -2503,10 +2516,58 @@
       "slot": "sands"
     },
     {
+      "piece": "冒险家之花",
+      "setId": "Adventurer",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "冒险家头带",
+      "setId": "Adventurer",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "冒险家尾羽",
+      "setId": "Adventurer",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "冒险家怀表",
+      "setId": "Adventurer",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "冒险家金杯",
+      "setId": "Adventurer",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "冰河之冠",
+      "setId": "GlacierAndSnowfield",
+      "set": null,
+      "slot": null
+    },
+    {
       "piece": "冰雪故园的终期",
       "setId": "BlizzardStrayer",
       "set": "冰风迷途的勇士",
       "slot": "sands"
+    },
+    {
+      "piece": "凛冬霜心",
+      "setId": "GlacierAndSnowfield",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "凝冰成砂",
+      "setId": "GlacierAndSnowfield",
+      "set": null,
+      "slot": null
     },
     {
       "piece": "凝结的时刻",
@@ -2737,6 +2798,36 @@
       "slot": "sands"
     },
     {
+      "piece": "奇迹之杯",
+      "setId": "TinyMiracle",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "奇迹之沙",
+      "setId": "TinyMiracle",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "奇迹之羽",
+      "setId": "TinyMiracle",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "奇迹之花",
+      "setId": "TinyMiracle",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "奇迹耳坠",
+      "setId": "TinyMiracle",
+      "set": null,
+      "slot": null
+    },
+    {
       "piece": "如蜜的终宴",
       "setId": "GildedDreams",
       "set": "饰金之梦",
@@ -2915,6 +3006,36 @@
       "setId": "Thundersoother",
       "set": "平息鸣雷的尊者",
       "slot": "plume"
+    },
+    {
+      "piece": "幸运儿之杯",
+      "setId": "LuckyDog",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "幸运儿沙漏",
+      "setId": "LuckyDog",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "幸运儿绿花",
+      "setId": "LuckyDog",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "幸运儿银冠",
+      "setId": "LuckyDog",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "幸运儿鹰羽",
+      "setId": "LuckyDog",
+      "set": null,
+      "slot": null
     },
     {
       "piece": "异国之盏",
@@ -3481,6 +3602,36 @@
       "slot": "flower"
     },
     {
+      "piece": "游医的怀钟",
+      "setId": "TravelingDoctor",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "游医的方巾",
+      "setId": "TravelingDoctor",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "游医的枭羽",
+      "setId": "TravelingDoctor",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "游医的药壶",
+      "setId": "TravelingDoctor",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "游医的银莲",
+      "setId": "TravelingDoctor",
+      "set": null,
+      "slot": null
+    },
+    {
       "piece": "游学者的爪杯",
       "setId": "ScrollOfTheHeroOfCinderCity",
       "set": "烬城勇者绘卷",
@@ -3655,10 +3806,40 @@
       "slot": "sands"
     },
     {
+      "piece": "祭冰礼冠",
+      "setId": "PrayersToSpringtime",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "祭水礼冠",
+      "setId": "PrayersForDestiny",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "祭火礼冠",
+      "setId": "PrayersForIllumination",
+      "set": null,
+      "slot": null
+    },
+    {
+      "piece": "祭雷礼冠",
+      "setId": "PrayersForWisdom",
+      "set": null,
+      "slot": null
+    },
+    {
       "piece": "祭霜者的迷狂",
       "setId": "SilkenMoonsSerenade",
       "set": "纺月的夜歌",
       "slot": "sands"
+    },
+    {
+      "piece": "祭风礼冠",
+      "setId": "PrayersToTheFirmament",
+      "set": null,
+      "slot": null
     },
     {
       "piece": "离别之贝",
@@ -3889,6 +4070,12 @@
       "slot": "flower"
     },
     {
+      "piece": "赌徒的骰盅",
+      "setId": "Gambler",
+      "set": null,
+      "slot": null
+    },
+    {
       "piece": "赌徒的骰蛊",
       "setId": "Gambler",
       "set": "赌徒",
@@ -3983,6 +4170,12 @@
       "setId": "ThunderingFury",
       "set": "如雷的盛怒",
       "slot": "goblet"
+    },
+    {
+      "piece": "雪藏之羽",
+      "setId": "GlacierAndSnowfield",
+      "set": null,
+      "slot": null
     },
     {
       "piece": "雷云之笼",

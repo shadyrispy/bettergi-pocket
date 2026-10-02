@@ -176,6 +176,12 @@ class GoodPlanTest {
     fun validate_accepts_well_formed_files() {
         assertNull(GoodPlan.validateArtifacts(JSONObject("""{"lock":[$ga]}""")))
         assertNull(GoodPlan.validateArtifacts(JSONObject("""{"equip":[{"artifact":$ga,"location":"Furina"}]}""")))
+        // 3★ 已纳入（OCR 扫描与抓包两条数据源都给 3★），导入侧别再把它判成不合法
+        assertNull(
+            GoodPlan.validateArtifacts(
+                JSONObject("""{"lock":[{"setKey":"X","slotKey":"flower","mainStatKey":"hp","rarity":3,"level":12}]}"""),
+            ),
+        )
     }
 
     @Test
@@ -183,7 +189,7 @@ class GoodPlanTest {
         val noSet = JSONObject("""{"lock":[{"slotKey":"flower","mainStatKey":"hp"}]}""")
         assertEquals("lock[0]：缺 setKey", GoodPlan.validateArtifacts(noSet))
 
-        val badRarity = JSONObject("""{"lock":[{"setKey":"X","slotKey":"flower","mainStatKey":"hp","rarity":3}]}""")
+        val badRarity = JSONObject("""{"lock":[{"setKey":"X","slotKey":"flower","mainStatKey":"hp","rarity":2}]}""")
         assertTrue("需报 rarity：${GoodPlan.validateArtifacts(badRarity)}",
             GoodPlan.validateArtifacts(badRarity)!!.contains("rarity"))
 

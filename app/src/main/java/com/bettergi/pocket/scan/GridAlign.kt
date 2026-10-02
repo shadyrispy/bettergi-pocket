@@ -41,6 +41,17 @@ object GridAlign {
     private const val REF_ROW = 2      // 检测基准行（中段第2行，避开顶边滑出）
     private const val LIMIT = 146      // 半 pitch 限幅（漂移）
 
+    // ---- 底栏锚绝对行相位（2026-09-25）：空间量按 scaleY 缩放，亮度/对比度量为 0..255 不缩放 ----
+    private const val BAND_MIN_RUN = 20      // 亮带最小宽度（2560 实测 36..68）
+    private const val BAND_MAX_RUN = 96      // 亮带最大宽度（超过即认为是整片高亮而非一条带）
+    private const val BAND_CONTRAST = 40     // 峰-中位 对比度下限
+    private const val BAND_HI_NUM = 3
+    private const val BAND_HI_DEN = 5        // 起带阈 = 中位 + 3/5 对比度
+    private const val BAND_LO_NUM = 2
+    private const val BAND_LO_DEN = 5        // 收带阈 = 中位 + 2/5 对比度（滞回）
+    private const val BAND_TOL = 14          // 跨列/跨行 δ 一致性容差
+    private const val BAND_MIN_COLS = 5      // 共识门：至少几列投出一致的带（6 列网格允许 1 列空/翻票）
+
 
     /** p0 基准：顶对齐首帧检测到的绝对位置（帧坐标）；null = 未建立 → drift 退化为 detected−expected。 */
     private val baselines = mutableMapOf<String, Int?>()
@@ -149,6 +160,154 @@ object GridAlign {
         if (pitch <= 0) return 0
         val m = ((x % pitch) + pitch) % pitch
         return if (m > pitch / 2) m - pitch else m
+    }
+
+    // ==== ★ 2026-09-25 底栏锚定的**绝对**行相位（run9 像素自标定后换源）====================
+    //
+    // 为什么换：fpband 给的是**相邻两帧之间的位移**（L − target），而 `withGridRowOffset(φ)` 需要的是
+    //   「本页行顶相对名义行顶的绝对偏移」。两者只在"上一页恰好落在名义位"时等价。run9 实测：
+    //   条带每页都报 L=715..790（target=834）⇒ 每页都平移 φ=+44..+119（钳 70）**向下**；
+    //   而同三张冻结帧逐帧像素量出的真实行顶是 189/213/219（名义 290，即内容**偏上** 71..101）。
+    //   两者方向相反 ⇒ 点击被从卡中心 395 一路推到 439..465，落在卡下沿最后 1..12px 的死区
+    //   （正常页同一条 φ 下点击距下沿约 78px，所以只有"运气差 25px"的那几页整页冻结）。
+    //
+    // 为什么这次能用卡内特征当锚（2026-09-24 的 detectRow 绝对相位被 run7 否决）：那次是**把锁到的
+    //   特征当成卡顶**用（列均值按整卡宽取，台阶常落在底栏/星带上 ⇒ 逐页乱跳 ±137）。本检测器反过来
+    //   **只认那条底栏**（等级标签亮带，6 列同时出现、边沿硬、亮度 200+ 对周边 120..160），
+    //   并按 profiles 标定 `cardtop = 带中心 − labelAnchor` 折回行顶 ⇒ 特征偏移不再是误差而是锚。
+    //   run9 三帧互验：带中心 428/398/422 ⇒ 行顶 219/189/213，与"间隙最低点−12−253/2"独立推法
+    //   相差 ≤6px（三页一致）。
+
+    /** 一次绝对行相位测量。[offset] = 实测行顶 − 名义行顶（帧 px，正=内容偏下/欠滚，负=偏上/多滚）。 */
+    data class RowPhase(val offset: Int, val columns: Int, val votes: Int, val spread: Int, val bars: Int)
+
+    /**
+     * 底栏锚绝对行相位（帧 px）。守卫：每列须有 ≥2 条**间隔≈行距**的亮带（杀筛选栏等一次性亮带）；
+     * 跨列共识 ≥ [BAND_MIN_COLS] 票且一致带 ≤ [BAND_TOL]×2。任一门不过 ⇒ null（调用方退回原判据）。
+     *
+     * ⚠️ 必须用**未偏移**的基准 profile（同 [phaseOffset] 的约束）：名义行顶要从 `g.rowYs[0]` 取，
+     *   偏移视图会把上一次的结果喂回自己 ⇒ 闭环自证。
+     */
+    fun rowPhase(frame: Mat, profile: ScreenProfile, gridKey: String): RowPhase? {
+        if (frame.empty()) return null
+        val g = profile.gridGeometryFor(gridKey) ?: return null
+        if (g.labelAnchor < 0 || g.rowYs.isEmpty()) return null
+        val sy = profile.scaleY
+        val pitch = profile.scale(g.rowPitch.toInt().coerceAtLeast(1), sy)
+        if (pitch <= 0) return null
+        val firstCenter = profile.scale(g.rowYs[0] + g.labelAnchor, sy)
+        val minRun = profile.scale(BAND_MIN_RUN, sy)
+        val maxRun = profile.scale(BAND_MAX_RUN, sy)
+        val tol = profile.scale(BAND_TOL, sy)
+        val yFrom = (firstCenter - pitch).coerceAtLeast(0)
+        val yTo = (firstCenter + g.rowYs.size * pitch + maxRun).coerceAtMost(frame.rows() - 1)
+        if (yTo <= yFrom + pitch) return null
+
+        val barsByCol = ArrayList<List<Int>>(g.cols)
+        var bars = 0
+        for (c in 0 until g.cols) {
+            val x0 = profile.scale(g.colXs[c], profile.scaleX).coerceIn(0, frame.cols() - 2)
+            val x1 = profile.scale(g.colXs[c] + g.cardW, profile.scaleX)
+                .coerceIn(x0 + 2, frame.cols())
+            val prof = DoubleArray(frame.rows()) { rowMean(frame, it, x0, x1) }
+            val kept = periodKeep(brightBands(prof, yFrom, yTo, minRun, maxRun), pitch, tol)
+            if (kept.size >= 2) {
+                bars += kept.size
+                barsByCol.add(kept)
+            }
+        }
+        val gate = minOf(BAND_MIN_COLS, g.cols)
+        val phase = phaseFromBars(barsByCol, firstCenter, pitch, tol, gate)
+        if (phase == null) {
+            Log.d(
+                TAG,
+                "phaseDiag[$gridKey] 守卫不过: gate=$gate cols=${barsByCol.size} bars=$bars " +
+                    "centers=$barsByCol pitch=$pitch first=$firstCenter",
+            )
+        }
+        return phase
+    }
+
+    /**
+     * 纯函数（可单测）：各列带中心 → 绝对行相位。
+     *
+     * 每条带折一票 `δ = centeredMod(带中心 − firstCenter, pitch)`（`firstCenter` = 名义第 0 行亮带中心）；
+     * 行序 r 不必枚举 —— 相差整数倍行距的候选经 `centeredMod` 自动同解。
+     *
+     * 聚合取**按"不同列数"计的众数**而不是全体中位：中位在"一半列锁到别的特征"时会给出
+     * 一个看似自洽的错答案（真机 6 列里 3+3 对半分是中位法的经典失败），众数 + 列数门
+     * 会直接拒测。三门：进入投票的列 ≥ [minCols]、众数群覆盖列数 ≥ [minCols]、群内一致带 ≤ 2·tol。
+     */
+    internal fun phaseFromBars(
+        barsByCol: List<List<Int>>,
+        firstCenter: Int,
+        pitch: Int,
+        tol: Int,
+        minCols: Int,
+    ): RowPhase? {
+        if (pitch <= 0 || minCols <= 0) return null
+        val voting = barsByCol.filter { it.size >= 2 }
+        if (voting.size < minCols) return null
+        val votes = ArrayList<Pair<Int, Int>>(voting.size * 2)
+        voting.forEachIndexed { c, col -> col.forEach { b -> votes.add(centeredMod(b - firstCenter, pitch) to c) } }
+        val all = votes.map { it.first }.sorted()
+        val mid = all[all.size / 2]
+        // 以每票为候选锚，统计 ±tol 内**覆盖的列数**（平票取更靠近全体中位的一侧）
+        var bestCols = -1
+        var bestDist = Int.MAX_VALUE
+        var best: List<Pair<Int, Int>> = emptyList()
+        for ((d, _) in votes) {
+            val grp = votes.filter { Math.abs(it.first - d) <= tol }
+            val cols = grp.map { it.second }.toSet().size
+            val dist = Math.abs(d - mid)
+            if (cols > bestCols || (cols == bestCols && dist < bestDist)) {
+                bestCols = cols; bestDist = dist; best = grp
+            }
+        }
+        if (bestCols < minCols) return null
+        val ds = best.map { it.first }.sorted()
+        val spread = ds.last() - ds.first()
+        if (spread > tol * 2) return null
+        return RowPhase(ds[ds.size / 2], bestCols, ds.size, spread, votes.size)
+    }
+
+    /**
+     * 纯函数：一列行亮度剖面里的亮带中心（滞回起停 + 宽度门）。
+     * 阈值自适应于该列自身（中位 + 3/5·对比度 起带、2/5 收带）⇒ 不随分辨率/整体明暗漂移。
+     * 对比度 < [BAND_CONTRAST] 直接判无带（空列/无网格）。
+     */
+    internal fun brightBands(prof: DoubleArray, yFrom: Int, yTo: Int, minRun: Int, maxRun: Int): List<Int> {
+        if (yTo <= yFrom) return emptyList()
+        val win = prof.copyOfRange(yFrom, yTo + 1)
+        val med = win.sortedArray()[win.size / 2]
+        val mx = win.maxOrNull() ?: return emptyList()
+        if (mx - med < BAND_CONTRAST) return emptyList()
+        val hi = med + (mx - med) * BAND_HI_NUM / BAND_HI_DEN
+        val lo = med + (mx - med) * BAND_LO_NUM / BAND_LO_DEN
+        val out = ArrayList<Int>()
+        var start = -1
+        for (i in win.indices) {
+            val v = win[i]
+            if (start < 0) {
+                if (v >= hi) start = i
+            } else if (v < lo) {
+                val w = i - start
+                if (w in minRun..maxRun) out.add(yFrom + (start + i - 1) / 2)
+                start = -1
+            }
+        }
+        if (start >= 0 && win.size - start in minRun..maxRun) {
+            out.add(yFrom + (start + win.size - 1) / 2)
+        }
+        return out
+    }
+
+    /** 纯函数：只保留"存在**相邻行距**（±pitch，容差 tol）伙伴"的带 ⇒ 一次性亮带（筛选栏/横幅/标题）被剔除。
+     *  ⚠️ 只认 k=1 的邻居：某列若丢的是**中间**那条带，剩下两条相距 2·pitch ⇒ 互不认账 ⇒ 该列整体出局
+     *     （保守方向 = 少投票，不是投错票；共识门 [BAND_MIN_COLS] 允许少数列这样掉队）。 */
+    internal fun periodKeep(bars: List<Int>, pitch: Int, tol: Int): List<Int> {
+        if (pitch <= 0 || bars.size < 2) return emptyList()
+        return bars.filter { b -> bars.any { it != b && Math.abs(Math.abs(it - b) - pitch) <= tol } }
     }
 
     // ---- 内部 ----

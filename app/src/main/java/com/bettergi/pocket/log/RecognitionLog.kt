@@ -70,8 +70,20 @@ object RecognitionLog {
             buffer.addLast(entry)
             snapshot = filteredLocked()
         }
-        if (listeners.isEmpty()) return
-        mainHandler.post { listeners.forEach { runCatching { it(snapshot) } } }
+        postToListeners(snapshot)
+    }
+
+    /**
+     * 主线程回调全部订阅者。
+     *
+     * ⚠️ 两条规矩：[snapshot] 必须由调用方**在锁内**取好（`*Locked()` 一律不出锁）；
+     *   [listeners] 的读取也要过锁 —— 本函数常在扫描线程上被调（[log] 任意线程可调），
+     *   而订阅者的增删都在主线程，无锁读一个 LinkedHashSet 是数据竞争。
+     */
+    private fun postToListeners(snapshot: List<Entry>) {
+        val targets = synchronized(lock) { listeners.toList() }
+        if (targets.isEmpty()) return
+        mainHandler.post { targets.forEach { runCatching { it(snapshot) } } }
     }
 
     /** 便捷重载：默认 I 级。 */
@@ -93,15 +105,16 @@ object RecognitionLog {
             if (on) visible.add(tag) else visible.remove(tag)
             snapshot = filteredLocked()
         }
-        mainHandler.post { listeners.forEach { runCatching { it(snapshot) } } }
+        postToListeners(snapshot)
     }
 
     /** 订阅渲染（回调在主线程，参数为可见条目）。返回句柄用于 [removeListener]。 */
     fun addListener(listener: (List<Entry>) -> Unit): (List<Entry>) -> Unit {
-        mainHandler.post {
-            synchronized(lock) { listeners.add(listener) }
-            listener(filteredLocked())
+        val snapshot = synchronized(lock) {
+            listeners.add(listener)
+            filteredLocked()
         }
+        mainHandler.post { runCatching { listener(snapshot) } }
         return listener
     }
 
@@ -111,7 +124,7 @@ object RecognitionLog {
 
     fun clear() {
         synchronized(lock) { buffer.clear() }
-        mainHandler.post { listeners.forEach { runCatching { it(emptyList()) } } }
+        postToListeners(emptyList())
     }
 
     // ---- 跨进程投递（2026-09-18 悬浮窗宿主迁到无障碍进程后新增）----
@@ -127,12 +140,14 @@ object RecognitionLog {
      * @return 内容确有变化为 true；相同则原地返回 false（避免每秒无谓重渲染）。
      */
     fun replaceAll(entries: List<Entry>): Boolean {
+        val snapshot: List<Entry>
         synchronized(lock) {
             if (buffer.size == entries.size && buffer.toList() == entries) return false
             buffer.clear()
             for (e in entries.takeLast(MAX_LINES)) buffer.addLast(e)
+            snapshot = filteredLocked()
         }
-        mainHandler.post { listeners.forEach { runCatching { it(filteredLocked()) } } }
+        postToListeners(snapshot)
         return true
     }
 

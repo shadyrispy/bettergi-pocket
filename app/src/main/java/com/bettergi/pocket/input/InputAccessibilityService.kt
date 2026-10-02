@@ -141,6 +141,30 @@ class InputAccessibilityService : AccessibilityService() {
             "com.google.android.permissioncontroller",
         )
 
+        /**
+         * ★ 2026-09-26：**前台包名闸门** —— 只有前台是原神时才允许注入点击/滑动/返回。
+         *
+         * 动机是一次真实事故：小米 15 上扫描起跑前游戏并不在前台，一次盲点 (1600,720) 直接打开了
+         * **短信会话页**（`com.android.mms`）⇒ 在用户的私人 app 上乱点是绝对不可接受的副作用。
+         *
+         * 判据取 [lastAppPackage]（由 [onAccessibilityEvent] 跟 `TYPE_WINDOW_STATE_CHANGED` 维护），
+         * 它刻意跳过自身与 [TRANSIENT_PACKAGES]（系统弹窗/权限页/设置）⇒ 弹层不会把闸门误关掉。
+         * `lastAppPackage == null`（服务刚起来、还没收到任何窗口切换事件）⇒ **放行**：这种"未知"只可能
+         * 出现在扫描刚开始、游戏已在前台的场景，拦它会把整条流程变成全 `ok=false`。
+         *
+         * 调试/A-B 想绕过：把本开关置 false（产线默认开）。
+         */
+        @Volatile
+        var requireGenshinForeground = true
+
+        private fun allowInject(op: String): Boolean {
+            if (!requireGenshinForeground) return true
+            val pkg = lastAppPackage
+            if (pkg == null || GenshinPackages.isGenshinPackage(pkg)) return true
+            Log.w(TAG, "$op 被前台闸门拦下：前台=$pkg（不是原神 ⇒ 拒绝注入，避免误点其它 app）")
+            return false
+        }
+
         fun attach(context: Context) {
             appContext = context.applicationContext
         }
@@ -275,6 +299,7 @@ class InputAccessibilityService : AccessibilityService() {
         }
 
         private fun tapLocal(x: Int, y: Int): Boolean {
+            if (!allowInject("tap")) return false
             val service = instance ?: return false
             val path = Path().apply {
                 moveTo(x.toFloat(), y.toFloat())
@@ -297,15 +322,20 @@ class InputAccessibilityService : AccessibilityService() {
             return remoteCall(METHOD_BACK, null)?.getBoolean(KEY_OK, false) == true
         }
 
-        private fun backLocal(): Boolean =
-            instance?.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK) == true
+        private fun backLocal(): Boolean {
+            if (!allowInject("back")) return false
+            return instance?.performGlobalAction(
+                android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK,
+            ) == true
+        }
 
         /**
          * 滑动。[segments] = 1 单段惯性放行；3 = 三段消惯性（对齐 scanner-app 已验证实现）：
          * **逐段 dispatchGesture + callback 链**——continueStroke 的设计语义是分段派发，
          * 三段塞同一 GestureDescription 一次 dispatch 会导致后续段不执行（真机"滑动不准"根因）。
          * 段1 快滑 90%/400ms → 段2 缓速 10%/300ms 到终点+1px → 段3 回退 1px/100ms（末速≈0 无 fling）。
-         * 返回第一段是否受理；整体结果经 [onDone] 回调。
+         * 返回**是否受理**：只有 `segments<=1` 的单段分支给真值；多段分支（THREE_SEGMENT /
+         * waypoint）链是异步的，本函数**恒返回 true**（任务 #45）⇒ 真结果只在 [onDone] 回调里。
          */
         fun swipe(
             fromX: Int,
@@ -390,6 +420,7 @@ class InputAccessibilityService : AccessibilityService() {
         }
 
         private fun clickLocal(x: Int, y: Int, durationMs: Long): Boolean {
+            if (!allowInject("click")) return false
             val service = instance ?: return false
             // §真机标定：纯 tap（零位移 50ms）在华为 EMUI + 原神背包详情面板切换上不可靠
             //（adb input tap 可切换，accessibility gesture 不切换）。改用 2px 微滑 + 120ms
@@ -404,7 +435,13 @@ class InputAccessibilityService : AccessibilityService() {
                 durationMs.coerceAtLeast(120L),
             )
             val gesture = GestureDescription.Builder().addStroke(stroke).build()
-            val accepted = service.dispatchGesture(gesture, null, null)
+            // 负对照（run5）：点击**被取消**是有信号的（另一条手势/窗口抢占）。若停滞期间
+            // 点击既不取消、面板又不变 ⇒ 故障在"游戏收了事件但不处理"，不在派发层。
+            val accepted = service.dispatchGesture(
+                gesture,
+                callback { ok -> if (!ok) Log.w(TAG, "clickLocal **cancelled** at ($x,$y)") },
+                null,
+            )
             Log.d(TAG, "clickLocal at ($x,$y) accepted=$accepted")
             return accepted
         }
@@ -425,6 +462,7 @@ class InputAccessibilityService : AccessibilityService() {
             method: SwipeMethod,
             onDone: ((Boolean) -> Unit)?,
         ): Boolean {
+            if (!allowInject("swipe")) return false
             val service = instance ?: return false
             if (segments <= 1) {
                 val path = Path().apply {
@@ -472,6 +510,24 @@ class InputAccessibilityService : AccessibilityService() {
             val preX = toX + unitX
             val preY = toY + unitY
 
+            // ★ 2026-09-24 停滞归因观测（run5）：三段是 `continueStroke` 串起来的**异步**链，
+            //   任一段被拒/被取消就整条断在此处 ⇒ 手指**不再抬起**（没有 ACTION_UP）。
+            //   若游戏因此认为指针仍按下，则之后整页 tap 一律不理、等多久都没用，
+            //   直到下一次滑动的 ACTION_DOWN 把它顶掉才恢复 —— 与实测症状逐条吻合
+            //   （重发 0/45、等 24s 0/4、微滑立即痊愈、下一页翻页自动痊愈）。
+            //   此前**完全无痕**：扫描侧 `swipeLogged` 拿到的是**硬编码的 true** —— 本函数在
+            //   THREE_SEGMENT / waypoint 两条分支末尾都是 `return true`（只有 `segments<=1` 的
+            //   单段分支才回真值），所以它连"段 1 受理"都不代表 ⇒ 日志里的 `accepted=true` 零信息量。
+            //   而 [callback] 又把 onCancelled 静默折成 false。（恒 true 本身 = 任务 #45，待修；
+            //   这里只把症状说清楚，别把它读成"段1 已受理"。）
+            //   这里逐段留痕（受理/完成/取消 + 相对时刻），用于与"冻结页"做时间轴相关性判定。
+            val t0 = SystemClock.elapsedRealtime()
+            fun mark(seg: Int, state: String) {
+                val line = "swipe3 段$seg $state +${SystemClock.elapsedRealtime() - t0}ms " +
+                    "($fromX,$fromY)→($toX,$toY)"
+                if (state.startsWith("断")) Log.w(TAG, line) else Log.i(TAG, line)
+            }
+
             val s1 = GestureDescription.StrokeDescription(
                 Path().apply {
                     moveTo(fromX.toFloat(), fromY.toFloat())
@@ -485,9 +541,11 @@ class InputAccessibilityService : AccessibilityService() {
                 GestureDescription.Builder().addStroke(s1).build(),
                 callback { ok1 ->
                     if (!ok1) {
+                        mark(1, "断：段1 被取消 ⇒ 后续段不再派发，**手指未抬起**")
                         onDone?.invoke(false)
                         return@callback
                     }
+                    mark(1, "完成")
                     val s2 = s1.continueStroke(
                         Path().apply {
                             moveTo(midX.toFloat(), midY.toFloat())
@@ -497,13 +555,15 @@ class InputAccessibilityService : AccessibilityService() {
                         THREE_SEG_CRAWL_MS,
                         /* willContinue = */ true,
                     )
-                    service.dispatchGesture(
+                    val accepted2 = service.dispatchGesture(
                         GestureDescription.Builder().addStroke(s2).build(),
                         callback { ok2 ->
                             if (!ok2) {
+                                mark(2, "断：段2 被取消 ⇒ 段3 不再派发，**手指未抬起**")
                                 onDone?.invoke(false)
                                 return@callback
                             }
+                            mark(2, "完成")
                             val s3 = s2.continueStroke(
                                 Path().apply {
                                     moveTo(preX.toFloat(), preY.toFloat())
@@ -513,18 +573,29 @@ class InputAccessibilityService : AccessibilityService() {
                                 THREE_SEG_DWELL_MS,
                                 /* willContinue = */ false,
                             )
-                            service.dispatchGesture(
+                            val accepted3 = service.dispatchGesture(
                                 GestureDescription.Builder().addStroke(s3).build(),
-                                callback(onDone),
+                                callback { ok3 ->
+                                    mark(3, if (ok3) "完成 ⇒ 整链闭合（已抬手）" else "断：段3 被取消，**手指未抬起**")
+                                    onDone?.invoke(ok3)
+                                },
                                 null,
                             )
+                            if (!accepted3) mark(3, "断：dispatch 被拒 ⇒ **手指未抬起**")
+                            if (!accepted3) onDone?.invoke(false)
                         },
                         null,
                     )
+                    if (!accepted2) mark(2, "断：dispatch 被拒 ⇒ 段3 不再派发，**手指未抬起**")
+                    if (!accepted2) onDone?.invoke(false)
                 },
                 null,
             )
-            if (!accepted) onDone?.invoke(false)
+            mark(1, "dispatch accepted=$accepted")
+            if (!accepted) {
+                mark(1, "断：dispatch 被拒 ⇒ **手指未抬起**")
+                onDone?.invoke(false)
+            }
         }
 
         /**

@@ -171,21 +171,72 @@ object VoteJudges {
         return Result(gold >= Thresholds.ASTRAL_GOLD, gold)
     }
 
-    /** 祝圣横幅 vote（zone artifact.panel.zhusheng，三采样点 5x5 紫占比≥2/3）。 */
+    /**
+     * 祝圣横幅 vote（zone artifact.panel.zhusheng，三采样点 5x5 色占比≥2/3）。
+     *
+     * 色域可由 zone 的 `rgb` 覆盖：[rMin,rMax,gMin,gMax,bMin,bMax] 或再加第 7 项 requireBG。
+     * 2026-09-23 加：**标定必须能在 profile 里改**——实测 2560 档原来写死的紫色判据（[PURPLE_BANNER]）
+     * 与实际横幅色相对不上，点数与位置也不对（`vote zhusheng matched=false hits=0` 61/61 次），
+     * 于是 23 件祝圣件的 level/副词条全部读空、静默不入库。
+     */
     fun panelZhusheng(frame: Mat, profile: ScreenProfile): Result {
         val obj = profile.zone("artifact.panel.zhusheng") ?: return Result(false, 0)
         val points = obj.getJSONArray("points")
+        val pred = obj.optJSONArray("rgb")?.let { a ->
+            // [rMin,rMax,gMin,gMax,bMin,bMax] + 可选 requireRB(第7项) + requireBG(第8项)。
+            // 灰底与蓝紫都满足 R−B<0，故"粉/品红家族"要靠 requireRB 才排得掉。
+            RgbPredicate(
+                a.getInt(0), a.getInt(1), a.getInt(2), a.getInt(3), a.getInt(4), a.getInt(5),
+                requireRB = if (a.length() > 6) a.getInt(6) else 0,
+                requireBG = if (a.length() > 7) a.getInt(7) else 0,
+            )
+        } ?: PURPLE_BANNER
+        // 采样框半宽与占比门槛同样可在 zone 覆盖（标定期不用重编代码）
+        val half = obj.optInt("box", 2)
+        val ratio = if (obj.has("ratio")) obj.getDouble("ratio") else Thresholds.BANNER_PURPLE_RATIO
+        val side = 2 * half + 1
+        val area = side * side
         var hits = 0
+        val detail = StringBuilder()
         for (i in 0 until points.length()) {
             val p = points.getJSONArray(i)
             val cx = profile.scale(p.getInt(0), profile.scaleX)
             val cy = profile.scale(p.getInt(1), profile.scaleY)
-            val rect = FrameRect(cx - 2, cy - 2, cx + 3, cy + 3)
-            val area = 25
-            val purple = countMatches(frame, rect, PURPLE_BANNER)
-            if (purple.toDouble() / area > Thresholds.BANNER_PURPLE_RATIO) hits++
+            val rect = FrameRect(cx - half, cy - half, cx + half + 1, cy + half + 1)
+            val m = countMatches(frame, rect, pred)
+            if (m.toDouble() / area > ratio) hits++
+            // 标定用：逐点实测占比 + 逐通道 min/max/mean。
+            // ⚠️ `Mat.get` 返回 **BGR**（不是 RGB）—— 打印标签按 b/g/r 写清楚，免得再把色域配反。
+            detail.append(" ($cx,$cy)=${m}/${area} ${boxStats(frame, rect)}")
         }
+        android.util.Log.d("BetterGI.Vote", "zhusheng 逐点:$detail")
         return Result(hits >= Thresholds.BANNER_POINTS_REQUIRED, hits)
+    }
+
+    /** 矩形内逐通道 min-max/mean（BGR 序），标定诊断用。 */
+    private fun boxStats(frame: Mat, rect: FrameRect): String {
+        val x0 = rect.left.coerceIn(0, frame.cols() - 1)
+        val y0 = rect.top.coerceIn(0, frame.rows() - 1)
+        val x1 = rect.right.coerceIn(x0 + 1, frame.cols())
+        val y1 = rect.bottom.coerceIn(y0 + 1, frame.rows())
+        val lo = IntArray(3) { 255 }
+        val hi = IntArray(3) { 0 }
+        val sum = LongArray(3)
+        var n = 0L
+        for (y in y0 until y1) {
+            for (x in x0 until x1) {
+                val px = frame.get(y, x)
+                for (c in 0..2) {
+                    val v = px[c].toInt() and 0xFF
+                    if (v < lo[c]) lo[c] = v
+                    if (v > hi[c]) hi[c] = v
+                    sum[c] += v
+                }
+                n++
+            }
+        }
+        if (n == 0L) return "b-g-r:empty"
+        return "b:${lo[0]}-${hi[0]}/${sum[0] / n} g:${lo[1]}-${hi[1]}/${sum[1] / n} r:${lo[2]}-${hi[2]}/${sum[2] / n}"
     }
 
     /**
@@ -652,6 +703,18 @@ object VoteJudges {
         val res = Mat()
         return try {
             Imgproc.matchTemplate(search, band, res, Imgproc.TM_CCOEFF_NORMED)
+            // ★ 2026-09-24 诊断：**屏蔽前**的全局最佳峰。
+            //   用途：把「先验窗把真峰挡在窗外」与「模板本身匹配不上」分开 —— 前者修窗
+            //   （或按实测增益 k≈0.905 把窗心从 advTarget 移到 k·advTarget），后者要修条带取法。
+            //   背景：band 可用率仅 ~26%/翻页（run1 实测 29 次 band vs 82 次特征锁回退），
+            //   而先验窗只覆盖 L∈[advTarget±0.85·rowPitch]；若某次滑动被吞掉一部分（L 偏小）
+            //   则真峰必在窗外 ⇒ 必然 Reject，只看现有日志分不出是哪种。
+            val preMask = if (expectedPx > 0 && priorHalf > 0) Core.minMaxLoc(res) else null
+            val preMaskNote = preMask?.let {
+                "；屏蔽前最佳 dy=%d sc=%.2f".format(
+                    bandTopInSearch - Math.round(it.maxLoc.y).toInt(), it.maxVal,
+                )
+            } ?: ""
             // ★ 期望落点先验（见 LANDING_PRIOR_HALF_RATIO）：窗外峰一律屏蔽 ⇒ 排除 ±1 行孪生峰。
             //   先验只**收窄搜索区**、不放宽任何门限；真峰若在窗外 ⇒ score 门自然拒（安全方向）。
             var priorNote = ""
@@ -670,7 +733,7 @@ object VoteJudges {
             }
             val mm = Core.minMaxLoc(res)
             if (mm.maxVal < LANDING_MIN_SCORE) {
-                return LandingResult.Reject("score<%.2f(=%.2f)".format(LANDING_MIN_SCORE, mm.maxVal) + priorNote)
+                return LandingResult.Reject("score<%.2f(=%.2f)".format(LANDING_MIN_SCORE, mm.maxVal) + priorNote + preMaskNote)
             }
             // 次峰：抑制主峰±[LANDING_SUPPRESS_HALF] 后取最大（不吞相邻周期，孪生卡才能暴露）
             val peakY = Math.round(mm.maxLoc.y).toInt()
@@ -690,7 +753,7 @@ object VoteJudges {
                 return LandingResult.Reject(
                     "peakGap<%.2f(=%.2f;主峰dy=%d 次峰dy=%d sc=%.2f)".format(
                         LANDING_MIN_PEAK_GAP, gap, bandTopInSearch - peakY, secondDy, second.maxVal,
-                    ) + priorNote,
+                    ) + priorNote + preMaskNote,
                 )
             }
             LandingResult.Ok(LandingShift(bandTopInSearch - peakY, mm.maxVal, gap))
@@ -809,10 +872,17 @@ object VoteJudges {
      * 取 tol=2（4-bit 档位允许 ±2，即单通道 ±32/255）滤掉量化边界抖动；真实翻页是整块位移，
      * 块均值移动远超 2 档（实测 diff 0.72~1.00），不受影响。
      */
-    fun thumbChangedFraction(a: ByteArray?, b: ByteArray?, tol: Int = THUMB_DIFF_TOL): Float? {
+    fun thumbChangedFraction(
+        a: ByteArray?,
+        b: ByteArray?,
+        tol: Int = THUMB_DIFF_TOL,
+        /** 只比前 N 个块；-1 = 整数组。签名缓冲是**复用**的定长 scratch，跨网格比较时必须给。 */
+        blocks: Int = -1,
+    ): Float? {
         if (a == null || b == null) return null
         if (a.size != b.size) return 1f
-        val n = a.size / 3
+        val n = minOf(a.size / 3, if (blocks > 0) blocks else Int.MAX_VALUE)
+        if (n <= 0) return null
         var diff = 0
         for (k in 0 until n) {
             val i = k * 3

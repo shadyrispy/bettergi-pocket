@@ -65,6 +65,13 @@ object MatchTemplateHelper {
                 mode == TemplateMatchMode.CCoeff ||
                 mode == TemplateMatchMode.CCorr
             ) {
+                // ⚠️ 陷阱（2026-09-23 审计 P1-3，今天**不可达**：profiles 里没有任何 `templateMatchMode`
+                //   覆盖，默认 `CCoeffNormed` 走的上面的归一化模式；改这条不会动现有识别行为）：
+                //   非归一化模式的原始分离散度（TM_SQDIFF 上千、TM_CCORR 更大），而 profile 的
+                //   `threshold` 口径是 0..1 ⇒ 只能先 NORM_MINMAX 把整张响应面压进 0..1。
+                //   代价是**最大值恒等于 1.0**：之后的 `score >= threshold` 只表达"这是相对最好的位置"，
+                //   不再表达"够像"——阈值调多高都拦不住一次假命中。
+                //   ⇒ 要按"像不像"卡阈值，只能选 *Normed 模式；用原始模式就等于关掉阈值。
                 Core.normalize(result, result, 0.0, 1.0, Core.NORM_MINMAX)
             }
 

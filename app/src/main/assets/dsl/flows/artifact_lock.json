@@ -60,11 +60,12 @@
       "do": "filterReset",
       "open": "$screens.artifact_backpack.filterRoundBtn",
       "title": "$screens.dialogs.filterPanel.anchorTitle",
-      "titleExpect": "圣遗物筛选|圣遗物",
+      "titleExpect": "圣遗物筛选",
       "reset": "$screens.dialogs.filterPanel.reset",
       "ok": "$screens.dialogs.filterPanel.ok",
       "retries": 2,
-      "note": "★ 2026-09-18 补（照 artifact_scan 抄）：**筛全量前必须先把游戏内筛选复位**。缺这一步时若用户留着「按获得时间顺序展示5星圣遗物」视图，漏斗被禁用 ⇒ 整条套装筛选链失效。本原语自带校验：OCR 确认「圣遗物筛选」面板确实打开才点重置/确认，未确认就 BACK 重试，仍不确认则放弃复位并继续（绝不盲点）。"
+      "note": "★ 2026-09-18 补（照 artifact_scan 抄）：**筛全量前必须先把游戏内筛选复位**。缺这一步时若用户留着「按获得时间顺序展示5星圣遗物」视图，漏斗被禁用 ⇒ 整条套装筛选链失效。本原语自带校验：OCR 确认「圣遗物筛选」面板确实打开才点重置/确认，未确认就 BACK 重试，仍不确认则放弃复位并继续（绝不盲点）。",
+      "titleExpectNote": "★2026-09-24 去掉「|圣遗物」宽备选。它原本是配合**裁切的 anchorTitle** 用的妥协（旧 rect [237,32,521,73] 只覆盖标题左半，OCR 会丢末字，故允许只读到货「圣遗物」）。rect 已按实机重标为 [60,58,320,100] 后，该备选变成**反向假阳性**：背包关闭态同一位置写的是「背包/圣遗物(140+…)」（实测 @100,64），同样含「圣遗物」⇒ 会被判成筛选面板已开，进而去点重置/确认——本步 note_split2 自己警告过误点会弹全屏模态面板令后续点击与翻页全失效。「圣遗物筛选」只在面板开启时出现 ⇒ 唯一可靠判据。"
     },
     {
       "do": "setFilter",

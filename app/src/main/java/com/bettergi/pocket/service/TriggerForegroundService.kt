@@ -22,6 +22,8 @@ import org.json.JSONObject
 import com.bettergi.pocket.MainActivity
 import com.bettergi.pocket.R
 import com.bettergi.pocket.capture.CapturePermissionActivity
+import com.bettergi.pocket.pcdata.CaptureConsentActivity
+import com.bettergi.pocket.pcdata.CaptureSession
 import com.bettergi.pocket.capture.CaptureResultHolder
 import com.bettergi.pocket.capture.ProjectionFrameSource
 import com.bettergi.pocket.capture.ScreenCaptureController
@@ -65,6 +67,19 @@ class TriggerForegroundService : Service() {
 
     @Volatile
     private var requestingCapturePermission = false
+
+    /** VPN 授权弹窗在路上的标记（去重 + 弹窗期间不自动启动游戏，与投影那条同语义）。 */
+    private var requestingVpnConsent = false
+
+    /**
+     * 「无人应答」兜底回调（2026-09-23 审计 P2-2）。
+     *
+     * 两个授权标志原本只在结果 intent 到达时复位。用户把系统弹窗**划掉**（既不点允许也不点拒绝）
+     * 时不会有任何回报 ⇒ 标志永久为 true ⇒ [canAutoLaunch] 恒假（"游戏启动后自动开扫描"静默失效）、
+     * 抓包开关点了没反应。到点无条件把标志放下，通路重新可点。
+     */
+    private var vpnConsentTimeout: Runnable? = null
+    private var captureConsentTimeout: Runnable? = null
 
     @Volatile
     private var shutDown = false
@@ -115,7 +130,7 @@ class TriggerForegroundService : Service() {
             settingsRepository = settingsRepository,
             launcher = genshinLauncher,
             isGenshinInForeground = { InputAccessibilityService.isGenshinInForeground() },
-            canAutoLaunch = { !requestingCapturePermission && !shutDown },
+            canAutoLaunch = { !requestingCapturePermission && !requestingVpnConsent && !shutDown },
         )
         val recognitionAssets = RecognitionAssets(applicationContext.assets)
         frameSource = ProjectionFrameSource(captureController)
@@ -149,6 +164,13 @@ class TriggerForegroundService : Service() {
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         genshinLaunchMonitor.start()
+        // 抓包会话状态 → 面板：会话在本进程、面板在 :a11y，所以变化要经桥推过去
+        //（面板**打开时**另拉一次快照，见 OverlayWindowController.bindCaptureState）。
+        scriptRunner.scope.launch {
+            com.bettergi.pocket.pcdata.CaptureSession.ui.collect { state ->
+                overlayController.updateCaptureStatus(state.brief(), state.running)
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -157,6 +179,25 @@ class TriggerForegroundService : Service() {
                 startInForeground(sharing = captureController.isRunning())
                 overlayController.show()
                 InputAccessibilityService.promptIfDisconnected(applicationContext)
+            }
+            ACTION_CAPTURE_START -> {
+                // 悬浮窗开关点亮：授权与隧道一律在主进程发起（与投影授权同一条路子）。
+                requestVpnConsent()
+            }
+            ACTION_VPN_RESULT -> {
+                requestingVpnConsent = false
+                clearVpnConsentTimeout()
+                if (intent.getBooleanExtra(EXTRA_VPN_OK, false)) {
+                    CaptureSession.start(applicationContext)?.let { NoticeCenter.error(it) }
+                } else {
+                    // 被拒：开关落回 + 一句话提醒（不跳系统设置页，用户拍板"落回就够"）。
+                    NoticeCenter.warn("没同意 VPN 授权，抓包没启动")
+                    overlayController.updateCaptureStatus("没同意 VPN 授权", running = false)
+                }
+            }
+            ACTION_CAPTURE_STOP -> {
+                // 悬浮窗（:a11y）的开关关下来：会话在本进程，只能由本进程停。
+                Log.i(TAG, CaptureSession.stop(applicationContext))
             }
             ACTION_STOP -> {
                 shutdown()
@@ -168,6 +209,7 @@ class TriggerForegroundService : Service() {
             }
             ACTION_CAPTURE_RESULT -> {
                 requestingCapturePermission = false
+                clearCaptureConsentTimeout()
                 if (!settingsRepository.get().screenShareEnabled) {
                     captureController.stop()
                     CaptureResultHolder.take() // 丢弃未消费的结果，避免下次误用
@@ -252,6 +294,45 @@ class TriggerForegroundService : Service() {
                         Log.i(TAG, "dump good: $f -> ${dst.absolutePath} (${dst.length()}B)")
                     }.onFailure { Log.w(TAG, "dump good failed", it) }
                 }
+            }
+            ACTION_DEBUG_SET_PANEL_SHOTS -> {
+                // 开：建一个带时间戳的空目录挂到 ScanEngine，之后每格识别前落一张帧。
+                // 关：摘掉引用并计数（目录与已落文件留在原地，供 adb pull 复盘）。
+                val on = intent.getBooleanExtra(EXTRA_ENABLED, false)
+                if (on) {
+                    val dir = java.io.File(
+                        getExternalFilesDir(null) ?: filesDir,
+                        "panelshots_" + java.text.SimpleDateFormat("HHmmss", java.util.Locale.US)
+                            .format(java.util.Date()),
+                    )
+                    runCatching { dir.mkdirs() }
+                    if (dir.isDirectory) {
+                        com.bettergi.pocket.scan.ScanEngine.panelShotDir = dir
+                        java.io.File(dir, "manifest.jsonl").delete()
+                        Log.i(TAG, "panel shots: ON -> ${dir.absolutePath}")
+                    } else {
+                        Log.w(TAG, "panel shots: 目录创建失败 ${dir.absolutePath}")
+                    }
+                } else {
+                    val dir = com.bettergi.pocket.scan.ScanEngine.panelShotDir
+                    com.bettergi.pocket.scan.ScanEngine.panelShotDir = null
+                    Log.i(TAG, "panel shots: OFF（已落 ${dir?.listFiles()?.count { it.name.endsWith(".jpg") } ?: 0} 张）")
+                }
+            }
+            ACTION_DEBUG_DUMP_INPUT -> {
+                // 输入库在 filesDir/scripts/good/current.json —— 模拟器上 `run-as` 被拒
+                // （setegid(AID_PACKAGE_INFO) Operation not permitted），只能由本进程自己拷到外置目录再 pull。
+                runCatching {
+                    val src = GoodRepository.file(applicationContext)
+                    if (!src.exists()) {
+                        Log.w(TAG, "dump input: 还没有输入库（${src.absolutePath} 不存在）")
+                    } else {
+                        val dstDir = getExternalFilesDir(null) ?: filesDir
+                        val dst = java.io.File(dstDir, "good_input_current.json")
+                        src.copyTo(dst, overwrite = true)
+                        Log.i(TAG, "dump input: ${src.absolutePath} -> ${dst.absolutePath} (${dst.length()}B)")
+                    }
+                }.onFailure { Log.w(TAG, "dump input failed", it) }
             }
             ACTION_DEBUG_STATUS -> {
                 val s = settingsRepository.get()
@@ -400,10 +481,11 @@ class TriggerForegroundService : Service() {
                 val flow = intent.getStringExtra(EXTRA_FLOW) ?: "artifact_scan"
                 val maxPages = intent.getIntExtra(EXTRA_MAX_PAGES, Int.MAX_VALUE)
                 // ⚠️ 2026-09-17 默认改为 **false**：几何起点（x=638，两卡缝隙）实测让 BS 的滚动**被截断**
-            // （落地条带 L 仅 501~516px = **1.7 行**，而遍历 3 行 ⇒ 重叠 1.3 行 ⇒ 同件大量重复，
-            //  武器扫描"多 126"）；改用 profile 坐标（x=1614）后落地 **777~812px = 2.7 行** ✓ 稳定。
-            val geoAdvance = intent.getBooleanExtra(EXTRA_GEO_ADVANCE, false)
-                val adaptive = intent.getBooleanExtra(EXTRA_ADAPTIVE_DIST, true)
+                // （落地条带 L 仅 501~516px = **1.7 行**，而遍历 3 行 ⇒ 重叠 1.3 行 ⇒ 同件大量重复，
+                //  武器扫描"多 126"）；改用 profile 坐标（x=1614）后落地 **777~812px = 2.7 行** ✓ 稳定。
+                // ⚠️ 走本 action 的 ADB 广播由 DebugControlReceiver 以 **true** 为默认值转发 ⇒
+                //   调试跑的是"几何起点"，产线（下方 settingsListener / GoodRepository 入口）是"字面起点"。
+                val geoAdvance = intent.getBooleanExtra(EXTRA_GEO_ADVANCE, false)
                 // §16.4 标定/调试用 plan 注入：EXTRA_PLAN 直接 JSON（adb shell 会吞双引号→失效），
                 // EXTRA_PLAN_B64 为 base64(JSON)（仅 [A-Za-z0-9+/=]，device sh 不吞，标定稳定通道）。
                 val plan = (intent.getStringExtra(EXTRA_PLAN)
@@ -427,7 +509,6 @@ class TriggerForegroundService : Service() {
                     scriptRunner.startScan(
                         flow, maxPages,
                         useGeometryAdvance = geoAdvance,
-                        useAdaptiveDistance = adaptive,
                         plan = plan,
                         timingSpec = timingSpec,
                     )
@@ -448,6 +529,20 @@ class TriggerForegroundService : Service() {
                         .getOrDefault("probe failed: ${captureController.isRunning()}")
                     Log.i(TAG, "ocr det probe: $out")
                 }
+            }
+            ACTION_DEBUG_REPLAY_PCAP -> {
+                // 抓包数据源 C1：回放 pcap → 原生解码 → GOOD → GoodRepository 输入仓库。
+                // 只走解码链，不建隧道 ⇒ 不需要 VPN 授权，游戏装没装都无关。
+                val path = intent.getStringExtra(EXTRA_PCAP_PATH) ?: ""
+                scriptRunner.scope.launch(Dispatchers.IO) {
+                    runCatching { com.bettergi.pocket.pcdata.CaptureReplay.replay(applicationContext, path) }
+                        .onFailure { Log.w(TAG, "capture replay crashed", it) }
+                }
+            }
+            ACTION_DEBUG_CAPTURE -> {
+                // 抓包数据源 C2 的 adb 通道：与悬浮窗同一条路（发起权在主进程）。
+                if (intent.getBooleanExtra(EXTRA_ENABLED, false)) requestVpnConsent()
+                else Log.i(TAG, CaptureSession.stop(applicationContext))
             }
             ACTION_DEBUG_CLICK -> {
                 val x = intent.getIntExtra(EXTRA_CLICK_X, 0)
@@ -562,7 +657,12 @@ class TriggerForegroundService : Service() {
     private fun shutdown() {
         if (shutDown) return
         shutDown = true
-        scriptRunner.stop()
+        // stop() 只掐当前扫描作业；scope 上的常驻收集器（抓包状态、探针）要随宿主一起走（P3-2）。
+        scriptRunner.shutdown()
+        clearVpnConsentTimeout()
+        clearCaptureConsentTimeout()
+        // 服务没了还留着 VPN = 白占设备唯一的隧道位、且再没人收数据（会话在本进程）。
+        if (CaptureSession.isRunning()) Log.i(TAG, CaptureSession.stop(applicationContext))
         InputAccessibilityService.cancelRecoverCheck()
         genshinLaunchMonitor.stop()
         engine.release()
@@ -621,6 +721,7 @@ class TriggerForegroundService : Service() {
     private fun requestCapturePermission() {
         if (requestingCapturePermission) return
         requestingCapturePermission = true
+        armCaptureConsentTimeout()
         try {
             // 悬浮窗点击 = 用户交互，且本应用 UID 持有可见窗口（无障碍进程里的悬浮窗）⇒
             // 命中「允许后台启动 Activity」的豁免，无需 SAW 也能直接拉起授权 activity
@@ -641,6 +742,68 @@ class TriggerForegroundService : Service() {
                 .putExtra(MainActivity.EXTRA_AUTO_REQUEST_CAPTURE, true)
             startActivity(intent)
         }
+    }
+
+    /**
+     * 发起 VPN 授权（抓包隧道的系统弹窗），**与 [requestCapturePermission] 同一条路子**：
+     * 悬浮窗点击算用户交互 ⇒ 直接拉中转页；被 ROM 拦下就拉 MainActivity 到前台再发起。
+     *
+     * 已经授权过就不弹窗：`vpnConsentIntent()` 返回 null，中转页直接回报 OK。
+     */
+    private fun requestVpnConsent() {
+        if (requestingVpnConsent) return
+        requestingVpnConsent = true
+        armVpnConsentTimeout()
+        try {
+            startActivity(
+                Intent(this, CaptureConsentActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        } catch (e: Exception) {
+            requestingVpnConsent = false
+            clearVpnConsentTimeout()
+            Log.w(TAG, "direct vpn consent launch failed, bringing app to front", e)
+            startActivity(
+                Intent(this, MainActivity::class.java)
+                    .addFlags(
+                        Intent.FLAG_ACTIVITY_NEW_TASK or
+                            Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                            Intent.FLAG_ACTIVITY_SINGLE_TOP,
+                    )
+                    .putExtra(MainActivity.EXTRA_AUTO_REQUEST_VPN, true),
+            )
+        }
+    }
+
+    /** 授权弹窗「无人应答」兜底：见 [vpnConsentTimeout] 的说明。到点只复位标志，不碰会话。 */
+    private fun armVpnConsentTimeout() {
+        vpnConsentTimeout?.let { mainHandler.removeCallbacks(it) }
+        vpnConsentTimeout = Runnable {
+            vpnConsentTimeout = null
+            if (!requestingVpnConsent) return@Runnable
+            requestingVpnConsent = false
+            Log.w(TAG, "vpn consent 无人应答（${CONSENT_TIMEOUT_MS}ms）⇒ 复位发起标志（否则 canAutoLaunch 恒假）")
+        }.also { mainHandler.postDelayed(it, CONSENT_TIMEOUT_MS) }
+    }
+
+    private fun armCaptureConsentTimeout() {
+        captureConsentTimeout?.let { mainHandler.removeCallbacks(it) }
+        captureConsentTimeout = Runnable {
+            captureConsentTimeout = null
+            if (!requestingCapturePermission) return@Runnable
+            requestingCapturePermission = false
+            Log.w(TAG, "capture consent 无人应答（${CONSENT_TIMEOUT_MS}ms）⇒ 复位发起标志")
+        }.also { mainHandler.postDelayed(it, CONSENT_TIMEOUT_MS) }
+    }
+
+    private fun clearVpnConsentTimeout() {
+        vpnConsentTimeout?.let { mainHandler.removeCallbacks(it) }
+        vpnConsentTimeout = null
+    }
+
+    private fun clearCaptureConsentTimeout() {
+        captureConsentTimeout?.let { mainHandler.removeCallbacks(it) }
+        captureConsentTimeout = null
     }
 
     private fun startInForeground(sharing: Boolean) {
@@ -746,6 +909,13 @@ class TriggerForegroundService : Service() {
         const val TAG = "BetterGI.Service"
         const val ACTION_START = "com.bettergi.pocket.action.START"
         const val ACTION_STOP = "com.bettergi.pocket.action.STOP"
+        /** 抓包会话停止（悬浮窗开关经 SettingsBridgeProvider 转发过来）。 */
+        const val ACTION_CAPTURE_STOP = "com.bettergi.pocket.action.CAPTURE_STOP"
+        /** 抓包会话开始（同样经桥过来：发起权在主进程，面板只发指令）。 */
+        const val ACTION_CAPTURE_START = "com.bettergi.pocket.action.CAPTURE_START"
+        /** VPN 授权中转页的回报（OK 或玩家拒绝）。 */
+        const val ACTION_VPN_RESULT = "com.bettergi.pocket.action.VPN_RESULT"
+        const val EXTRA_VPN_OK = "vpn_ok"
         const val ACTION_CAPTURE_RESULT = "com.bettergi.pocket.action.CAPTURE_RESULT"
         const val ACTION_CAPTURE_DENIED = "com.bettergi.pocket.action.CAPTURE_DENIED"
         /**
@@ -772,6 +942,14 @@ class TriggerForegroundService : Service() {
          * 落点：`/sdcard/Android/data/<pkg>/files/sweep_last_good.json`（adb shell 有 ext_data_rw 可读）。
          */
         const val ACTION_DEBUG_DUMP_GOOD = "com.bettergi.pocket.action.DEBUG_DUMP_GOOD"
+        /** 调试：把**当前输入库**（扫描产物或抓包入库）拷到外置目录，供 adb pull 做对照。 */
+        const val ACTION_DEBUG_DUMP_INPUT = "com.bettergi.pocket.action.DEBUG_DUMP_INPUT"
+        /**
+         * 调试：逐格落盘「识别实际使用的那一帧」（`--ez enabled true|false`）。
+         * 落点 `<外置files>/panelshots_<HHmmss>/`，含 `manifest.jsonl`。用于判定整页面板冻结
+         * 到底是游戏侧真没换面板，还是我方误识别 —— 见 ScanEngine.dumpPanelShot。
+         */
+        const val ACTION_DEBUG_SET_PANEL_SHOTS = "com.bettergi.pocket.action.DEBUG_SET_PANEL_SHOTS"
         /** 调试：把设备上的 GOOD/配装计划文件复制成当前输入（`--es src /sdcard/xxx.json`）。 */
         const val ACTION_DEBUG_SET_GOOD = "com.bettergi.pocket.action.DEBUG_SET_GOOD"
         const val EXTRA_GOOD_SRC = "src"
@@ -792,6 +970,11 @@ class TriggerForegroundService : Service() {
         const val ACTION_DEBUG_CLICK = "com.bettergi.pocket.action.DEBUG_CLICK"
         const val ACTION_DEBUG_OCR_BENCH = "com.bettergi.pocket.action.DEBUG_OCR_BENCH"
         const val ACTION_DEBUG_OCR_DET = "com.bettergi.pocket.action.DEBUG_OCR_DET"
+        /** 抓包数据源 C1：离线回放一个 pcap 到 GOOD（`EXTRA_PCAP_PATH` 指路径）。 */
+        const val ACTION_DEBUG_REPLAY_PCAP = "com.bettergi.pocket.action.DEBUG_REPLAY_PCAP"
+        const val EXTRA_PCAP_PATH = "pcapPath"
+        /** 抓包 C2：`--ez enabled true` 开在线隧道，false 收隧道并入库。 */
+        const val ACTION_DEBUG_CAPTURE = "com.bettergi.pocket.action.DEBUG_CAPTURE"
 
         /**
          * ★ 只读性能探针（2026-09-12）：帧路径拆段（alloc/put/cvtColor/全帧 vs ROI 口径）
@@ -847,10 +1030,8 @@ class TriggerForegroundService : Service() {
          * 空/缺省 → 全默认（与改动前逐位一致）。
          */
         const val EXTRA_TIMING = "timing"
-        /** §12.1 A/B：true=几何推导翻页落点，false=profiles 写死坐标。 */
+        /** §12.1：true=几何推导翻页起点（卡缝），false=profiles 写死 `advance.from`。只切起点。 */
         const val EXTRA_GEO_ADVANCE = "geoAdvance"
-        /** §12.2 A/B：true=每页按相位误差自适应翻页距离。 */
-        const val EXTRA_ADAPTIVE_DIST = "adaptiveDist"
         const val EXTRA_CLICK_X = "x"
         const val EXTRA_CLICK_Y = "y"
         const val EXTRA_CLICK_DURATION = "duration"
@@ -859,5 +1040,11 @@ class TriggerForegroundService : Service() {
 
         private const val NOTIFICATION_CHANNEL_ID = "bettergi_pocket_trigger"
         private const val NOTIFICATION_ID = 1001
+
+        /**
+         * 授权弹窗的「无人应答」上限（见 [armVpnConsentTimeout]）：正常作答几秒内，
+         * 划掉弹窗则永远没有回报 ⇒ 授权标志需要一个复位点，否则 `canAutoLaunch` 永久为假。
+         */
+        private const val CONSENT_TIMEOUT_MS = 60_000L
     }
 }

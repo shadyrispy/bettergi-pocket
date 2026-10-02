@@ -63,6 +63,18 @@ class OnnxOcrEngine(
     var tier: EpTierPicker.Tier = EpTierPicker.Tier.CPU
         private set
 
+    /** 当前生效的 intra-op 线程数（首启实测择优，见 [benchmarkIntra]） */
+    @Volatile
+    var intraOpThreads: Int = DEFAULT_INTRA_OP_THREADS
+        private set
+
+    /**
+     * 本次会话的 EP 候选序（运行期降档沿此序回退），由 [OnnxPaddleOcrService.prepare] 按硬件写入。
+     * 默认只有 CPU ⇒ 单测里构造引擎不会隐式去试任何有风险的原生 EP。
+     */
+    @Volatile
+    var tierOrder: List<EpTierPicker.Tier> = listOf(EpTierPicker.Tier.CPU)
+
     /** 会话是否已就绪（未就绪时所有 run 返回空，调用方应降级到 ML Kit） */
     @Volatile
     var ready: Boolean = false
@@ -72,12 +84,12 @@ class OnnxOcrEngine(
     val recModelPath: String get() = recModel.absolutePath
 
     /** 初始化（装载模型 + 按目标档创建双会话）。失败返回 false 并保持未就绪。 */
-    fun initialize(targetTier: EpTierPicker.Tier): Boolean {
+    fun initialize(targetTier: EpTierPicker.Tier, intraThreads: Int = DEFAULT_INTRA_OP_THREADS): Boolean {
         val result = runCatching {
             close()
             val e = OrtEnvironment.getEnvironment()
-            val detOpts = buildOptions(targetTier)
-            val recOpts = buildOptions(targetTier)
+            val detOpts = buildOptions(targetTier, intraThreads)
+            val recOpts = buildOptions(targetTier, intraThreads)
             val d = e.createSession(detModel.absolutePath, detOpts)
             val r = e.createSession(recModel.absolutePath, recOpts)
             detOpts.close()
@@ -88,6 +100,7 @@ class OnnxOcrEngine(
             detInputName = d.inputInfo.keys.firstOrNull() ?: "x"
             recInputName = r.inputInfo.keys.firstOrNull() ?: "x"
             tier = targetTier
+            intraOpThreads = intraThreads
             ready = true
         }
         if (result.isFailure) {
@@ -96,16 +109,65 @@ class OnnxOcrEngine(
         return result.isSuccess
     }
 
-    private fun buildOptions(tier: EpTierPicker.Tier): OrtSession.SessionOptions {
+    private fun buildOptions(tier: EpTierPicker.Tier, intraThreads: Int): OrtSession.SessionOptions {
         val opts = OrtSession.SessionOptions()
-        // 移动端大核有限，intra=2 实测优于默认（全核调度开销 > 并行收益）
-        opts.setIntraOpNumThreads(INTRA_OP_THREADS)
+        opts.setIntraOpNumThreads(intraThreads.coerceAtLeast(1))
         when (tier) {
             EpTierPicker.Tier.NNAPI -> opts.addNnapi(NN_API_FLAGS)
             EpTierPicker.Tier.XNNPACK -> opts.addXnnpack(emptyMap())
+            // QNN 需要高通 SDK 的 libQnnHtp.so 等（ORT 的 AAR 不含）；能不能进候选由
+            // DeviceCapabilities.qnnLibsLoadable 决定，这里只负责真的加上。
+            EpTierPicker.Tier.QNN -> opts.addQnn(emptyMap())
             EpTierPicker.Tier.CPU -> { /* 默认 CPU EP，无需追加 */ }
         }
         return opts
+    }
+
+    /**
+     * intra-op 线程数择优：对每个候选**另建一个临时 rec 会话**，跑真实槽宽的 run 取中位。
+     *
+     * 为什么必须实测而不能按核数拍：见 [EpTierPicker.intraOpCandidates] —— 同一台机同一个构建，
+     * intra=2 的绝对值跨会话能漂 406~818ms，按机型/核数推出来的数没有依据。
+     *
+     * ⚠️ `runs = 3` **偏少**：真机实测里有一次（2026-09-26 15:57）把 intra=4 判成了赢家，
+     * 而它随后四轮复测都是**慢 2.2~2.3×**。择优目前既没有重复次数下限、也没有"挑战者须明显更优
+     * 才换"的余量 ⇒ 换错方向的概率不低，改这里之前先看 `intraOpCandidates` 的那张五轮表。
+     *
+     * ⚠️ 只测 rec、不测 det：det 恒为固定形状、对线程数不敏感（实测 1.20→1.30 只随版本变），
+     *    而 rec 是稳态每格 9 次的主开销，选它做基准才有意义。
+     * ⚠️ 这里**不试新 EP**，只换线程数 ⇒ 没有 `createSession` 挂起/SIGSEGV 的风险。
+     */
+    fun benchmarkIntra(candidates: List<Int>, width: Int = 320, runs: Int = 3): Map<Int, Long> {
+        if (candidates.isEmpty()) return emptyMap()
+        val e = runCatching { OrtEnvironment.getEnvironment() }.getOrNull() ?: return emptyMap()
+        val wi = width.coerceIn(1, OnnxPaddleOcrService.REC_W_MAX)
+        val input = FloatBuffer.wrap(FloatArray(3 * REC_H * wi))
+        val shape = longArrayOf(1, 3, REC_H.toLong(), wi.toLong())
+        val out = LinkedHashMap<Int, Long>()
+        for (n in candidates) {
+            val ms = runCatching {
+                val opts = buildOptions(tier, n)
+                val s = e.createSession(recModel.absolutePath, opts)
+                opts.close()
+                try {
+                    val name = s.inputInfo.keys.firstOrNull() ?: "x"
+                    LongArray(runs + 1) {
+                        val t0 = System.nanoTime()
+                        OnnxTensor.createTensor(e, input, shape).use { t ->
+                            s.run(Collections.singletonMap(name, t)).use { r -> (r.get(0) as? OnnxTensor)?.floatBuffer }
+                        }
+                        (System.nanoTime() - t0) / 1_000_000
+                    }.sorted().drop(1) // 丢掉头一次（含首帧编译/分配）
+                } finally {
+                    runCatching { s.close() }
+                }.let { if (it.isEmpty()) Long.MAX_VALUE else it[it.size / 2] }
+            }.getOrElse {
+                Log.w(TAG, "intra=$n 基准失败，跳过", it)
+                Long.MAX_VALUE
+            }
+            out[n] = ms
+        }
+        return out
     }
 
     /**
@@ -170,18 +232,19 @@ class OnnxOcrEngine(
         }
     }
 
-    /** 连续失败达阈值则降一档 EP（CPU 为兜底，不再降）。必须在读锁外调用。 */
+    /** 连续失败达阈值则降一档 EP（CPU 为兜底，不再降）。必须在读锁外调用。
+     *  ⚠️ 无参重载只在**没有候选序**时用（JVM 单测路径）；真机走 [degradeTier] 的带序版本。 */
     private fun maybeDegradeAfterFailure() {
         if (consecutiveFailures.get() < FAILURES_BEFORE_DEGRADE) return
         consecutiveFailures.set(0)
-        val next = degradeTier()
+        val next = degradeTier(tierOrder)
         Log.w(TAG, "连续推理失败 $FAILURES_BEFORE_DEGRADE 次，EP 降档 → ${next?.label ?: "已到 CPU 兜底"}")
     }
 
-    /** 运行期降档重建；CPU 档不再降，返回 null。 */
-    fun degradeTier(): EpTierPicker.Tier? {
-        val next = EpTierPicker.degrade(tier) ?: return null
-        return if (initialize(next)) next else null
+    /** 运行期降档重建；到兜底档后返回 null。候选序由调用方（[tierOrder]）给出。 */
+    fun degradeTier(order: List<EpTierPicker.Tier>): EpTierPicker.Tier? {
+        val next = EpTierPicker.degrade(tier, order) ?: return null
+        return if (initialize(next, intraOpThreads)) next else null
     }
 
     /**
@@ -200,6 +263,53 @@ class OnnxOcrEngine(
         return times.sorted()[times.size / 2]
     }
 
+    /**
+     * ★ 只读分段探针（`DEBUG_OCR_BENCH` 用）：把 [runSession] 的三步拆开分别计时 ——
+     * 建输入张量 / native `session.run` / **把输出 FloatBuffer 物化成 Java float[]**。
+     *
+     * 它要回答的问题以及已经问出来的答案（2026-09-26 华为 EML-AL00 实测）：
+     * ppocr-bench 在同一台机器、**完全同形状**（in=46080 / out=276240）下报 `ort/cpu/rec = 25.6ms`，
+     * 而我们端到端 `runRec` 要 80~115ms。当时怀疑差在"我们多做了一份输出拷贝"——
+     * **探针否证了这个猜测**：`copy` 只有 4~12ms，`create` 9~27ms，**时间全在 `run` 里**。
+     * 随后"静态形状导出"（113ms）与"ORT 1.20→1.22"（80ms）两条也都被实测排除。
+     * ⇒ 那 4.4× 至今未归因，完整排除链见 `dsl/verify/_audit/HW-PERF-20260926.md` §6。
+     *
+     * ⚠️ 这段是 [runSession] 的**镜像**而不是它的调用方：改了 runSession 记得同步这里；
+     *    但**别把生产路径改成走这里**（这里没有失败看门狗、也不做 EP 降档）。
+     */
+    fun runSplitProbe(width: Int, runs: Int = 5): String {
+        val e = env ?: return "env not ready"
+        val s = recSession ?: return "rec session not ready"
+        val wi = width.coerceIn(1, OnnxPaddleOcrService.REC_W_MAX)
+        val input = java.nio.FloatBuffer.wrap(FloatArray(3 * REC_H * wi))
+        val shape = longArrayOf(1, 3, REC_H.toLong(), wi.toLong())
+        var createNs = 0L
+        var runNs = 0L
+        var copyNs = 0L
+        var outElems = 0
+        repeat(runs) {
+            val t0 = System.nanoTime()
+            OnnxTensor.createTensor(e, input, shape).use { tensor ->
+                val t1 = System.nanoTime()
+                s.run(Collections.singletonMap(recInputName, tensor)).use { result ->
+                    val t2 = System.nanoTime()
+                    val t = result.get(0) as? OnnxTensor
+                    if (t != null) {
+                        val b = t.floatBuffer
+                        val n = b.remaining()
+                        FloatArray(n).also { a -> b.get(a) }
+                        outElems = n
+                        copyNs += System.nanoTime() - t2
+                    }
+                    runNs += t2 - t1
+                }
+                createNs += t1 - t0
+            }
+        }
+        return "rec w=$wi runs=$runs out=$outElems(${"%.2f".format(outElems * 4 / 1048576.0)}MB) " +
+            "create=${createNs / runs / 1_000_000}ms run=${runNs / runs / 1_000_000}ms copy=${copyNs / runs / 1_000_000}ms"
+    }
+
     /** 写锁释放：等待所有在途 run 返回后才 close；close 后 run 返回空（不再抛异常）。 */
     override fun close() = sessionLock.write {
         runCatching { detSession?.close() }
@@ -212,7 +322,13 @@ class OnnxOcrEngine(
     companion object {
         const val DET_SIZE = 640
         const val REC_H = 48
-        private const val INTRA_OP_THREADS = 2
+        /**
+         * 兜底 intra-op 线程数。**不是"实测最优值"** —— 最优值由 [benchmarkIntra] 首启实测决定，
+         * 只有基准整体失败时才落到这里。2 这个数在 Kirin 970 上从 1.20 一直成立到 1.30
+         * （五轮复测里四轮 intra=4 更慢，见 [EpTierPicker.intraOpCandidates] 的表），
+         * 所以它同时也是"基准不可信时最不该被换掉"的那个值。
+         */
+        const val DEFAULT_INTRA_OP_THREADS = 2
         private const val FAILURES_BEFORE_DEGRADE = 3
         private const val TAG = "BetterGI.Ort"
 

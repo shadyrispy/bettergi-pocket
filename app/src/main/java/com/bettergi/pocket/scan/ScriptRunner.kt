@@ -16,6 +16,7 @@ import com.bettergi.pocket.recognition.name.GoodNames
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -183,10 +184,8 @@ class ScriptRunner(
     fun startScan(
         flowName: String = "artifact_scan",
         maxPages: Int = Int.MAX_VALUE,
-        /** ⚠️ 2026-09-17 默认 false（几何起点致滚动截断）。 */
+        /** ⚠️ 2026-09-17 默认 false（几何起点致滚动截断）。**只切换滑动起点**（几何卡缝 / profile 字面 from）。 */
         useGeometryAdvance: Boolean = false,
-        // §12.2 默认关：待真机 err 序列标定后再开（adb --ez adaptiveDist true 可开）
-        useAdaptiveDistance: Boolean = false,
         /** 外部任务计划（P4 规则层注入）：artifact_lock 的 targets / auto_equip 的 plan。 */
         plan: List<JSONObject>? = null,
         /**
@@ -224,6 +223,9 @@ class ScriptRunner(
             listener.onFinished("ocr_unavailable"); return
         }
         currentJob = scope.launch {
+            // 提到 try 外：`catch` 块看不到 try 体内声明的局部函数（P2-3 的导出就靠这两行才可达）。
+            val exported = java.util.concurrent.atomic.AtomicBoolean(false)
+            var exportResults: (() -> Unit)? = null
             try {
                 val profile = ScreenProfile.loadFor(appContext.assets, size.first, size.second)
                 profile.calibrate(size.first, size.second)
@@ -271,7 +273,6 @@ class ScriptRunner(
                     listener = listener,
                     maxPages = maxPages,
                     useGeometryAdvance = useGeometryAdvance,
-                    useAdaptiveDistance = useAdaptiveDistance,
                     plan = plan,
                     // §13：流程名 → 识别日志的来源标签（LOCK/EQUIP/CHAR/SCAN）
                     flowName = flowName,
@@ -292,7 +293,6 @@ class ScriptRunner(
                 //   + 置 stopRequested（若阻塞随后解除，run() 会自行收尾，不重复导出）。
                 //   非侵入：不改任何既有判据/流程，只在扫描期多跑一个 5s 周期的只读线程。
                 val wdStop = java.util.concurrent.atomic.AtomicBoolean(false)
-                val exported = java.util.concurrent.atomic.AtomicBoolean(false)
                 fun exportNow(why: String) {
                     if (!exported.compareAndSet(false, true)) return
                     val arts = engine.results.toList()
@@ -316,6 +316,8 @@ class ScriptRunner(
                         )
                     }.onFailure { Log.e(TAG, "导出失败（$why）", it) }
                 }
+                // 交给 try 外的 catch 用：异常发生时本轮已识别的结果不能跟着一起没了（P2-3）。
+                exportResults = { exportNow("aborted") }
                 val wd = Thread {
                     while (!wdStop.get()) {
                         try {
@@ -354,11 +356,16 @@ class ScriptRunner(
                 }
                 exportNow("normal")
             } catch (e: kotlinx.coroutines.CancellationException) {
-                // 主动 stop()：取消非失败，不刷 error 日志（真机实测 JobCancellationException 噪音）
+                // 主动 stop()：取消非失败，不刷 error 日志（真机实测 JobCancellationException 噪音）。
+                // **不导出**：手动停是"这一轮不要了"，而输入仓库是单文件覆盖写 ⇒ 半截库存会把上一份
+                // 完整输入顶掉，`artifact_lock`/`auto_equip` 却拿它当计划依据（与 CaptureSession 同策）。
                 Log.i(TAG, "scan cancelled")
                 listener.onFinished("cancelled")
             } catch (e: Exception) {
                 Log.e(TAG, "scan failed", e)
+                // 崩溃 ≠ 用户放弃：本轮已识别的件必须留下（此前 `exportNow("normal")` 被跨过 ⇒ 全废，
+                // 而看门狗超时那条路反而导出 —— 见 :296 的 P2-3 注释）。
+                exportResults?.invoke()
                 listener.onFinished("error: ${e.message}")
             }
         }
@@ -370,6 +377,17 @@ class ScriptRunner(
     fun stop() {
         currentJob?.cancel()
         currentJob = null
+    }
+
+    /**
+     * 宿主（前台服务）销毁时调用。
+     *
+     * [stop] 只掐"当前这一次扫描"，而 [scope] 上还挂着别的常驻协程（`TriggerForegroundService:159`
+     * 的抓包状态收集器、各探针）⇒ 服务已经死了它们还在跑，并且持有服务与悬浮窗引用（P3-2）。
+     */
+    fun shutdown() {
+        stop()
+        scope.cancel()
     }
 
     fun isRunning(): Boolean = running

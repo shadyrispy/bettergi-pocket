@@ -148,7 +148,11 @@ object GoodPlan {
     }
 
     /**
-     * **载荷合法性**校验（对齐 GOODScanner 的 400 语义：空键 / rarity∉{4,5} / level∉[0,20]）。
+     * **载荷合法性**校验（空键 / rarity∉{3,4,5} / level∉[0,20]）。
+     *
+     * ⚠️ 上游 GOODScanner 的 400 语义只收 4★/5★，这里**刻意放宽到含 3★**（2026-09-22 定）：
+     *   bp 的两条数据源都已含 3★（OCR 扫描 `df4b108`、抓包导出），导入侧再卡 4★
+     *   就等于把自家产物判成不合法。计划要不要真用 3★ 归规则层决定，不归这里管。
      *
      * 与"能不能喂给这条脚本"（[whyNot]）是两件事：这个函数只问"条目本身合不合法"，
      * 所以**在导入时也能独立调用**（那时还不知道要给哪条脚本用）。
@@ -176,7 +180,7 @@ object GoodPlan {
         if (a.optString("slotKey", a.optString("slot")).isBlank()) return "缺 slotKey"
         if (a.optString("mainStatKey").isBlank()) return "缺 mainStatKey"
         val rarity = a.optInt("rarity", -1)
-        if (rarity != -1 && rarity !in 4..5) return "rarity=" + rarity + "（只支持 4★/5★）"
+        if (rarity != -1 && rarity !in 3..5) return "rarity=" + rarity + "（只支持 3★~5★）"
         val level = a.optInt("level", -1)
         if (level != -1 && level !in 0..20) return "level=" + level + "（应在 0..20）"
         val subs = a.optJSONArray("substats")

@@ -106,10 +106,14 @@ object ScriptStore {
         }
         val dir = File(context.filesDir, "${FlowSource.OVERRIDE_ROOT}/$FLOWS_DIR")
         if (!dir.exists() && !dir.mkdirs()) return false to "无法创建目录：${dir.path}"
-        val target = File(dir, "$key.json")
+        // key 来自**导入文件自己**的 "flow" 字段（或 SAF 文件名）⇒ 是外部输入：
+        // `File(dir, "$key.json")` 里带 `../` 就能写到 flows/ 之外去（app 私有目录内的任意覆盖写）。
+        val safeKey = key.trim().filter { it.isLetterOrDigit() || it == '-' || it == '_' }
+        if (safeKey.isEmpty()) return false to "流程名不合法（只允许字母/数字/-/_）：'$key'"
+        val target = File(dir, "$safeKey.json")
         runCatching { target.writeText(text) }.getOrElse { return false to "写入失败：${it.message}" }
         notifyChanged(context)
-        return true to "已导入：$key.json"
+        return true to "已导入：$safeKey.json"
     }
 
     /** 恢复内置：删除 override 副本。 */

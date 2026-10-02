@@ -54,6 +54,7 @@ import com.bettergi.pocket.input.AccessibilityServiceHealth
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.log.RecognitionLog
 import com.bettergi.pocket.settings.TriggerSettings
+import com.bettergi.pocket.settings.SettingsBridgeProvider
 import com.bettergi.pocket.settings.SettingsGateway
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -123,6 +124,11 @@ class OverlayWindowController(
     private var rowAutoSkip: View? = null
     private var rowQuickSkip: View? = null
     private var rowAutoPick: View? = null
+    private var switchCapture: SwitchCompat? = null
+    private var captureSubtitle: TextView? = null
+
+    /** 抓包状态订阅：会话状态是 flow，面板只是它的一个读者。 */
+    private val captureScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var rowLaunch: View? = null
     private var autoSkipExtras: View? = null
     private var autoSkipChevron: ImageView? = null
@@ -434,6 +440,7 @@ class OverlayWindowController(
         val quickSkipSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_quick_skip)
         val autoPickSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_auto_pick)
         val autoLaunchSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_auto_launch)
+        val captureSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_capture)
         val logToggle = root.findViewById<ImageButton>(R.id.overlay_log_toggle)
 
         bubbleView = bubble
@@ -456,6 +463,8 @@ class OverlayWindowController(
         switchQuickSkip = quickSkipSwitch
         switchAutoPick = autoPickSwitch
         switchAutoLaunch = autoLaunchSwitch
+        switchCapture = captureSwitch
+        captureSubtitle = root.findViewById(R.id.overlay_capture_subtitle)
         scanProgress = root.findViewById(R.id.overlay_scan_progress)
         launchHint = root.findViewById(R.id.overlay_auto_launch_hint)
         launchSubtitle = root.findViewById(R.id.overlay_launch_subtitle)
@@ -567,6 +576,14 @@ class OverlayWindowController(
         autoLaunchSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (updatingUi) return@setOnCheckedChangeListener
             settingsRepository.setAutoLaunchGenshinEnabled(isChecked)
+        }
+        captureSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (updatingUi) return@setOnCheckedChangeListener
+            // 抓包是一次性会话，不进 settingsRepository（不持久化）：重启不该自动开隧道。
+            sendCaptureCommand(
+                if (isChecked) SettingsBridgeProvider.METHOD_CAPTURE_START
+                else SettingsBridgeProvider.METHOD_CAPTURE_STOP,
+            )
         }
         rootView = root
         params = layoutParams
@@ -1000,6 +1017,62 @@ class OverlayWindowController(
         )
     }
 
+    /**
+     * 抓包开关的两个方向都只**发指令**：会话、隧道、VPN 弹窗的发起全在主进程。
+     *
+     * 为什么不在这里直接 `startActivity(授权页)`：那也能弹（悬浮窗点击算用户交互），
+     * 但发起逻辑就裂成两半 —— 投影那套是「服务发起 → 被拦则拉前台再发起 → 中转页回报服务」，
+     * VPN 跟它同构才有统一的去重、提醒和开关落回。
+     */
+    private fun sendCaptureCommand(method: String) {
+        captureScope.launch(Dispatchers.IO) {
+            val ok = runCatching {
+                themedContext.contentResolver.call(
+                    SettingsBridgeProvider.uri(themedContext), method, null, null,
+                )?.getBoolean(SettingsBridgeProvider.KEY_OK) == true
+            }.getOrDefault(false)
+            if (!ok) {
+                // 桥不通（无障碍没连 / 主进程服务没起）⇒ 开关必须落回，
+                // 不能停在玩家刚点亮的位置上骗他"已经在抓了"。
+                mainHandler.post { applyCaptureStatus(running = false, text = "助手没在跑，抓包没启动") }
+            }
+        }
+    }
+
+    /**
+     * 面板**打开时**拉一次会话快照。
+     *
+     * ⚠️ 这里刻意不订阅 `CaptureSession.ui`：面板跑在 `:a11y`，那份单例是**本进程**的，
+     *    订阅它只会永远停在初值 —— 状态一律由主进程经 `M_CAPTURE` 推进来
+     *    （见 `TriggerForegroundService.onCreate` 与 [updateCaptureStatus]）。
+     */
+    private fun bindCaptureState() {
+        captureScope.launch(Dispatchers.IO) {
+            val snapshot = runCatching {
+                themedContext.contentResolver.call(
+                    SettingsBridgeProvider.uri(themedContext),
+                    SettingsBridgeProvider.METHOD_CAPTURE_SNAPSHOT, null, null,
+                )
+            }.getOrNull() ?: return@launch
+            val text = snapshot.getString(SettingsBridgeProvider.KEY_TEXT).orEmpty()
+            val running = snapshot.getBoolean(SettingsBridgeProvider.KEY_RUNNING)
+            mainHandler.post { applyCaptureStatus(running, text) }
+        }
+    }
+
+    /** 主进程推进来的会话状态（经 `A11yOverlayRuntime`，已在主线程）。 */
+    fun updateCaptureStatus(running: Boolean, text: String) {
+        applyCaptureStatus(running, text)
+    }
+
+    private fun applyCaptureStatus(running: Boolean, text: String) {
+        if (text.isEmpty()) return
+        updatingUi = true
+        switchCapture?.isChecked = running
+        updatingUi = false
+        captureSubtitle?.text = text
+    }
+
     /** §13：订阅全局日志（开窗即回放全部历史）。 */
     private fun bindRecognitionLog() {
         logListener?.let { RecognitionLog.removeListener(it) }
@@ -1250,6 +1323,7 @@ class OverlayWindowController(
         logText = body.findViewById(R.id.overlay_log_text)
         // §13：开窗即订阅全局日志并回放历史（历史保留在 RecognitionLog，不随关窗清除）
         bindRecognitionLog()
+        bindCaptureState()
         logScroll = body.findViewById(R.id.overlay_log_scroll)
 
         val width = dp(LOG_WIDTH_DP)

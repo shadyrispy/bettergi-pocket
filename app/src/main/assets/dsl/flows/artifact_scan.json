@@ -68,14 +68,15 @@
       "do": "filterReset",
       "open": "$screens.artifact_backpack.filterRoundBtn",
       "title": "$screens.dialogs.filterPanel.anchorTitle",
-      "titleExpect": "圣遗物筛选|圣遗物",
+      "titleExpect": "圣遗物筛选",
       "reset": "$screens.dialogs.filterPanel.reset",
       "ok": "$screens.dialogs.filterPanel.ok",
       "retries": 2,
       "note_entry20260912": "2026-09-12：圣遗物页签入口失效 ⇒ 改为：点「背包」(打开上次记住的类别，通常就是圣遗物) → 左下「筛选(漏斗)」filterRoundBtn 中心(300,1002) 打开「圣遗物筛选」面板 → filterPanel.reset(300,1002) → filterPanel.ok(638,1002)。到达校验由上一段 enterScreen 的 screens.artifact_backpack.count 锚点负责。⚠️ 底部同排按钮极易点错：排序≡≈(377,983)、锁定辅助≈(605,999)、分解≈(929,1000)、摧毁≈(185,1000)；面板未打开时点到这些会进摧毁/锁定辅助界面 ⇒ 全格读到同一内容 + 翻页失败。",
       "note_split2": "2026-09-12：改用**带校验**的 filterReset 原语（不再是盲点 3 连击）。点完漏斗必须 OCR 确认「圣遗物筛选」面板真的打开了才点重置/确认；未确认则按一次 BACK 清掉可能卡住的模态面板后重试（retries=2）；仍不确认 ⇒ 放弃复位并继续扫描（宁可带着筛选扫，也绝不盲点：filterPanel.ok 中心 (638,1002) 落在「锁定辅助」=[544,981,666,1017] 内，误点会弹出全屏模态面板让之后所有点击/翻页失效）。titleExpect 用 | 分隔备选，因 profile.anchorTitle 只覆盖实测标题 [179,50,419,104]@2560 的左半，OCR 可能丢掉末字「选」；备选「圣遗物」对右缘裁切免疫。",
       "note_20260914": "2026-09-14 用户判定：**删除后续的 `dualStateButton`（五星开关 ensure:on）**——该开关文案「按获得时间顺序展示5星圣遗物」属视图描述，回归全量视图由本步 `filterReset`（重置筛选）负责，无需再点它。⚠️ canary：若某轮导出件数骤降到 ~110（= 5★ 单件数），优先怀疑「该开关被留在 5★-only 态」（历史 2026-09-12 曾实测 off/深藏青 ≈ 只显示 5★；该结论与开关文案语义相左，2026-09-14 未复测）。",
-      "note_pill20260914b": "2026-09-14 晚修订：A/B 实测（ON→OFF→ON 各截一帧）拿到决定性证据——pill=ON 时漏斗与排序按钮均带红色🚫禁用徽标 ⇒ ON 是游戏预设特殊视图（5★·按获得时间，与开关文案一致）。上午『删除后无需再点它』的判断判据选错（只比了首卡与 count，均不反映筛选态），已修正：本步之前现插有 dualStateButton ensure:'off' 幂等复位——pill=ON 时本步漏斗不可点，必须先切 OFF。canary（导出件数骤降 ~110 ⇒ 怀疑 5★-only 态）依然有效；2026-09-12『off/深藏青≈只显示 5★』实为判态颠倒（ON 才是 5★-only）。"
+      "note_pill20260914b": "2026-09-14 晚修订：A/B 实测（ON→OFF→ON 各截一帧）拿到决定性证据——pill=ON 时漏斗与排序按钮均带红色🚫禁用徽标 ⇒ ON 是游戏预设特殊视图（5★·按获得时间，与开关文案一致）。上午『删除后无需再点它』的判断判据选错（只比了首卡与 count，均不反映筛选态），已修正：本步之前现插有 dualStateButton ensure:'off' 幂等复位——pill=ON 时本步漏斗不可点，必须先切 OFF。canary（导出件数骤降 ~110 ⇒ 怀疑 5★-only 态）依然有效；2026-09-12『off/深藏青≈只显示 5★』实为判态颠倒（ON 才是 5★-only）。",
+      "titleExpectNote": "★2026-09-24 去掉「|圣遗物」宽备选。它原本是配合**裁切的 anchorTitle** 用的妥协（旧 rect [237,32,521,73] 只覆盖标题左半，OCR 会丢末字，故允许只读到货「圣遗物」）。rect 已按实机重标为 [60,58,320,100] 后，该备选变成**反向假阳性**：背包关闭态同一位置写的是「背包/圣遗物(140+…)」（实测 @100,64），同样含「圣遗物」⇒ 会被判成筛选面板已开，进而去点重置/确认——本步 note_split2 自己警告过误点会弹全屏模态面板令后续点击与翻页全失效。「圣遗物筛选」只在面板开启时出现 ⇒ 唯一可靠判据。"
     },
     {
       "do": "assertScreen",
@@ -98,9 +99,9 @@
           "do": "stopWhen",
           "mode": "duplicateStreak",
           "streak": 3,
-          "dupPageConfirm": 2,
+          "dupPageConfirm": 1,
           "action": "Stop",
-          "note": "阈值不再承担「回卷」判据：pagedGrid 内引擎按**该网格一页的卡片数**（cols×traverseRows）自动覆盖（见 ScanEngine.dupLimitEffective）；此处的 3 仅作 snap/rosterFind 等非翻页路径的兜底。"
+          "note": "2026-09-26 方案 C：pagedGrid 内阈值由引擎按**一页 + 一行**（cols×(traverseRows+1)）覆盖且**跨翻页累积**（见 ScanEngine.dupLimitEffective），所以一次命中就等于「点完一整页无新增、再翻一页、第一行仍无新增」⇒ 页级确认置 1。抬这一行的理由：单次滑动没落地只会造出恰好「一页」个重复件，旧阈值 21 会被一次滑空误停。streak=3 仅作 snap/rosterFind 等非翻页路径的兜底。"
         },
         {
           "do": "vote",

@@ -367,6 +367,39 @@
                             android:visibility="gone" />
                     </LinearLayout>
 
+                    <!-- 抓包权限（C2 与授权 UI 的融合点）：行由代码按库的 PermissionSnapshot
+                         生成；横竖屏两份布局都要有（本页面有 layout-land 变体）。 -->
+                    <LinearLayout
+                        android:id="@+id/capture_section"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="14dp"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="抓包权限"
+                            android:textColor="@color/pocket_text"
+                            android:textSize="16sp" />
+
+                        <LinearLayout
+                            android:id="@+id/capture_list"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:orientation="vertical" />
+
+                        <TextView
+                            android:id="@+id/capture_hint"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:lineSpacingExtra="3dp"
+                            android:textColor="@color/pocket_text_muted"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+
                     <LinearLayout
                         android:id="@+id/swipe_row"
                         android:contentDescription="展开或收起滑动测试"

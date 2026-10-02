@@ -309,7 +309,12 @@ class ScanEngineDryRunTest {
     )
 
     // ---- dry-run ----
-    private fun runEngine(pages: List<Page>, dedupe: Boolean = false, numberScript: List<Int?> = emptyList()): RunResult {
+    private fun runEngine(
+        pages: List<Page>,
+        dedupe: Boolean = false,
+        numberScript: List<Int?> = emptyList(),
+        maxPages: Int = Int.MAX_VALUE,
+    ): RunResult {
         // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
         //    fpband/判据本身由 LandingShiftTest / LandingDecisionTest 用合成平移帧（纯函数）覆盖。
@@ -344,6 +349,9 @@ class ScanEngineDryRunTest {
             clock = { System.nanoTime() / 1_000_000 },
             // 合成帧不随点击变化：clickDelay 注入短值，避免每格白等固定延时
             clickDelayMs = 10L,
+            // 2026-09-26：翻页重发回路删除后，`dedupe=false` 的用例不再有"指纹不变⇒收尾"这条出口
+            // （去重链永不命中、计数器 1026 也达不到）⇒ 需要显式页数的用例用 maxPages 钉住。
+            maxPages = maxPages,
         )
         // ⚠️ 护栏（2026-09-11）：engine.run() 出现过「无限等待」把整个单测任务挂死 1 小时+
         //    （jstack：Test worker TIMED_WAITING 停在 BlockingCoroutine.joinBlocking → 内部某处 delay 循环不退出）。
@@ -376,37 +384,53 @@ class ScanEngineDryRunTest {
 
     @Test
     fun `full flow produces one page of artifacts`() {
-        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)))
+        // 计数器 = 一页件数 ⇒ 收尾走**新的主判据**（已入库 ≥ 计数器），不再靠"翻页指纹不变"那条
+        // 已在 2026-09-26 删除的重发回路收尾（它当时顺带充当了本用例的终止条件）。
+        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)))
         assertEquals(CELLS_PER_PAGE, engine.results.size)
         assertEquals("completed", h.finished)
         // 点击数：enterScreen 链 4 击（bagpack + filterRoundBtn + filterPanel.reset + filterPanel.ok）+ 21 格 = 25
         // （2026-09-12：旧链的 artifact_tab 已失效，改为进背包后复位筛选）
         assertEquals(ENTER_CHAIN_CLICKS + CELLS_PER_PAGE, h.clicks.size)
-        // ⚠️ 单页 + 翻页后指纹不变 ⇒ 触发「翻页未生效」重发守卫：
-        //    1 次正式翻页 + 3 次确认（GRID_END_RETRIES）= 4 次滑动。
-        //    为什么需要（2026-09-12 实测）：约 1/17 页的翻页滑动**完全没落地**，而「指纹不变」无法区分
-        //    「没落地」与「真的到底」⇒ 先用重发排除前者，连续 3 次不动才认定到底（否则整轮被提前收掉）。
-        assertEquals(4, h.swipes.size)
+        // ⚠️ 本用例断言**一次滑动都不该发生**（2026-09-26 方案 C 定稿）：
+        //    计数器=一页件数 ⇒ 本页点完即「已入库 ≥ 计数器」，收尾判据在**发翻页滑动之前**就成立。
+        //    旧断言是 4（1 正式翻页 + 3 次「指纹没变⇒重发」确认）—— 那条重发回路正是 09-26 小米 15 上
+        //    静默跳页（一页滑两次 ⇒ 每次丢约 21 件）的源头，已删除；一次翻页有且只滑一次。
+        assertEquals(0, h.swipes.size)
     }
 
     /**
      * 断言依据守卫（2026-09-20 用户要求）：本文件所有"每页件数/点击数"断言都由
-     * `CELLS_PER_PAGE = cols × traverseRows` 推导 ⇒ 该值必须与**当前被加载的 profile**一致，
-     * 且三档同构（否则各档必须各写一份断言，不许拿一档的数字去断言另一档）。
-     * 这里把"三档同构"这条**实测结论**变成可执行守门：任一新档/改档，此用例先红。
+     * `CELLS_PER_PAGE = cols × traverseRows` 推导 ⇒ 该值必须与**当前被加载的 profile**一致。
+     *
+     * ★ 2026-09-24 改：原断言还要求**三档 cols 同构**，该前提已被实测推翻。
+     *   2560 档的背包第 7 列是**幻影格**（列 x 1646..1842 压在详情面板左缘 1704 之下，点不到卡），
+     *   留着会让圣遗物静默去重、武器产生重复条目（实测 21 把报告 / 18 把真实）⇒ 已改为 6 列。
+     *   3200 与 2244 档实测确有 7 列。所以 cols **按档取值**，而行数（traverseRows/visibleRows）
+     *   三档同构这条仍然承重 —— 行级闭环/翻页判据都按行数推导，任一档改动此用例先红。
      */
     @Test
     fun `grid params are profile-derived and identical across tiers`() {
-        val tiers = listOf("profiles.json", "profiles_2560x1440.json", "profiles_2244x1080.json")
-        for (t in tiers) {
-            val g = JSONObject(File(assetsDir(), t).readText())
-                .getJSONObject("grids").getJSONObject("artifact_backpack")
-            assertEquals("$t: cols", GRID_COLS, g.getInt("cols"))
+        // 每档实测列数（2560=6 的理由见上；改档必须同步这里，逼出一次显式确认）
+        val expectedCols = mapOf(
+            "profiles.json" to 7,
+            "profiles_2560x1440.json" to 6,
+            "profiles_2244x1080.json" to 7,
+        )
+        for ((t, wantCols) in expectedCols) {
+            val grids = JSONObject(File(assetsDir(), t).readText()).getJSONObject("grids")
+            val g = grids.getJSONObject("artifact_backpack")
+            assertEquals("$t: artifact cols", wantCols, g.getInt("cols"))
+            // 行数三档同构（承重不变量）
             assertEquals("$t: traverseRows", GRID_TRAVERSE_ROWS, g.getInt("traverseRows"))
             assertEquals("$t: visibleRows", GRID_VISIBLE_ROWS, g.getInt("visibleRows"))
+            // 武器背包与圣遗物同布局：#23 的幻影列两档同时中招，单独守一条防回归
+            assertEquals("$t: weapon cols", wantCols, grids.getJSONObject("weapon_backpack").getInt("cols"))
         }
         // 可见行数必须 > 遍历行数（最后一行是滑动锚，只用于"翻页是否生效"的判据）
         assertTrue("visibleRows 应大于 traverseRows", GRID_VISIBLE_ROWS > GRID_TRAVERSE_ROWS)
+        // 本文件其余断言的推导基准 = **被加载的那一档**（profiles.json）
+        assertEquals("基准档 cols", GRID_COLS, expectedCols.getValue("profiles.json"))
         assertEquals("每页遍历格数", GRID_COLS * GRID_TRAVERSE_ROWS, CELLS_PER_PAGE)
     }
 
@@ -440,7 +464,11 @@ class ScanEngineDryRunTest {
 
     @Test
     fun `readCount and enterScreen wiring`() {
-        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)))
+        // 本用例只验入口链与首格坐标 ⇒ maxPages=1 钉住（计数器 1026 是断言对象，不能改小）
+        val (engine, h) = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)),
+            maxPages = 1,
+        )
         assertEquals(1026, engine.vars.total)
         // 首击 = 背包锚点（2026-09-13 晚：BS@3200 实机复核后**回退为实测值** (2824,80)——交集中心 (2830,93) 只对 2244 档（双机）成立）；其后 3 击 = 筛选复位链（filterRoundBtn → filterPanel.reset → filterPanel.ok）
         assertEquals(2824 to 80, h.clicks[0])
@@ -453,23 +481,16 @@ class ScanEngineDryRunTest {
         assertEquals(399 to 1336, h.clicks[2])
         assertEquals(401 to 1337, h.clicks[3])
         assertEquals(852 to 1337, h.clicks[4])
-        // 第一次格点击 = cell(0,0) 中心 (416+100, 297+126)=(516,423)（索引 = 链长）
-        assertEquals(516 to 423, h.clicks[ENTER_CHAIN_CLICKS])
-        // 翻页滑动 = 几何起点（advanceStart：最左卡间缝隙中点 (638,1178)）上滑 dist → (638,452)
-        // ⚠️ 2026-09-16（行级闭环方案 C）：profile `grids.artifact_backpack.advance.extra = -150`
-        //    ⇒ 目标 876→726（≈2.49 行）：相邻页必重叠（内容键可测前进量）+ 覆盖带 837px > 目标+过冲
-        //    ⇒ 结构性免跳行。故本期望由 302 改为 452（1178-726）。
-        // （2026-09-14 定案：旧起点 x=1858 贴住详情面板左缘 ⇒ 拖拽被面板吃掉（2560 实测 0px）；
-        //   2026-09-16 定稿：**命令不加增益**（恒 gain=1.0）+ 封顶 = target ⇒ 恒 876）
-        // 翻页滑动 = **profile 字面 from/to**（2026-09-17 期望同步）。
-        // ⚠️ 引擎有两条 advance 路径，走哪条取决于 `geoAdvance`（默认 **false**）：
-        //   · geoAdvance=false（现状）⇒ `ScanEngine.pagedGrid` 走 `else` 分支：**直接用
-        //     profile 的 `advance.from/to` 写死坐标**（`dist`/`extra` 在该分支**被忽略**，
-        //     pageDrift 记账也不启用）⇒ 净位移 = 1150−274 = **876 = 3×292（恰 3 行）** ✓
-        //   · geoAdvance=true ⇒ 几何起点 `advanceStart`（最左卡缝中点 (638,1178)）+ 目标
-        //     `advanceDistance − extra`（876−292=584 ≈2 行，刻意重叠）—— 该路径曾因"几何起点
-        //     致滚动截断"被默认关闭。故旧期望 (638,1178)→(638,452) 只在 geoAdvance=true 下成立。
-        // 本断言只校验「字面路径的坐标接线」；要测几何路径需显式打开 geoAdvance。
+        // 第一次格点击 = cell(0,0)：x = 416+100 = 516；y = 297 + clickDy130 = **427**
+        //   （★2026-09-25 #56：3200 档 artifact_backpack 标定出实测可点带 [0,260] ⇒ 锚从 cardH/2=126 挪到带中心 130）
+        assertEquals(516 to 427, h.clicks[ENTER_CHAIN_CLICKS])
+        // 翻页滑动 = **profile 字面 from/to**（产线默认路径）。
+        // ⚠️ 2026-09-24 起 `geoAdvance` **只切换起点**：距离一律走 `planMainSwipe(advTarget, 1.0, drift, …)`。
+        //   起点 = geoAdvance ? advanceStart（最左卡缝中点，本档 (638,1178)） : advance.from（(1614,1150)）。
+        //   字面路径下 advTarget = |to.y − from.y| = 1150−274 = **876 = 3×292（恰 3 行）**，首页
+        //   pageDrift=0 ⇒ cmd = min(876, maxCmd=1090) 再封顶 target = 876 ⇒ 终点 = 1150−876 = 274，
+        //   与"照抄 from/to"逐像素相同 ⇒ 本断言钉的是**统一后仍等价**这条不变量。
+        //   （`advance.extra`/`dist` 只挂在几何距离上，字面起点下会被忽略并打 warn。）
         assertEquals((1614 to 1150) to (1614 to 274), h.swipes[0])
     }
 
@@ -484,7 +505,9 @@ class ScanEngineDryRunTest {
     // ---- 3★ 纳入导出（2026-09-19 用户定稿）：3★ 正常解析入库、稀有度止扫已从流程撤掉 ----
     @Test
     fun `three-star pieces are parsed and emitted`() {
-        val page1 = Page(syntheticFrame(5), pageLines("Lv.90"), 1026)
+        // 计数器 = 两页件数 ⇒ 收尾走主判据（已入库 ≥ 计数器），且它是 break 不是 stopRequested
+        // ⇒ 下面 `stopRequested == false` 的断言仍然成立。
+        val page1 = Page(syntheticFrame(5), pageLines("Lv.90"), 2 * CELLS_PER_PAGE)
         val page2 = Page(syntheticFrame(3, page = 1), pageLines("Lv.0"), 1030)
         val (engine, h) = runEngine(listOf(page1, page2))
 
@@ -504,6 +527,7 @@ class ScanEngineDryRunTest {
         val (engine, h) = runEngine(
             listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)),
             numberScript = listOf(0, 1026),
+            maxPages = 1,   // 同 `readCount and enterScreen wiring`：只验入口链，计数器 1026 是断言对象
         )
         assertEquals(1026, engine.vars.total)
         // 重进后 clicks 应多出 enterScreen 链一轮（1 击；filterReset 不重跑，见 ENTER_CHAIN_REENTRY_CLICKS）

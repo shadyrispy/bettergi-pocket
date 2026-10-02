@@ -59,8 +59,9 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     // ONNX Runtime：PaddleOCR det+rec 推理（方案 §6.1）；~10-15MB/ABI，ML Kit 保留为降级兜底
     implementation(libs.onnxruntime.android)
-    // S3 RepoManager：通道化 tarball/zipball 下载（无 git 依赖）
-    implementation(libs.okhttp)
+    // 抓包数据源（irminsul-android :capture）：VPN 取包 + 会话解密 + proto 解析，
+    // 与 OCR 扫描并列为第二数据源。版本 = 该仓库 gradle.properties 的 captureVersion。
+    implementation("com.esc.irminsul:capture:1.9.0")
     testImplementation(libs.junit)
     // JVM 版 onnxruntime：本地单测跑真实推理（速度/精度对拍），不进 Android 主包
     testImplementation(libs.onnxruntime.jvm)
