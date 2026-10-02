@@ -213,10 +213,18 @@ object GoodPlan {
     fun needsInput(flowJson: JSONObject?): Boolean =
         declaresImport(flowJson) && demandOf(flowJson).needsInput
 
-    /** 计划项是否都带 `char`（装配必需；圣遗物导出没有这一项）。 */
+    /**
+     * 计划项是否都**有目标**（装配必需；圣遗物导出没有这一项）。
+     *
+     * ⚠️ 目标可以来自两处：`char`（装给谁）或 `location`（这件现在穿在谁身上 ⇒ 去他那儿卸）。
+     * 卸下项按 GOOD 契约是 `location:""` + artifact 自带 `location` ⇒ 归一后 `char` 空而
+     * `location` 非空，这类项**是合法的**（`EquipIntent.UNEQUIP`）。只有两边都空才是坏输入。
+     */
     fun planHasChar(plan: List<JSONObject>?): Boolean {
         if (plan.isNullOrEmpty()) return false
-        return plan.all { it.optString(KEY_CHAR, "").isNotBlank() }
+        return plan.all {
+            it.optString(KEY_CHAR, "").isNotBlank() || it.optString("location", "").isNotBlank()
+        }
     }
 
     // ---- 内部 ----

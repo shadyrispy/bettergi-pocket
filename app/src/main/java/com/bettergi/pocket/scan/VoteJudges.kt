@@ -342,6 +342,32 @@ object VoteJudges {
         return out
     }
 
+    /**
+     * **整帧**缩略（32×18），量化口径与 [gridThumb] 一致 ⇒ 可直接喂 [thumbChangedFraction]。
+     *
+     * 用途（2026-09-29 #139）：判断"这一下点击到底有没有改变画面"。
+     * `returnToHome` 靠它实现"无进展即停" —— 点完一处画面纹丝不动，再点同一个位置没有意义，
+     * 而它原先会把这个动作**重复点满 [ScanEngine.RETURN_HOME_ATTEMPTS] 次**。
+     * 与 [gridThumb] 刻意分开：那个按网格 ROI 裁，这个要的是全屏（包括弹窗、遮罩、菜单）。
+     */
+    fun screenThumb(frame: Mat): ByteArray? = runCatching {
+        val thumb = Mat()
+        Imgproc.resize(frame, thumb, Size(32.0, 18.0), 0.0, 0.0, Imgproc.INTER_AREA)
+        val out = ByteArray(thumb.rows() * thumb.cols() * 3)
+        val buf = ByteArray(3)
+        var i = 0
+        for (y in 0 until thumb.rows()) {
+            for (x in 0 until thumb.cols()) {
+                thumb.get(y, x, buf)
+                out[i++] = ((buf[2].toInt() and 0xFF) shr 4).toByte() // R
+                out[i++] = ((buf[1].toInt() and 0xFF) shr 4).toByte() // G
+                out[i++] = ((buf[0].toInt() and 0xFF) shr 4).toByte() // B
+            }
+        }
+        thumb.release()
+        out
+    }.getOrNull()
+
 /**
      * 命座节点读数（**GOODScanner 移植**，见 profile `screens.char_constellation`）。
      *

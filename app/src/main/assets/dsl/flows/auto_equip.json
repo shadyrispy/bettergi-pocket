@@ -1,6 +1,6 @@
 {
   "flow": "auto_equip",
-  "version": "1.2.1",
+  "version": "1.2.5",
   "profile": "android_3200x1440",
   "description": "流程五：按装配指令把圣遗物穿到指定角色。输入 = {equip:[{artifact,location}]}（GOODScanner POST /equip 契约；location 为空串 = 卸下）。",
   "vars": {
@@ -60,7 +60,8 @@
           "do": "rosterFind",
           "char": "$task.char",
           "grid": "char_popup",
-          "note": "canonical #2 花名册 OCR 遍历找角色；弹层态命中后停在角色详情页（弹层保持打开）"
+          "filter": true,
+          "note": "canonical #2 花名册 OCR 遍历找角色；弹层态命中后停在角色详情页（弹层保持打开）。\n★ 2026-09-29 #125 `filter:true` = 先按词典 元素×武器类型 走弹层「沙漏」预筛（AND 语义；当前配队 4 人恒占前 4 格）。基线实测 rosterFind=64.45s/72 格/7 翻页，预筛实测 93 人→8 卡单页。词典给不出 (元素,武器) 或目标是旅行者系（元素随旅行者实时变，静态值必错）⇒ 自动退回全量遍历；筛选态未命中也会**清除筛选再无筛重扫一次**才判 rosterMiss。"
         },
         {
           "do": "clicks",
@@ -99,9 +100,16 @@
         {
           "do": "assertScreen",
           "expect": "排序方式",
+          "rect": "$screens.dialogs.sortPopup.title",
+          "alts": [
+            {
+              "rect": "$screens._common.titleBar",
+              "expect": "排序方式"
+            }
+          ],
           "retries": 3,
           "onFail": "back",
-          "note": "2026-09-13：**排序钮点开后先确认「排序方式」弹窗真的开了**再点确认（实测标题 `排序方式` bbox 120-273,35-81、置信 1.00）。原写法两击连发：第一击若没弹窗，第二击就会落到页面上（误触排序/筛选等）。"
+          "note": "2026-09-13：**排序钮点开后先确认「排序方式」弹窗真的开了**再点确认（实测标题 `排序方式` bbox 120-273,35-81、置信 1.00）。原写法两击连发：第一击若没弹窗，第二击就会落到页面上（误触排序/筛选等）。\n★ 2026-09-29 #132 真机 2560 实测：不写 `rect` 时 assertScreen 落到缺省 `$screens._common.titleBar`，而那条是**角色页标题条**（2560 x1=125，且 2560/3200 两档都还是「由 2244 换算、待实测复核」的推导值），弹窗标题「排序方式」在 2560 实测跨 x[50,237] ⇒ 左两字被切 ⇒ 三轮恒读 `'方式'` ⇒ 判失败 → BACK 把**已经开着的**弹窗关掉，下一步 sortPopupConfirm 就点到裸页面上（本轮因此白烧 8s 并把套装筛选链搅乱）。改成显式读 `sortPopup.title`（2560 已实测 [42,48,244,104]），titleBar 只留作 alts 兜底。"
         },
         {
           "do": "clicks",
@@ -122,15 +130,16 @@
             "dict": "mappings.artifactSets",
             "match": "exact"
           },
-          "note": "canonical #7：药丸直达套装筛选（不经筛选面板弹窗），确认后直接退回"
+          "homeHint": "圣遗物推荐",
+          "note": "canonical #7：药丸直达套装筛选（不经筛选面板弹窗），确认后直接退回。\n★ 2026-09-29 #136 `homeHint`：本界面的**左上角显示角色名而非界面名** ⇒ 背包那套「读到『背包』就算回到家」的判据在这里恒不成立 ⇒ leaveFilterPanels 会把 3 次 BACK 按满、一路退出角色页。给它一个正向的「家」锚（右上角『圣遗物推荐』）后：见到就停；UNKNOWN 且锚也不在 ⇒ 立刻停手不再按。"
         },
         {
           "do": "assertScreen",
           "title": "$screens._common.topRightHint",
           "expect": "圣遗物推荐",
           "retries": 3,
-          "onFail": "back",
-          "note": "★ 2026-09-18 兜底：套装筛选链走完后必须回到「圣遗物管理界面」（右上角“圣遗物推荐”）。若仍卡在套装子面板 ⇒ onFail=back 逐层退出。"
+          "onFail": "abortItem",
+          "note": "★ 2026-09-18 兜底：套装筛选链走完后必须回到「圣遗物管理界面」（右上角“圣遗物推荐”）。\n⚠️ 2026-09-29 #136：onFail 由 `back` 改成 **`abortItem`**。原写法自相矛盾——这一步存在的意义就是「我们可能已经不在管理页上了」，而 `back` 在这种情况下**又按了三次 BACK**，正是把流程往大世界里推的动作；第 3 轮实测：随后 pagedGrid 对着大世界点了 15 格，最后误开「确认退出游戏」。改成 abortItem 后本项直接记 Failed、余下步骤（含 pagedGrid 与「替换」）一步都不执行。"
         },
         {
           "do": "pagedGrid",
@@ -205,12 +214,13 @@
     {
       "do": "exit",
       "via": "return[2913,41]",
-      "per": "char"
+      "per": "char",
+      "note": "★ 2026-09-29 #132：`return` 现已进 CHAIN_ANCHOR_PATHS（→ `screens._common.returnBtn`），有该键的档位走机读、没有的回落字面 [2913,41]。2560 实测字面点 x=2913 **在屏外**（该档宽 2560）⇒ 整轮跑完人还留在圣遗物管理页、筛选也没被清（退出角色页才会清）。"
     }
   ],
   "resultStates": 8,
   "pending": [
-    "卸下路径未实现（location:\"\" 需去 artifact.location 记录的当前持有者处卸）—— 未做，属独立增量",
+    "卸下路径 2026-09-29 已实现（item5）：GOOD 契约 `location:\"\"` = 卸下，artifact 自带的 `location` 是当前持有者 ⇒ rosterFind 用 `location` 兜底去找那个角色（`EquipIntent.UNEQUIP`），`dualStateButton` 在卸下意图下**点「卸下」**（装备意图下那一态是\"不点\"），收尾用 `verifyUnequipped()` 复核\"那格不再有「XX已装备」\"。真机验过：穿回→卸下两轮都 Success。⚠️ 判据坑：**没人穿的件那一格不是空的**（显示的是描述文字）⇒ 只能按「已装备」这行在不在判，不能按\"空不空\"判。",
     "「已正确跳过」改由按钮文本判（#93）：左下钮 OCR 含「卸」⇒ 该件已在此角色身上 ⇒ 不点、记 AlreadyCorrect；读不出 ⇒ 同样不点，记 Failed（对齐 GOODScanner ui_actions.rs 的 bail 支）",
     "#107 已修：装配有**点击后复核**了 —— foreach 末尾回读 panels.artifact_manage.equipped 的装备者、归一成 GOOD key 后与目标角色比对。Success 从此要求复核给出正面证据；点过但读不出 ⇒ 记新档 ClickedUnverified（我们没看见，不等于没发生），复核说没换上 ⇒ Failed。GOODScanner 的 verify_artifact_equipped 是返回 Ok(true) 的 no-op ⇒ 这一条**有意偏离上游**。",
     "set_filter swipe settle 真机复核"

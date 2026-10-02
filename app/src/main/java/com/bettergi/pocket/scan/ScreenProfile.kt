@@ -198,13 +198,19 @@ class ScreenProfile(
     /** 基准坐标 → 帧坐标缩放。 */
     fun scale(v: Int, s: Double): Int = Math.round(v * s).toInt()
 
-    /** 卡片内相对坐标 rel [dx0,dy0,dx1,dy1]（相对卡片左上，随卡片原点平移 + 缩放）。 */
+    /**
+     * 卡片内相对坐标 rel [dx0,dy0,dx1,dy1]（相对卡片左上，随卡片原点平移 + 缩放）。
+     *
+     * 原点一律向 [gridGeometry] 要 —— 它同时覆盖 `colX`/`rowY` 与 `cardOrigin`+`pitch` 两种写法，
+     * 且 `gridRowOffset` 已在其中加过，与 [cellCenter] 同一套坐标。
+     * ⚠️ 不能直接读 `cardOrigin`：`char_strip` / `char_popup` 这类 1 列·非等距网格只有 `colX`/`rowY`，
+     *   裸读会让 `getJSONArray` 抛 `No value for cardOrigin` **打断整轮扫描**
+     *   （2026-09-29 实测：character_scan 在第一个格 `cardRoi` 处就崩，一件都没扫到）。
+     */
     fun cardRelRect(gridKey: String, rel: IntArray, col: Int, row: Int): FrameRect {
-        val grid = rawObject("grids.$gridKey") ?: error("grid '$gridKey' missing")
-        val origin = grid.getJSONArray("cardOrigin")
-        val pitch = grid.getJSONArray("pitch")
-        val ox = origin.getInt(0) + col * pitch.getInt(0)
-        val oy = origin.getInt(1) + gridRowOffset + row * pitch.getInt(1)
+        val g = gridGeometry(gridKey) ?: error("grid '$gridKey' 几何不可用（缺 cardSize/cols/colX·rowY/cardOrigin·pitch）")
+        val ox = g.colXs.getOrElse(col) { g.colXs.last() }
+        val oy = g.rowYs.getOrElse(row) { g.rowYs.last() }
         return FrameRect(
             left = scale(ox + rel[0], scaleX),
             top = scale(oy + rel[1], scaleY),

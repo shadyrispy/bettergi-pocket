@@ -29,9 +29,11 @@ class NameOverridesTest {
     }
 
     @Test
-    fun `character path refuses to claim the traveler`() {
-        // 元素规则手里有「X元素」，能给出 GT 要求的 Traveler<元素>；这里给不出 ⇒ 让位，别抢。
-        assertNull(filled.characterKeyOf("崽崽"))
+    fun `character path gives the bare traveler key and the caller adds the element`() {
+        // #146：这一格**故意**给不带元素的裸键 —— `ScanEngine.resolveKey` 拿到 `Traveler` 后
+        // 会按角色面板读到的「X元素」补成 GT 要的 `Traveler<元素>`。
+        // 旧契约是"这里干脆不认旅行者"，但那等于要求玩家每换一次元素就重填一次昵称表 ⇒ 改成裸键 + 调用方补后缀。
+        assertEquals("Traveler", filled.characterKeyOf("崽崽"))
         assertEquals("Manekina", filled.characterKeyOf("随机人"))
     }
 

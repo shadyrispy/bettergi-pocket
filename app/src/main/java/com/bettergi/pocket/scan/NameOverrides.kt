@@ -7,9 +7,13 @@ import android.content.SharedPreferences
  * 玩家自定义显示名 → GOOD key（#105，与 GOODScanner `good_config.json` 的 `NameOverrides` 同构）。
  *
  * **为什么交给用户填，而不是再猜一张内置表**：这几个角色的显示名由玩家自定义，词典以官方中文名为键，
- * 结构性不可能命中；而账号里已有的证据自相矛盾 —— 内置别名表写 `随机姓→Manekin`，GT 的武器配对
- * 却说 `随机姓名→Manekina`，离线分不清是"玩家改过名"还是"读错/记反了"。上游对同一个问题的答案
- * 就是不猜：`NameOverrides{traveler_name, wanderer_name, manekin_name, manekina_name}` 由用户手填。
+ * 结构性不可能命中。上游对同一个问题的答案就是不猜：`NameOverrides{traveler_name, wanderer_name,
+ * manekin_name, manekina_name}` 由用户手填。
+ *
+ * 本账号实测到的显示名（2026-09-29 由**已入库的武器配对**定方向，不是猜的：扫描读到的主人名
+ * 对上 GT 同一把武器的 `location`）：`随机姓名`→Manekina、`随机人名`→Manekin、
+ * 旅行者叫 `崽崽`/`魏崽`（填进 [traveler] 这一格，元素后缀由角色面板补，见 [characterKeyOf]）。
+ * ⚠️ 早先那张内置表写的是 `随机姓→Manekin` —— **方向是反的**，已删；别再照它填。
  *
  * ⚠️ 这张表是**账号/存档相关**的：换号或改名后要重填；留空即该条不参与匹配。
  * ⚠️ 命中顺序上**用户填的优先于词典与模糊匹配**（显式压过推断）。填错会盖掉真名 —— 例如把旅行者
@@ -37,11 +41,14 @@ data class NameOverrides(
     }
 
     /**
-     * 角色表口径。**故意不含旅行者**：那一格由 [ScanEngine] 的元素规则负责 —— 它手里有「X元素」，
-     * 能给出 GT 要求的 `Traveler<元素>`；这里只会给不带元素的裸键，抢过来反而把对的改成错的。
+     * 角色表口径。旅行者这一格给的是**不带元素的裸键** [TRAVELER_KEY]，
+     * 由调用方（`ScanEngine.resolveKey`）按概览面板读到的「X元素」补成 GT 要的 `Traveler<元素>` ——
+     * 玩家换一次元素就要重填一次昵称表是不可接受的。
+     * ⚠️ 装备者口径（[ownerKeyOf]）那边**本来就要裸键**，两处的差异见 [ownerKeyOf] 的 KDoc。
      */
     fun characterKeyOf(display: String): String? = when {
         display.isEmpty() -> null
+        display == traveler -> TRAVELER_KEY
         display == wanderer -> "Wanderer"
         display == manekin -> "Manekin"
         display == manekina -> "Manekina"

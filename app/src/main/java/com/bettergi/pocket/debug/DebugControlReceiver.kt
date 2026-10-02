@@ -68,6 +68,16 @@ class DebugControlReceiver : BroadcastReceiver() {
                         TriggerForegroundService.EXTRA_GEO_ADVANCE,
                         intent.getBooleanExtra(EXTRA_GEO_ADVANCE, false),
                     )
+                    // ★ 2026-09-30 #149：`plan`/`planB64` 此前**没有转发**，与上面 `timing` 是同一条漏法。
+                    //   后果不是报错而是**静默换数据源**：service 侧 `plan ?: GoodRepository.planFor(...)`
+                    //   会回落到"用户在管理器里选好的输入"，于是内联计划被丢掉、跑的是上一轮导入的 plan，
+                    //   两边都空时整轮"跑完了但什么都没做"（实测 3200：`foreach: 'plan' not available or empty`）。
+                    intent.getStringExtra(TriggerForegroundService.EXTRA_PLAN)?.let {
+                        putExtra(TriggerForegroundService.EXTRA_PLAN, it)
+                    }
+                    intent.getStringExtra(TriggerForegroundService.EXTRA_PLAN_B64)?.let {
+                        putExtra(TriggerForegroundService.EXTRA_PLAN_B64, it)
+                    }
                 }
                 ACTION_REPLAY_PCAP -> {
                     action = TriggerForegroundService.ACTION_DEBUG_REPLAY_PCAP

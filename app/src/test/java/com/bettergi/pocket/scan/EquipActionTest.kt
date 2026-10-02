@@ -142,4 +142,72 @@ class EquipActionTest {
             ),
         )
     }
+
+    // ---- item5：卸下意图（GOOD 契约 location:"" = 卸下）----
+
+    @Test
+    fun `intent is unequip only when char blank and location present`() {
+        assertEquals(EquipIntent.EQUIP, equipIntentOf("Tighnari", ""))
+        assertEquals(EquipIntent.UNEQUIP, equipIntentOf("", "Tighnari"))
+        // 两边都空 = 坏输入 ⇒ 判 EQUIP（让 rosterFind 响亮地中止，而不是猜一个持有者）
+        assertEquals(EquipIntent.EQUIP, equipIntentOf("", ""))
+        assertEquals(EquipIntent.EQUIP, equipIntentOf(null, null))
+    }
+
+    @Test
+    fun `unequip intent clicks only on the unload button`() {
+        // 「卸下」⇒ 这件穿在他身上 ⇒ 点它才卸得下来（装备侧在这一态是"不点"）
+        assertEquals(
+            EquipDecision(click = true, actTried = true, actOk = true),
+            equipDecisionOf(EquipAction.ALREADY_EQUIPPED, EquipIntent.UNEQUIP),
+        )
+        // 「替换/装备」⇒ 这件不在他身上（与"已经卸干净"同形）⇒ 不点、且不算失败
+        assertEquals(
+            EquipDecision(click = false, actTried = false, actOk = false),
+            equipDecisionOf(EquipAction.EQUIP, EquipIntent.UNEQUIP),
+        )
+        // 读不出 ⇒ 同样不点，但记 actTried 落 Failed
+        assertEquals(
+            EquipDecision(click = false, actTried = true, actOk = false),
+            equipDecisionOf(EquipAction.UNKNOWN, EquipIntent.UNEQUIP),
+        )
+    }
+
+    @Test
+    fun `equip intent keeps today's decisions bit for bit`() {
+        for (a in EquipAction.entries) {
+            assertEquals(equipDecisionOf(a), equipDecisionOf(a, EquipIntent.EQUIP))
+        }
+    }
+
+    @Test
+    fun `unequip verify keys on the owner line not on emptiness`() {
+        // owner=null（面板里没有「XX已装备」那行）⇒ 没人穿 ⇒ 卸干净了
+        assertEquals(EquipVerify.APPLIED, unequipVerifyOf(readOk = true, owner = null))
+        assertEquals(EquipVerify.APPLIED, unequipVerifyOf(readOk = true, owner = ""))
+        // 还有主人 ⇒ 没卸掉
+        assertEquals(EquipVerify.NOT_APPLIED, unequipVerifyOf(readOk = true, owner = "荒泷一斗"))
+        // 取帧/OCR 失败 = 没看见 ⇒ 不等于成功
+        assertEquals(EquipVerify.NOTHING_READ, unequipVerifyOf(readOk = false, owner = null))
+    }
+
+    @Test
+    fun `unequip confirm reaches Success through the same status mapping`() {
+        // 卸下侧走通到 Success 的完整链路：命中 + 点过 + 复核确认"那格空了"
+        assertEquals(
+            "Success",
+            manageStatusOf(
+                matchHit = true, actTried = true, actOk = true,
+                verified = EquipVerify.APPLIED.verifiedFlag(), flowStop = false,
+            ),
+        )
+        // 复核读到"还穿着" ⇒ Failed（不是 Success，也不是 AlreadyCorrect）
+        assertEquals(
+            "Failed",
+            manageStatusOf(
+                matchHit = true, actTried = true, actOk = true,
+                verified = EquipVerify.NOT_APPLIED.verifiedFlag(), flowStop = false,
+            ),
+        )
+    }
 }

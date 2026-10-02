@@ -130,7 +130,7 @@ object TimingOverrides {
             panelSigPollMs == D_SIGPOLL && panelSigBand == D_SIGBAND &&
             panelSigSamples == D_SIGSAMPLES && panelSigConfirm == D_SIGCONFIRM &&
             panelSigGateCached == D_SIGGATE && !sigDebug && sigBlocksX == D_SIGBX && sigBlocksY == D_SIGBY &&
-            advanceDistPx == 0 && advanceExtraPx == 0 &&
+            advanceDistPx == 0 && advanceExtraPx == 0 && panelSettleMs == 0L &&
 
             swipeFastSteps == D_SF_STEPS &&
             swipeFastMs == D_SF_MS && swipeSlowSteps == D_SS_STEPS &&
@@ -150,6 +150,14 @@ object TimingOverrides {
      */
     var anchorBudgetMs: Long = 0L
 
+    /**
+     * 角色筛选面板每步的等待（默认 0 = 用 `ScanEngine.PANEL_SETTLE_MS(1500)`）。
+     *
+     * 为什么要有这个开关：面板交互实测 11.3s 里约 10.5s 是纯等待（README D 段自记"取手工节奏、未收紧"），
+     * 收紧它只能靠**对照跑**（同一条流程、只改这一个数），所以先做成可覆盖的，别再改常量。
+     */
+    var panelSettleMs: Long = 0L
+
     /** C' 身份锚定跳过（默认开；`oskip=0` 关闭，用于 A/B）。 */
     var overlapSkip: Boolean = true
 
@@ -165,6 +173,7 @@ object TimingOverrides {
         anchorBudgetMs = 0L
         overlapSkip = true
         entryIdempotent = true
+        panelSettleMs = 0L
         if (!spec.isNullOrBlank()) {
             for (kv in spec.split(',')) {
                 val i = kv.indexOf('=')
@@ -196,6 +205,7 @@ object TimingOverrides {
                     "sigdebug" -> sigDebug = v != 0L
                     "phi" -> phiApply = v != 0L
                     "anchor" -> anchorBudgetMs = v.coerceIn(0L, 60000L)
+                    "panel" -> panelSettleMs = v.coerceIn(0L, 10000L)
                     "oskip" -> overlapSkip = v != 0L
                     "advdist" -> advanceDistPx = v.toInt().coerceIn(50, 2000)
                     "advextra" -> advanceExtraPx = v.toInt().coerceIn(-500, 1000)
@@ -217,7 +227,7 @@ object TimingOverrides {
             "sig=${if (panelSigEnabled) 1 else 0},sigpoll=$panelSigPollMs," +
             "sigband=${if (panelSigBand) 1 else 0},sigsamples=$panelSigSamples,sigconfirm=${if (panelSigConfirm) 1 else 0}," +
             "siggate=${if (panelSigGateCached) 1 else 0},phi=${if (phiApply) 1 else 0}," +
-            "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0}," +
+            "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0},panel=$panelSettleMs," +
             "advdist=$advanceDistPx,advextra=$advanceExtraPx," +
 
             "sigblocks=${if (sigBlocksX > 0) "${sigBlocksX}x$sigBlocksY" else "auto"}," +

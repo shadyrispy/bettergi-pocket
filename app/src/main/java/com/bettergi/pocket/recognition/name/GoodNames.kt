@@ -31,6 +31,8 @@ class GoodNames private constructor(
     val slots: Map<String, String>,
     /** 单件名 → 详情（诊断/校验用） */
     val pieceDetails: Map<String, PieceInfo>,
+    /** GOOD id → 元素/武器类型；角色弹层「沙漏」预筛据此换算勾选项（见 #125） */
+    val charAttrs: Map<String, CharAttrs> = emptyMap(),
 ) {
 
     /** 名称类别（flow 的 `dict` 字段映射）。 */
@@ -39,6 +41,12 @@ class GoodNames private constructor(
     data class StatEntry(val zh: String, val key: String, val percentKey: String?)
 
     data class PieceInfo(val setId: String, val setName: String?, val slot: String?)
+
+    /**
+     * 角色静态属性。`element` 对**旅行者/奇偶不可信**——他们的元素随旅行者当前元素变
+     * （2026-09-29 实测：页头「草元素 / 崽崽」，而词典恒记 anemo），预筛必须跳过他们。
+     */
+    data class CharAttrs(val element: String?, val weapon: String?)
 
     /** 按类别取表。 */
     fun table(kind: Kind): Map<String, String> = when (kind) {
@@ -81,7 +89,17 @@ class GoodNames private constructor(
             }
 
             val weapons = nameMap(json.getJSONArray("weapons"))
-            val characters = nameMap(json.getJSONArray("characters"))
+            val charArr = json.getJSONArray("characters")
+            val characters = nameMap(charArr)
+            val attrs = LinkedHashMap<String, CharAttrs>()
+            for (i in 0 until charArr.length()) {
+                val o = charArr.getJSONObject(i)
+                val id = o.getString("id")
+                attrs[id] = CharAttrs(
+                    element = o.optString("e").takeIf { it.isNotEmpty() },
+                    weapon = o.optString("wt").takeIf { it.isNotEmpty() },
+                )
+            }
             val sets = nameMap(json.getJSONArray("artifactSets"))
 
             val stats = ArrayList<StatEntry>()
@@ -102,7 +120,7 @@ class GoodNames private constructor(
                 slots[o.getString("zh")] = o.getString("key")
             }
 
-            return GoodNames(pieces, weapons, characters, sets, stats, slots, details)
+            return GoodNames(pieces, weapons, characters, sets, stats, slots, details, attrs)
         }
 
         fun load(assets: AssetManager): GoodNames {

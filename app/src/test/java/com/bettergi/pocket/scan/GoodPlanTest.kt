@@ -235,4 +235,16 @@ class GoodPlanTest {
         assertNotNull(GoodPlan.whyNot(JSONObject("""{"format":"GOOD"}"""), d))
         assertNull(GoodPlan.pick(null, d))
     }
+
+    @Test
+    fun `planHasChar accepts unequip items whose target comes from location`() {
+        // 卸下项：外层 location:"" ⇒ 归一后 char 空，而 artifact 自带 location = 当前持有者
+        val unequip = org.json.JSONObject(
+            """{"setKey":"GladiatorsFinale","slotKey":"goblet","mainStatKey":"atk","char":"","location":"AratakiItto"}""",
+        )
+        assertTrue(GoodPlan.planHasChar(listOf(unequip)))
+        // 两边都空 = 坏输入
+        val noTarget = org.json.JSONObject("""{"setKey":"GladiatorsFinale","slotKey":"goblet","mainStatKey":"atk"}""")
+        assertFalse(GoodPlan.planHasChar(listOf(noTarget)))
+    }
 }

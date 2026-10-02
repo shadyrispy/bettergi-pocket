@@ -63,6 +63,54 @@ internal fun equipDecisionOf(action: EquipAction): EquipDecision = when (action)
     EquipAction.UNKNOWN -> EquipDecision(click = false, actTried = true, actOk = false)
 }
 
+/**
+ * **意图**：这一条计划项是要把某件**穿上**，还是把它**卸下**（#143 item5）。
+ *
+ * 判据完全来自 GOOD 契约（见 [GoodPlan]）：`{artifact:{...带 location}, location:""}`
+ * 里**外层** `location` 为空 = 卸下，而 artifact 自己的 `location` 是"现在穿在谁身上"。
+ * 归一成扁平计划项后就是：`char` 空 且 `location` 非空 ⇒ 卸下。
+ *
+ * ⚠️ 两侧都要看：`char` 空但 `location` 也空 = 既不知道给谁穿、也不知道去谁那儿卸
+ * ⇒ 那是**坏输入**（判 EQUIP 会让 rosterFind 找不到角色而中止，比猜一个安全）。
+ */
+internal enum class EquipIntent { EQUIP, UNEQUIP }
+
+internal fun equipIntentOf(char: String?, location: String?): EquipIntent =
+    if (char.isNullOrBlank() && !location.isNullOrBlank()) EquipIntent.UNEQUIP else EquipIntent.EQUIP
+
+/**
+ * 意图 × 按钮语义 → 动作。**装备侧与卸下侧的"该点"正好相反**：
+ * - 装备：钮写「替换/装备」才点；「卸下」= 已经穿在他身上 ⇒ 不点（AlreadyCorrect）。
+ * - 卸下：钮写「卸下」才点；「替换/装备」= 这件不在他身上（与"已经卸干净了"同形）⇒ 不点。
+ * 两态的"读不出"都**不点**并记 Failed（宁可不碰账号，也不在判不出的时候动它）。
+ */
+internal fun equipDecisionOf(action: EquipAction, intent: EquipIntent): EquipDecision = when (intent) {
+    EquipIntent.EQUIP -> equipDecisionOf(action)
+    EquipIntent.UNEQUIP -> when (action) {
+        EquipAction.ALREADY_EQUIPPED -> EquipDecision(click = true, actTried = true, actOk = true)
+        EquipAction.EQUIP -> EquipDecision(click = false, actTried = false, actOk = false)
+        EquipAction.UNKNOWN -> EquipDecision(click = false, actTried = true, actOk = false)
+    }
+}
+
+/**
+ * 卸下意图的复核：**那一格空 = 卸干净了**。
+ *
+ * ⚠️ 与装备侧判据**正好相反**（那边"空"是"没看见"），所以必须是独立函数 ——
+ * 拿 `equipVerifyOf(owner, expectChar="")` 混过去会把"空"折成 NOTHING_READ ⇒ 卸下永远不算成功。
+ * `readOk=false`（取帧/OCR 失败）与"读到了、但没人穿"必须分开：前者是**没看见**（调用方记
+ * ClickedUnverified），后者才是**卸干净了**。
+ */
+internal fun unequipVerifyOf(readOk: Boolean, owner: String?): EquipVerify = when {
+    !readOk -> EquipVerify.NOTHING_READ
+    // ⚠️ 判据是**「已装备」这行在不在**，不是"那一格空不空"—— 真机实测（2026-09-29，卸下后）：
+    //   那格**不是空的**，而是换成了圣遗物的**描述文字**（读到 `三人从中啜饮过不`）⇒
+    //   按"非空即还穿着"会把这个成功的卸下判成 Failed。传进来的 owner 由 `equippedOwnerOf`
+    //   解析（它只认「XX已装备」），所以"没有那行" ⇒ null ⇒ 没人穿。
+    owner.isNullOrEmpty() -> EquipVerify.APPLIED
+    else -> EquipVerify.NOT_APPLIED
+}
+
 internal fun equipActionOf(buttonText: String?): EquipAction {
     val t = buttonText?.trim().orEmpty()
     if (t.isEmpty()) return EquipAction.UNKNOWN

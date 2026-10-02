@@ -3,6 +3,7 @@ package com.bettergi.pocket.scan
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -321,5 +322,45 @@ class GridGeometryTest {
         val w = p.gridGeometryFor("weapon_backpack")!!
         assertEquals(0, w.bandTop)
         assertEquals(w.clickDy, w.clickDy - w.bandTop)
+    }
+
+    /**
+     * ★2026-09-29：`cardRelRect` 原来裸读 `cardOrigin`，而 `char_strip`/`char_popup` 这类网格
+     * **只有 `colX`/`rowY`** ⇒ `getJSONArray` 抛 `No value for cardOrigin`，把整轮 character_scan
+     * 打断在第一个格（`ScanEngine.cardRoi` → 卡片选中框判据，#25 引入）。
+     * 现在两种写法统一向 `gridGeometry` 要原点：这里①三档 × 两个 colX/rowY 网格全部取得到矩形，
+     * ②矩形中心与 `cellCenter` 同坐标（错开一格会直接红），③`cardOrigin` 档的数值与旧公式逐位相同。
+     */
+    @Test
+    fun `cardRelRect covers colX-rowY grids and keeps cardOrigin grids numerically identical`() {
+        val dir = File(System.getProperty("user.dir") ?: ".", "src/main/assets/dsl")
+        for ((file, w, h) in listOf(
+            Triple("profiles.json", 3200, 1440),
+            Triple("profiles_2560x1440.json", 2560, 1440),
+            Triple("profiles_2244x1080.json", 2244, 1080),
+        )) {
+            val p = ScreenProfile(JSONObject(File(dir, file).readText()))
+                .apply { calibrate(w, h) }
+            for (gridKey in listOf("char_strip", "char_popup")) {
+                val g = p.gridGeometryFor(gridKey)
+                assertNotNull("$file: $gridKey 应能解析出几何", g)
+                for (row in 0 until g!!.rowYs.size) {
+                    val r = p.cardRelRect(gridKey, intArrayOf(0, 0, g.cardW, g.cardH), col = 0, row = row)
+                    assertTrue("$file $gridKey row=$row 矩形退化", r.right > r.left && r.bottom > r.top)
+                    // 与点击点同一坐标：cellCenter 用 clickDy，整卡矩形用 cardH/2（未标定带时二者同为 cardH/2）
+                    val c = p.cellCenter(gridKey, row * g.cols)
+                    assertEquals(p.scale(g.colXs[0] + g.cardW / 2, p.scaleX), (r.left + r.right) / 2)
+                    assertTrue("$file $gridKey row=$row 中心与卡矩形错开: c.y=${c.y} rect=[${r.top},${r.bottom}]",
+                        kotlin.math.abs(c.y - (r.top + r.bottom) / 2) <= 2)
+                }
+            }
+        }
+        // cardOrigin 档（3200 圣遗物）数值不变：origin(248,290) + col·pitch(206) / row·pitch(292)
+        val base = ScreenProfile(JSONObject(File(dir, "profiles.json").readText())).apply { calibrate(3200, 1440) }
+        val rel = base.cardRelRect("artifact_backpack", intArrayOf(8, 6, 48, 46), col = 3, row = 2)
+        val origin = base.rawObject("grids.artifact_backpack")!!.getJSONArray("cardOrigin")
+        val pitch = base.rawObject("grids.artifact_backpack")!!.getJSONArray("pitch")
+        assertEquals(origin.getInt(0) + 3 * pitch.getInt(0) + 8, rel.left)
+        assertEquals(origin.getInt(1) + 2 * pitch.getInt(1) + 6, rel.top)
     }
 }

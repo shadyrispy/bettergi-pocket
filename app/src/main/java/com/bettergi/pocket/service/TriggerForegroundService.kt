@@ -19,6 +19,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
+import com.bettergi.pocket.scan.NameOverrides
 import com.bettergi.pocket.MainActivity
 import com.bettergi.pocket.R
 import com.bettergi.pocket.capture.CapturePermissionActivity
@@ -271,6 +272,24 @@ class TriggerForegroundService : Service() {
                 val pages = intent.getIntExtra(EXTRA_PAGES, 0)
                 settingsRepository.setScanMaxPages(pages)
                 Log.i(TAG, "debug set max pages: $pages")
+            }
+            ACTION_DEBUG_SET_NAME_OVERRIDE -> {
+                val field = intent.getStringExtra(EXTRA_NAME_FIELD) ?: ""
+                val value = intent.getStringExtra(EXTRA_NAME_VALUE)
+                if (NameOverrides.FIELDS.none { it.first == field }) {
+                    Log.w(
+                        TAG,
+                        "debug set name override: 未知字段 '$field' ⇒ 可选 " +
+                            NameOverrides.FIELDS.joinToString { "${it.first}(${it.second})" },
+                    )
+                } else {
+                    NameOverrides.save(
+                        applicationContext,
+                        NameOverrides.load(applicationContext).withField(field, value),
+                    )
+                    // 回读而不是回显入参：证明**落盘后**表里确实是这个值（含纯空白按"没填"处理那条规则）
+                    Log.i(TAG, "debug set name override: $field='${value ?: "(清空)"}' ⇒ 现表 ${NameOverrides.load(applicationContext)}")
+                }
             }
             ACTION_DEBUG_SET_GOOD -> {
                 // 调试链：把设备上的 GOOD/计划文件复制成"当前输入"（用户侧入口在管理器，由 SAF 提供）
@@ -965,6 +984,19 @@ class TriggerForegroundService : Service() {
         /** 调试：把设备上的 GOOD/配装计划文件复制成当前输入（`--es src /sdcard/xxx.json`）。 */
         const val ACTION_DEBUG_SET_GOOD = "com.bettergi.pocket.action.DEBUG_SET_GOOD"
         const val EXTRA_GOOD_SRC = "src"
+        /**
+         * 调试：写「角色昵称」表（#105 四格之一）—— `--es field traveler|wanderer|manekin|manekina`
+         * `--es value <显示名>`，不给 `value` 即清空该格。
+         *
+         * 为什么要有这条：这几格的值是**账号侧**的显示名（本账号两个未上线角色在游戏里显示为
+         * 「随机姓名 / 随机人名」），而 BlueStacks 上 `run-as` 被拒（写不进 shared_prefs）、
+         * `input text` 又打不进中文 ⇒ 管理器页那四个 EditText 在自动化链路上填不了，
+         * 角色对账就没法复现。走的是与页面**同一个** [com.bettergi.pocket.scan.NameOverrides.save]，
+         * 且引擎每次起扫现读该表 ⇒ 不需要重启进程。
+         */
+        const val ACTION_DEBUG_SET_NAME_OVERRIDE = "com.bettergi.pocket.action.DEBUG_SET_NAME_OVERRIDE"
+        const val EXTRA_NAME_FIELD = "field"
+        const val EXTRA_NAME_VALUE = "value"
         const val ACTION_DEBUG_SET_PROBE = "com.bettergi.pocket.action.DEBUG_SET_PROBE"
         const val ACTION_DEBUG_SET_VERBOSE = "com.bettergi.pocket.action.DEBUG_SET_VERBOSE"
         const val ACTION_DEBUG_SWIPE_TEST = "com.bettergi.pocket.action.DEBUG_SWIPE_TEST"
