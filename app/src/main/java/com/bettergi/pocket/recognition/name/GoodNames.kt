@@ -1,7 +1,7 @@
 package com.bettergi.pocket.recognition.name
 
 import android.content.res.AssetManager
-import com.bettergi.pocket.dsl.FlowSource
+import com.bettergi.pocket.core.FlowSource
 import org.json.JSONObject
 
 /**

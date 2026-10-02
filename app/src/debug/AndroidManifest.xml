@@ -9,5 +9,23 @@
             android:exported="true"
             android:foregroundServiceType="dataSync|mediaProjection"
             tools:replace="android:exported" />
+
+        <!-- DebugControlReceiver 仅 debug 包存在（release 清单不声明，类虽在 main 源集但不可达）；
+             adb 是唯一合法触发方，故保持无 permission 保护。 -->
+        <receiver
+            android:name="com.bettergi.pocket.debug.DebugControlReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.bettergi.pocket.debug.SET_SCREEN_SHARE" />
+                <action android:name="com.bettergi.pocket.debug.SET_SCAN" />
+                <action android:name="com.bettergi.pocket.debug.SET_PROBE" />
+                <action android:name="com.bettergi.pocket.debug.SET_VERBOSE" />
+                <action android:name="com.bettergi.pocket.debug.SWIPE_TEST" />
+                <action android:name="com.bettergi.pocket.debug.SCAN_FLOW" />
+                <action android:name="com.bettergi.pocket.debug.STATUS" />
+                <action android:name="com.bettergi.pocket.debug.REPLAY_PCAP" />
+                <action android:name="com.bettergi.pocket.debug.CAPTURE" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

@@ -12,8 +12,8 @@
 - **自动对话**：识别剧情对话后自动点击选项；可选「快速点击跳过」
 - **自动拾取**：周期点击屏幕下方拾取
 - **自动扫描**：圣遗物/武器背包全量扫描 → GOOD v3 JSON 导出（artifacts + weapons 双数组）
-  - DSL 驱动：`app/src/main/assets/dsl/profiles.json`（坐标唯一事实源）+ `flows/*.json`（**17 do 原语解释器**）
-  - 像素投票判据（锁/收藏/祝圣/稀有度/星带逐格/武器金条）+ ML Kit OCR 字段槽解析（小字自动放大 2x）
+  - DSL 驱动：`app/src/main/assets/dsl/profiles.json`（坐标唯一事实源）+ `flows/*.json`（**26 do 原语解释器**）
+  - 像素投票判据（锁/收藏/祝圣/稀有度/星带逐格/武器金条）+ ONNX PaddleOCR（PP-OCRv6 tiny）字段槽解析（rec-only 批量 ~2ms/槽）
   - set_name 反推词典（276 件/56 套）+ 武器词典（236 件）+ 角色词典（121），**三级匹配：精确 → 包含 → 单字 Dice ≥0.55**
   - 3★/2★ 止扫标识（rarity=-1 哨兵保护）、指纹判到底、跨页去重、**详情切换等待**（防读旧件）
   - **anchor 数字兜底**（`prefixStrict` flow 可配：weapon_scan 严格防跨 tab 误配；默认宽松容忍 OCR 丢前缀）+ 失败 BACK 清弹窗后重进重试
@@ -52,32 +52,42 @@ TriggerForegroundService（生命周期 + settingsListener + 前台通知）
 │    · grabFresh(afterTs)：动作后取新帧（markActionAt 快照动作前末帧 ns 时间戳）
 ├─ TriggerEngine（100ms 节拍，实时触发：AutoPick/AutoSkip，依赖 FrameSource 零行为变化）
 ├─ ScriptRunner（独立协程单步循环，不进节拍；startScan(flowName, maxPages)）
-│    └─ ScanEngine（DSL 解释器，17 do 原语）
-│        顶层: enterScreen/dualStateButton/readCount/pagedGrid/dialog/
-│              ocrWithRetry/navigate/foreach/setFilter/exit/verify/emit
-│        visit 内: vote/click(两级 fallback)/parsePanel/stopWhen/ifMatch
-│        ├─ ScreenProfile（多分辨率路由 loadFor + aspectDistortion 检测）
-│        ├─ VoteJudges（像素投票：gold/pink/purple/starStrip + 网格指纹 settle）
-│        ├─ StatParser（zh 词条→GOOD key，GOODScanner 键风格）
-│        ├─ ArtifactSetDictionary / WeaponDictionary / CharacterDictionary（三级匹配）
-│        └─ GoodExporter（GOOD v3 artifacts+weapons → filesDir）
+│    └─ ScanEngine（DSL 解释器，26 do 原语；**已按域拆分为扩展函数**，见下）
+│        顶层: enterScreen/dualStateButton/readCount/pagedGrid/dialog/ocrWithRetry/
+│              navigate/foreach/setFilter/exit/verify/emit/rosterFind/clicks/filterReset/
+│              assertScreen/readConstellation/clickSlotTab/planSummary
+│        visit 内: vote/click(两级 fallback)/parsePanel/stopWhen/ifMatch/planMatch/planDone
+│        ├─ scan/ScanNavigationDomain   （导航族：enterScreen/returnToHome/navigate/dialog…）
+│        ├─ scan/ScanJudgmentDomain     （判读族：vote/dualStateButton/verify/lock*/setFilter/plan*…）
+│        ├─ scan/ScanGridDomain         （网格族：pagedGrid/swipeGridToTop/awaitGridStable/freshFrame）
+│        ├─ scan/ScanControlDomain      （控制族：foreach/emit*/stopWhen/visit 执行/词典吸附）
+│        ├─ scan/ArtifactDomainPanels   （圣遗物/武器面板解析 + 取证出口）
+│        ├─ scan/CharacterDomainPanels  （角色扫描域：rosterFind/parseCharacterPanel/readTalent/charFilter）
+│        ├─ scan/ScreenProfile（多分辨率路由 loadFor + aspectDistortion 检测）
+│        ├─ scan/VoteJudges（像素投票：gold/pink/purple/starStrip + 网格指纹 settle）
+│        ├─ scan/StatParser（zh 词条→GOOD key，GOODScanner 键风格）
+│        ├─ recognition/name/NameMatcher（**唯一**一处名称模糊匹配；词典 GoodNames）
+│        └─ scan/GoodExporter（GOOD v3 artifacts+weapons+characters → filesDir）
 ├─ AccessibilityAutomationController（动作域：Click/Back/LongPress/Swipe 三段无惯性）
-│    └─ OverlayBridge（悬浮窗门面：show/hide/进度/点击穿透 —— 转成桥调用发给 :a11y）
+│    └─ bridge/OverlayBridge（悬浮窗门面：show/hide/进度/点击穿透 —— 转成桥调用发给 :a11y）
 ├─ DebugControlReceiver（adb 调试链：SET_SCREEN_SHARE/SET_SCAN/SET_PROBE/SWIPE_TEST/SCAN_FLOW/STATUS）
-└─ MainActivity（引导页 / 脚本管理器：脚本开关 + GOOD 数据 + 滑动测试）
+└─ ui/MainActivity（引导屏 / 脚本管理器，两屏各拆独立文件：MainActivityOnboarding / MainActivityScriptManager）
      └─ NoticeCenter + NoticeRouter（全应用唯一提醒通路；展位二选一：本页横幅 or 悬浮窗提醒条）
 
 :a11y 进程（无障碍服务所在，悬浮窗宿主）
 └─ InputAccessibilityService
      ├─ 输入注入（dispatchGesture：点击/三段无惯性滑动）
      └─ A11yOverlayRuntime
-          └─ OverlayWindowController（悬浮球/面板/日志窗/提醒条/脚本行，TYPE_ACCESSIBILITY_OVERLAY 零权限）
-               └─ BridgeSettingsRepository（设置读写的跨进程代理）
+          └─ OverlayWindowController（已按组件拆：OverlayLogWindow/OverlayGeometry/OverlayScriptRows/OverlayNotice）
+               └─ bridge/BridgeSettingsRepository（设置读写的跨进程代理）
 
-跨进程通道（同 UID 两个 Provider）
-  app → :a11y   AccessibilityBridgeProvider（.a11y）   ：点击/滑动/悬浮窗指令
-  :a11y → app   SettingsBridgeProvider（.settings）    ：设置读写/开始导出/退出/识别日志
-  识别日志单一日志源在主进程；:a11y 侧日志窗按 700ms 拉镜像渲染
+core 包（共享类型，消解 capture↔recognition 环）：Geometry（IntSize/IntRect/ColorBgr）/ ColorConversion /
+  FlowSource（DSL 资产加载）/ image/MatOps
+
+跨进程通道（同 UID 两个 Provider，均在 bridge 包）
+  app → :a11y   AccessibilityBridgeProvider（.a11y，input 包）  ：点击/滑动/悬浮窗指令
+  :a11y → app   SettingsBridgeProvider（.settings，bridge 包）  ：设置读写/开始导出/退出/识别日志
+  协议常量集中在 bridge/A11yProtocol；识别日志单一日志源在主进程，:a11y 侧日志窗按 700ms 拉镜像渲染
 ```
 
 - 端到端脚本：`scripts/e2e_scan.sh`（connect/install/grant/bubble/projection/game/scan/swipe/probe/wait/report 分阶段可单跑）
@@ -97,23 +107,25 @@ mise exec -- ./gradlew :app:testDebugUnitTest :app:assembleDebug
 JAVA_HOME=$(mise where java) ./gradlew -p <abs-path> :app:testDebugUnitTest :app:assembleDebug
 ```
 
-### 单测分两层：默认闸门 **不含** 引擎干跑（2026-09-28）
+### 单测分两层：默认闸门 **不含** 引擎干跑（2026-09-28；数字 2026-10-01 复测）
 
-全量 53 类 / 374 条里 `ScanEngineDryRunTest` 占 640.8s，其余 51 类合计 **2.8s**。两个原因：
+全量 69 类 / 509 条里 `ScanEngineDryRunTest`（17 条）占绝大部分墙钟，其余 68 类合计约 6s。两个原因：
 
 1. 引擎的 settle 常量是**真实墙钟**（`CLICK_SETTLE_MS=600` / `ENTER_SETTLE_MS=1200` /
    `SCREEN_SETTLE_MS=1500` …），干跑用 `runBlocking { engine.run() }` 真等 ⇒ 健康路径 ≈0.66s/格 × 21 格/页；
-2. （本轮查出并修掉）三条用例把合成计数器写成**不可达的 1026** ⇒ 「已入库 ≥ 计数器」永不成立 ⇒
+2. （2026-09-28 查出并修掉）三条用例把合成计数器写成**不可达的 1026** ⇒ 「已入库 ≥ 计数器」永不成立 ⇒
    多扫一页「同帧假页」，那页同格名字不变 ⇒ 每格等满 `PANEL_CHANGE_WAIT_MAX_MS(6000)` ⇒ 单条 ~167s。
-   改成可达计数器后（**断言一字未动**）该类 640.8s → **185.5s**。
+   改成可达计数器后（**断言一字未动**）该类当场 640.8s → 185.5s；此后随用例增多，2026-10-01 复测为 **约 316s**。
 
 干跑仍占 98% ⇒ 分层：
 
-| 跑什么 | 命令 | 实测 |
+| 跑什么 | 命令 | 实测（2026-10-01） |
 |---|---|---|
-| 默认闸门（纯逻辑 + 解析 + profile 对账，**跳过干跑**） | `./gradlew :app:testDebugUnitTest` | 52 类 / 362 条 / 测试 3.0s（BUILD 5s） |
-| **含干跑全量** —— 改了 `ScanEngine` 或 `dsl/json/flows` 必须带 | `./gradlew :app:testDebugUnitTest -Pdryrun` | 374 条 / 测试 188.5s |
-| 只跑干跑 | `./gradlew :app:testDebugUnitTest -PdryrunOnly` | 12 条 / 185.5s |
+| 默认闸门（纯逻辑 + 解析 + profile 对账，**跳过干跑**） | `./gradlew :app:testDebugUnitTest` | 68 类 / 492 条 / 测试 6s 级 |
+| **含干跑全量** —— 改了 `ScanEngine` 或 `dsl/json/flows` 必须带 | `./gradlew :app:testDebugUnitTest -Pdryrun` | 69 类 / 509 条 / 约 5.4min |
+| 只跑干跑 | `./gradlew :app:testDebugUnitTest -PdryrunOnly` | 干跑类（约 316s） |
+
+⚠️ 数字随提交漂移，**以当轮 `TEST-*.xml` 解析为准**，别照抄本表。
 
 跳过时 Gradle 会打一行 `BetterGI: 已跳过 …ScanEngineDryRunTest` —— **别把"默认闸门绿"当成"引擎 e2e 绿"**。
 
@@ -121,25 +133,26 @@ JAVA_HOME=$(mise where java) ./gradlew -p <abs-path> :app:testDebugUnitTest :app
 - Gradle 分发：腾讯云镜像（`gradle/wrapper/gradle-wrapper.properties`）
 - `local.properties`：`sdk.dir` 指向 mise android-sdk（gitignore，不入库）
 
-### 守门测试（374 条 / 53 类，挂 testDebugUnitTest；2026-09-28 实测）
+### 守门测试（挂 testDebugUnitTest；例数随提交变化，下表为代表性清单）
 
-| 测试类 | 例数 | 防护 |
-|---|---|---|
-| DslAssetsIntegrityTest | 7 | dsl JSON 静默丢失/损坏（清单含 mappings.json——曾拷错目录不进 APK） |
-| ProfileFlowConsistencyTest | 7 | 全 flow `$` 引用路径/形态/别名错配 |
-| FlowValidatorTest | 20 | flow JSON 结构/原语参数合法性（构建期挡掉真机跑一半才炸） |
-| ParserAndExprTest | 12 | 词条解析 + stopWhen 表达式 |
-| ScanEngineDryRunTest | 12 | 数字孪生：合成帧跑通真实 flow（止扫/多页/去重/坐标/前台闸门）——**默认闸门跳过，见上表** |
-| VoteJudgesRealDataTest | 7 | 判据阈值 vs dsl/verify 实测定稿对账 |
-| GoodExporterTest | 1 | GOOD v3 结构 |
-| ProfileScalingTest | 4 | 多分辨率坐标钉值（16:9 失真 25% 实测：点错行） |
-| NameMatcherTest | 18 | 名称匹配三级（错字命中/乱码不命中/误配防护）＋套装/单件词典反查 |
-| PlanContractTest | 13 | GOOD 输入契约（lock/unlock/equip/artifacts 四形态与拒绝理由） |
-| EquipActionTest + ManageStatusTest | 13 | 装配回执：按钮文本→动作→结果标签整条链（#93） |
-| DoCoverageTest | 1 | 全 flow do 原语 100% 有实现分支（防静默 skip） |
-| 其余（几何/滑动/身份/对账/app 级单元） | 259 | 每页 21 格、落地位移、跨页身份、锁态判据等逐条回归 |
+| 测试类 | 防护 |
+|---|---|
+| DslAssetsIntegrityTest | dsl JSON 静默丢失/损坏（清单含 mappings.json——曾拷错目录不进 APK） |
+| ProfileFlowConsistencyTest | 全 flow `$` 引用路径/形态/别名错配 |
+| FlowValidatorTest | flow JSON 结构/原语参数合法性（构建期挡掉真机跑一半才炸） |
+| ParserAndExprTest | 词条解析 + stopWhen 表达式 |
+| ScanEngineDryRunTest | 数字孪生：合成帧跑通真实 flow（止扫/多页/去重/坐标/前台闸门）——**默认闸门跳过，见上表** |
+| VoteJudgesRealDataTest | 判据阈值 vs dsl/verify 实测定稿对账 |
+| GoodExporterTest | GOOD v3 结构 |
+| ProfileScalingTest | 多分辨率坐标钉值（16:9 失真 25% 实测：点错行） |
+| NameMatcherTest | 名称匹配三级（错字命中/乱码不命中/误配防护）＋套装/单件词典反查 |
+| PlanContractTest | GOOD 输入契约（lock/unlock/equip/artifacts 四形态与拒绝理由） |
+| EquipActionTest + ManageStatusTest | 装配回执：按钮文本→动作→结果标签整条链（#93） |
+| DoCoverageTest | 全 flow（现 **7 个**）do 原语 100% 有实现分支（防静默 skip） |
+| TalentLevelParseTest | 天赋读数锚定解析 + 多数票合并（#153） |
+| 其余（几何/滑动/身份/对账/app 级单元） | 每页 21 格、落地位移、跨页身份、锁态判据等逐条回归 |
 
-**交付 APK 前必须 `unzip -l <apk> | grep assets/dsl` 复验关键资产在包内**（当前应 9 份；git clean ≠ 磁盘文件存在）。
+**交付 APK 前必须 `unzip -l <apk> | grep assets/dsl` 复验关键资产在包内**（当前应 **24** 个文件；git clean ≠ 磁盘文件存在）。
 
 ## dsl 资产同步
 
@@ -153,7 +166,7 @@ dsl 变更后须手动重拷并跑守门测试；同步机制 P4 订阅管理解
 
 ## 路线
 
-- ~~P0 原语层~~ / ~~P1 扫描核心~~ / ~~P3 脚本化（17 do 原语全实现 + DoCoverageTest 守门）~~
+- ~~P0 原语层~~ / ~~P1 扫描核心~~ / ~~P3 脚本化（26 do 原语全实现 + DoCoverageTest 守门）~~
 - **真机验收**（进行中）：emit 率/settle/坐标精度标定 + GOOD vs irminsul 对账 + 滑动参数回填
 - P2 悬浮窗迁移（TYPE_ACCESSIBILITY_OVERLAY 零权限；桥模式已验证，探针结论待真机 z 序确认）
 - P4 订阅管理（脚本仓库 / 一键更新 / plan 规则注入 → ifMatch/setFilter 激活）

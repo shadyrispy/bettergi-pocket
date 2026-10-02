@@ -1,7 +1,7 @@
 package com.bettergi.pocket.scan
 
 import android.util.Log
-import com.bettergi.pocket.dsl.FlowSource
+import com.bettergi.pocket.core.FlowSource
 import org.json.JSONObject
 
 /**
@@ -209,8 +209,16 @@ class ScreenProfile(
      */
     fun cardRelRect(gridKey: String, rel: IntArray, col: Int, row: Int): FrameRect {
         val g = gridGeometry(gridKey) ?: error("grid '$gridKey' 几何不可用（缺 cardSize/cols/colX·rowY/cardOrigin·pitch）")
-        val ox = g.colXs.getOrElse(col) { g.colXs.last() }
-        val oy = g.rowYs.getOrElse(row) { g.rowYs.last() }
+        // ★ P3（2026-09-30）：越界由"静默钳位到最后一列/行"改 fail-loud —— 钳位会把 ROI/点击
+        //   落到错误卡片上（静默漏件/误点），越界本身就是数据或循环边界 bug，必须显式暴露。
+        if (col !in g.colXs.indices || row !in g.rowYs.indices) {
+            throw IllegalStateException(
+                "cardRelRect('$gridKey') 行列越界：col=$col(合法 0..${g.colXs.size - 1}) " +
+                    "row=$row(合法 0..${g.rowYs.size - 1})",
+            )
+        }
+        val ox = g.colXs[col]
+        val oy = g.rowYs[row]
         return FrameRect(
             left = scale(ox + rel[0], scaleX),
             top = scale(oy + rel[1], scaleY),
@@ -225,8 +233,16 @@ class ScreenProfile(
         if (g != null) {
             val col = index % g.cols
             val row = index / g.cols
-            val x = g.colXs.getOrElse(col) { g.colXs.last() } + g.cardW / 2
-            val y = g.rowYs.getOrElse(row) { g.rowYs.last() } + g.clickDy
+            // ★ P3：col 由 `index % cols` 保证在界；row 越界（index 超出一页格数）改 fail-loud
+            //   （原 `getOrElse{last()}` 会把点击静默钳到最后一行 ⇒ 点到错误卡片）。
+            if (row !in g.rowYs.indices) {
+                throw IllegalStateException(
+                    "cellCenter('$gridKey', index=$index) 行越界：row=$row(合法 0..${g.rowYs.size - 1}，" +
+                        "cols=${g.cols})",
+                )
+            }
+            val x = g.colXs[col] + g.cardW / 2
+            val y = g.rowYs[row] + g.clickDy
             return scalePoint(x, y)
         }
         // 回退：仅 cardOrigin+pitch 写法（历史行为）。无 cardOrigin 时给明确报错（勿裸抛 JSONException）

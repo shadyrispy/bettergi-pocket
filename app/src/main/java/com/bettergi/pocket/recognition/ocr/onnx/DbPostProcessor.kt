@@ -1,6 +1,7 @@
 package com.bettergi.pocket.recognition.ocr.onnx
 
-import com.bettergi.pocket.recognition.IntRect
+import com.bettergi.pocket.core.IntRect
+import java.nio.FloatBuffer
 
 /**
  * DB（Differentiable Binarization）后处理——行聚合简化版。
@@ -33,12 +34,29 @@ object DbPostProcessor {
         threshold: Float = 0.3f,
         minRowPixels: Int = 4,
         gap: Int = 4,
+    ): List<RowBox> = toTextBoxes(FloatBuffer.wrap(probMap), w, h, threshold, minRowPixels, gap)
+
+    /**
+     * GC P0（工单 B）：[toTextBoxes] 的 FloatBuffer 版（det 输出 ~1.6MB 免物化）。
+     * 读的是同一内存、同一比较次序 ⇒ 与 FloatArray 路径逐位一致；遍历全部为
+     * 顺序/伪顺序读（按 y*w+x 绝对索引），无需数组形态。缓冲 position 基准与
+     * CtcDecoder 同一约定（索引自 position 起）。
+     */
+    fun toTextBoxes(
+        probMap: FloatBuffer,
+        w: Int,
+        h: Int,
+        threshold: Float = 0.3f,
+        minRowPixels: Int = 4,
+        gap: Int = 4,
     ): List<RowBox> {
-        if (probMap.size < w * h || w <= 0 || h <= 0) return emptyList()
+        val base0 = probMap.position()
+        if (probMap.remaining() < w * h || w <= 0 || h <= 0) return emptyList()
         val rowActive = BooleanArray(h)
         for (y in 0 until h) {
             var hit = 0
-            for (x in 0 until w) if (probMap[y * w + x] >= threshold) hit++
+            val rowBase = base0 + y * w
+            for (x in 0 until w) if (probMap.get(rowBase + x) >= threshold) hit++
             rowActive[y] = hit >= minRowPixels
         }
         val boxes = mutableListOf<RowBox>()
@@ -50,25 +68,26 @@ object DbPostProcessor {
                 if (y0 < 0) {
                     y0 = y; last = y
                 } else if (y - last > gap) {
-                    boxes += buildBox(probMap, w, y0, last, threshold)
+                    boxes += buildBox(probMap, base0, w, y0, last, threshold)
                     y0 = y
                 }
                 last = y
             } else if (y0 >= 0 && y - last > gap) {
-                boxes += buildBox(probMap, w, y0, last, threshold)
+                boxes += buildBox(probMap, base0, w, y0, last, threshold)
                 y0 = -1
             }
         }
-        if (y0 >= 0) boxes += buildBox(probMap, w, y0, last, threshold)
+        if (y0 >= 0) boxes += buildBox(probMap, base0, w, y0, last, threshold)
         return boxes
     }
 
-    private fun buildBox(probMap: FloatArray, w: Int, y0: Int, y1: Int, threshold: Float): RowBox {
+    private fun buildBox(probMap: FloatBuffer, base0: Int, w: Int, y0: Int, y1: Int, threshold: Float): RowBox {
         var x0 = w
         var x1 = 0
         for (y in y0..y1) {
+            val rowBase = base0 + y * w
             for (x in 0 until w) {
-                if (probMap[y * w + x] >= threshold) {
+                if (probMap.get(rowBase + x) >= threshold) {
                     if (x < x0) x0 = x
                     if (x > x1) x1 = x
                 }

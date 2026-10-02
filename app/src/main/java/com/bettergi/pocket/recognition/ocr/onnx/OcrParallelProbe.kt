@@ -7,6 +7,7 @@ import java.nio.FloatBuffer
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * OCR 并行度探针（2026-09-12，**只读**，仅 adb `DEBUG_PERF_PROBE --es ocrpar "…"` 触发）。
@@ -83,7 +84,11 @@ object OcrParallelProbe {
                             }
                         }
                     }
-                    latch.await()
+                    // P3：latch.await() 无超时会永久挂起（某线程卡死在 native run 时整条探针假死）
+                    // ⇒ 加超时，超时按该档失败处理（外层 catch 记 FAILED）。
+                    if (!latch.await(120, TimeUnit.SECONDS)) {
+                        throw IllegalStateException("round 超时（k=$k, intra=$intra）：某线程未在 120s 内完成")
+                    }
                 }
 
                 round() // 预热

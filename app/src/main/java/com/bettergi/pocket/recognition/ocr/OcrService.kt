@@ -2,24 +2,17 @@ package com.bettergi.pocket.recognition.ocr
 
 import android.content.Context
 import android.util.Log
-import com.bettergi.pocket.recognition.IntRect
+import com.bettergi.pocket.core.IntRect
 import com.bettergi.pocket.recognition.OcrText
 import com.bettergi.pocket.recognition.ocr.onnx.OnnxModelAssets
 import com.bettergi.pocket.recognition.ocr.onnx.OnnxOcrEngine
 import com.bettergi.pocket.recognition.ocr.onnx.OnnxPaddleOcrService
-import com.bettergi.pocket.recognition.opencv.MatOps
+import com.bettergi.pocket.core.image.MatOps
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import com.google.android.gms.tasks.Tasks
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.Text
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.TextRecognizer
-import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import org.opencv.core.Mat
-import java.util.concurrent.TimeUnit
 
 data class OcrResultRegion(
     val rect: IntRect,
@@ -128,17 +121,12 @@ object OcrFactory {
     /**
      * 初始化 OCR。
      *
-     * **两段式**（方案 §6.1 规则 2「init 在后台执行」）：
-     * 1. 立刻挂 ML Kit —— 冷启动即可用，不阻塞主线程；
-     * 2. 后台预热 ONNX（建会话 + 首次 det 推理为秒级），就绪后**热切换**为默认引擎。
-     *
-     * ONNX 不可用（模型缺失 / 全部 EP 档失败）则静默保持 ML Kit 兜底——
-     * 这正是 R4/Q3 已决「双引擎共存，ML Kit 降级兜底 + A/B 对拍」的落地形态。
+     * ONNX PaddleOCR 是**唯一**引擎（ML Kit 已移除：它体积大、精度低，且 R8 下
+     * 反射式组件发现被剥坏 ⇒ 保留只会带来 release 崩溃）。初始化在后台协程执行
+     * （建会话 + 首次 det 推理为秒级），不阻塞主线程；就绪前 [default] 保持
+     * [UnavailableOcrService]，调用方（ScriptRunner）须在开跑前查 [available] 并显式失败。
      */
-    fun init(context: Context, preferOnnx: Boolean = true) {
-        default = MlKitOcrService()
-        engineLabel = "mlkit"
-        if (!preferOnnx) return
+    fun init(context: Context) {
         val app = context.applicationContext
         CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
             val onnx = runCatching { createOnnx(app) }.getOrNull()
@@ -148,13 +136,13 @@ object OcrFactory {
                 engineLabel = "onnx:${onnx.tierLabel}"
                 Log.i(TAG, "OCR engine → ONNX (${onnx.tierLabel})")
             } else {
-                // ML Kit 移除后此为致命路径：ONNX 不可用 = 无 OCR，必须显式告警
-                Log.e(TAG, "ONNX unavailable, keep ML Kit fallback (OCR 能力取决于 ML Kit)")
+                // ONNX 不可用 = 无 OCR（无兜底），必须显式告警；扫描入口会 loud 失败
+                Log.e(TAG, "ONNX unavailable, no OCR engine (ML Kit removed)")
             }
         }
     }
 
-    /** 构造 ONNX 服务并预热；任一步失败返回 null（调用方兜底 ML Kit）。 */
+    /** 构造 ONNX 服务并预热；任一步失败返回 null（调用方 loud 失败）。 */
     private fun createOnnx(context: Context): OnnxPaddleOcrService? {
         Log.i(TAG, "ONNX init start")
         val assets = OnnxModelAssets(context)
@@ -174,43 +162,4 @@ object OcrFactory {
     }
 
     private const val TAG = "BetterGI.Ocr"
-}
-
-class MlKitOcrService(
-    private val timeoutSeconds: Long = 3,
-) : IOcrService {
-    private val recognizer: TextRecognizer =
-        TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
-
-    override fun recognize(mat: Mat): OcrResult {
-        if (mat.empty()) return OcrResult.EMPTY
-        val bitmap = MatOps.matToBitmap(mat)
-        return try {
-            val image = InputImage.fromBitmap(bitmap, 0)
-            val visionText = Tasks.await(recognizer.process(image), timeoutSeconds, TimeUnit.SECONDS)
-            toOcrResult(visionText)
-        } catch (e: Exception) {
-            Log.e(TAG, "ML Kit OCR failed", e)
-            OcrResult.EMPTY
-        } finally {
-            bitmap.recycle()
-        }
-    }
-
-    private fun toOcrResult(visionText: Text): OcrResult {
-        val regions = ArrayList<OcrResultRegion>()
-        for (block in visionText.textBlocks) {
-            for (line in block.lines) {
-                val box = line.boundingBox ?: continue
-                val rect = IntRect(box.left, box.top, box.width(), box.height())
-                if (rect.isEmpty()) continue
-                regions.add(OcrResultRegion(rect, line.text, 1.0f))
-            }
-        }
-        return OcrResult(regions)
-    }
-
-    private companion object {
-        private const val TAG = "BetterGI.Ocr"
-    }
 }

@@ -1,4 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- ★ A29：FileProvider（${applicationId}.files）路径收窄。
+     原先 `<files-path path="." />` 把整个 filesDir 都暴露给了分享面板；
+     逐一核对代码里全部 getUriForFile 调用后确认**唯一**共享点是 GOOD 导出
+     （MainActivity.shareGood，分享前已把导出快照拷进 filesDir/good_exports/），
+     故这里只登记该子目录。脚本库（files/scripts/good/）、昵称表、日志等
+     私有文件不再可被 FileProvider 分享。 -->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <files-path name="good_exports" path="." />
+    <files-path
+        name="good_exports"
+        path="good_exports/" />
 </paths>

@@ -2,7 +2,7 @@ package com.bettergi.pocket.scan
 
 import android.content.res.AssetManager
 import android.util.Log
-import com.bettergi.pocket.dsl.FlowSource
+import com.bettergi.pocket.core.FlowSource
 import org.json.JSONArray
 import org.json.JSONObject
 

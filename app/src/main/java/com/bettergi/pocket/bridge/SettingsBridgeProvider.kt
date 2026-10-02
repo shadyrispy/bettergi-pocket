@@ -1,4 +1,4 @@
-package com.bettergi.pocket.settings
+package com.bettergi.pocket.bridge
 
 import android.content.ContentProvider
 import android.content.ContentValues
@@ -9,6 +9,9 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import com.bettergi.pocket.log.RecognitionLog
+import com.bettergi.pocket.settings.SettingsGateway
+import com.bettergi.pocket.settings.SettingsWire
+import com.bettergi.pocket.settings.TriggerSettingsRepository
 import com.bettergi.pocket.service.TriggerForegroundService
 
 /**
@@ -24,7 +27,26 @@ class SettingsBridgeProvider : ContentProvider() {
 
     override fun onCreate(): Boolean = true
 
-    override fun call(method: String, arg: String?, extras: Bundle?): Bundle = when (method) {
+    /**
+     * ★ A32：`call()` 顶层兜底 catch —— 本 Provider 挂在主进程、对面是 `:a11y`，任何新增 method
+     * 分支漏包 runCatching 都会变成跨进程崩溃。统一降级为错误 Bundle（`ok=false` + `error` +
+     * `method`），调用方（BridgeSettingsRepository / OverlayWindowController 的 capture 快照读取）
+     * 读不到预期键即走既有降级路径（不崩、保持缓存值）。
+     * 同时 else（未知 method）从空 Bundle 改为明确 `ok=false, error=unknown_method` ——
+     * 空 Bundle 与"成功但无载荷"同形，调用方无从判别失败。
+     */
+    override fun call(method: String, arg: String?, extras: Bundle?): Bundle = try {
+        dispatch(method, arg, extras)
+    } catch (e: Exception) {
+        Log.w(TAG, "bridge call failed: method=$method", e)
+        Bundle().apply {
+            putBoolean(KEY_OK, false)
+            putString(KEY_ERROR, e.message ?: e.javaClass.simpleName)
+            putString(KEY_METHOD, method)
+        }
+    }
+
+    private fun dispatch(method: String, arg: String?, extras: Bundle?): Bundle = when (method) {
         METHOD_GET -> Bundle().apply {
             putBundle(KEY_SETTINGS, SettingsWire.toBundle(repo()?.get() ?: SettingsWire.DEFAULTS))
         }
@@ -69,7 +91,13 @@ class SettingsBridgeProvider : ContentProvider() {
                 RecognitionLog.snapshotAll().map { RecognitionLog.encode(it) }.toTypedArray(),
             )
         }
-        else -> Bundle()
+        else -> Bundle().apply {
+            // ★ A32：未知 method 不再返回空 Bundle（调用方会把"无键"误当成功）——
+            //   明确 ok=false + error=unknown_method，:a11y 侧据此走失败降级。
+            putBoolean(KEY_OK, false)
+            putString(KEY_ERROR, "unknown_method")
+            putString(KEY_METHOD, method)
+        }
     }
 
     /**
@@ -156,6 +184,10 @@ class SettingsBridgeProvider : ContentProvider() {
 
         const val KEY_SETTINGS = "settings"
         const val KEY_OK = "ok"
+        /** ★ A32：错误文本键（unknown_method / 异常摘要）。只加不改，旧调用方不读也不受影响。 */
+        const val KEY_ERROR = "error"
+        /** ★ A32：回显发起 method 名，便于跨进程排障。 */
+        const val KEY_METHOD = "method"
         const val KEY_VALUE = "value"
         const val KEY_ENTRIES = "entries"
         const val KEY_TAG = "tag"

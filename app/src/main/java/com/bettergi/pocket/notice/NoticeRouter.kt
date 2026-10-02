@@ -1,11 +1,13 @@
 package com.bettergi.pocket.notice
 
 import android.content.Context
-import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import com.bettergi.pocket.AppForeground
+import com.bettergi.pocket.bridge.A11yProtocol
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * 提醒的**展位路由**（app 进程）。
@@ -19,10 +21,6 @@ import java.util.concurrent.CopyOnWriteArrayList
 object NoticeRouter : NoticeCenter.Sink {
 
     private const val TAG = "BetterGI.Notice"
-    private const val A11Y_AUTHORITY_SUFFIX = ".a11y"
-    private const val METHOD_NOTICE_PUSH = "notice_push"
-    private const val KEY_LEVEL = "level"
-    private const val KEY_TEXT = "text"
 
     @Volatile
     private var appContext: Context? = null
@@ -49,18 +47,36 @@ object NoticeRouter : NoticeCenter.Sink {
         pushToOverlay(notice)
     }
 
+    /**
+     * ★ A26：提醒条推送改异步 fire-and-forget + 同文本去重。show() 常在主线程被调
+     * （NoticeCenter 的 sink 分发），同步 binder 会在 :a11y 忙时把主进程主线程拉住（ANR 面）。
+     * 提醒没有确认语义（NoticeCenter 已做 2s 去重），后到覆盖先到即可；单线程执行器保序。
+     */
+    private val pushExecutor: ExecutorService = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "notice-router-push").apply { isDaemon = true }
+    }
+
+    @Volatile
+    private var lastPushed: String? = null
+
     private fun pushToOverlay(notice: NoticeCenter.Notice) {
         val ctx = appContext ?: return
-        val uri = Uri.parse("content://${ctx.packageName}$A11Y_AUTHORITY_SUFFIX")
+        // 工单 D：authority URI 与 method 名改用 bridge/A11yProtocol 的常量与工厂（值不变）。
+        val uri = A11yProtocol.a11yUri(ctx)
+        val signature = "${notice.level.name}|${notice.text}"
+        if (lastPushed == signature) return // 与上一条相同 ⇒ 去重（后到覆盖先到，重复值无意义）
+        lastPushed = signature
         val extras = Bundle().apply {
-            putString(KEY_LEVEL, notice.level.name)
-            putString(KEY_TEXT, notice.text)
+            putString(A11yProtocol.K_LEVEL, notice.level.name)
+            putString(A11yProtocol.K_TEXT, notice.text)
         }
-        try {
-            ctx.contentResolver.call(uri, METHOD_NOTICE_PUSH, null, extras)
-        } catch (e: Exception) {
-            // 无障碍没连上时悬浮窗本就不存在 —— 提醒已在日志里留痕，这里静默降级
-            Log.w(TAG, "notice push failed: ${notice.text}", e)
+        pushExecutor.execute {
+            try {
+                ctx.contentResolver.call(uri, A11yProtocol.M_NOTICE, null, extras)
+            } catch (e: Exception) {
+                // 无障碍没连上时悬浮窗本就不存在 —— 提醒已在日志里留痕，这里静默降级
+                Log.w(TAG, "notice push failed: ${notice.text}", e)
+            }
         }
     }
 }

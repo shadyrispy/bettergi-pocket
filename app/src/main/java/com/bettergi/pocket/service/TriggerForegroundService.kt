@@ -20,9 +20,11 @@ import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import com.bettergi.pocket.scan.NameOverrides
-import com.bettergi.pocket.MainActivity
+import com.bettergi.pocket.PendingHandoff
+import com.bettergi.pocket.ui.MainActivity
 import com.bettergi.pocket.R
 import com.bettergi.pocket.capture.CapturePermissionActivity
+import com.bettergi.pocket.capture.CaptureContract
 import com.bettergi.pocket.pcdata.CaptureConsentActivity
 import com.bettergi.pocket.pcdata.CaptureSession
 import com.bettergi.pocket.capture.CaptureResultHolder
@@ -37,7 +39,7 @@ import com.bettergi.pocket.genshin.GenshinLauncher
 import com.bettergi.pocket.input.AccessibilityAutomationController
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.input.SwipeMethod
-import com.bettergi.pocket.overlay.OverlayBridge
+import com.bettergi.pocket.bridge.OverlayBridge
 import com.bettergi.pocket.recognition.RecognitionAssets
 import com.bettergi.pocket.recognition.ocr.OcrFactory
 import com.bettergi.pocket.scan.ScanListener
@@ -68,6 +70,14 @@ class TriggerForegroundService : Service() {
 
     @Volatile
     private var requestingCapturePermission = false
+
+    /**
+     * FGS 前台态是否已在本次实例内落过一次。任何经 `startForegroundService` 的启动
+     * （adb DEBUG_* / 授权回调）都必须在 [onStartCommand] 同步补齐前台态，否则触发
+     * [ForegroundServiceDidNotStartInTimeException]（见 onStartCommand 顶部注释）。
+     */
+    @Volatile
+    private var foregroundSatisfied = false
 
     /** VPN 授权弹窗在路上的标记（去重 + 弹窗期间不自动启动游戏，与投影那条同语义）。 */
     private var requestingVpnConsent = false
@@ -175,7 +185,28 @@ class TriggerForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // ★ FGS 时限兜底（2026-10-01 真机实锤 12:08 crash）：全新安装（无"记住授权"）时
+        //   adb 直发 DEBUG_SET_SCREEN_SHARE=true ⇒ settingsListener 走 requestCapturePermission()
+        //   弹授权页，原实现要等 ACTION_CAPTURE_RESULT 才 startInForeground —— 弹窗挂起期间
+        //   超过系统 5s 时限 ⇒ ForegroundServiceDidNotStartInTimeException 杀进程。
+        //   修法：任何启动命令先同步落一次前台态（dataSync 型），授权结果到达时既有分支
+        //   再升级为 mediaProjection 型（startForeground 可重复调用，后到覆盖通知与类型）。
+        if (!foregroundSatisfied) {
+            startInForeground(sharing = captureController.isRunning())
+        }
         when (intent?.action) {
+            // ★ P3：START_STICKY 的 null intent 重启分支 —— 原先这里既不 startForeground 也不
+            //   stopSelf，服务以"无通知的 started service"滞留（后台超时即被系统再回收，循环往复）。
+            //   修法：重新走 startInForeground(sharing=false) 把前台态保住（防立刻再被回收），
+            //   但**绝不**误启投影：sharing=false 只是通知文案/FGS 类型回 dataSync，
+            //   投影的真正闸门在 settingsListener（screenShareEnabled 开关）——而投影授权无法
+            //   跨进程重启存活，readFromPrefs 反序列化时本就强制 screenShare=false
+            //   （TriggerSettingsRepository.readFromPrefs），重启后不可能自动进投影链。
+            null -> {
+                // 只补前台态；悬浮窗是否该显示随原会话状态不可考，不在此处主动 show
+                //（ACTION_START 路径会 show，重启后用户从通知/悬浮窗入口正常恢复）。
+                startInForeground(sharing = false)
+            }
             ACTION_START -> {
                 startInForeground(sharing = captureController.isRunning())
                 overlayController.show()
@@ -222,7 +253,18 @@ class TriggerForegroundService : Service() {
                 val resultData = CaptureResultHolder.take()
                 if (resultData != null) {
                     startInForeground(sharing = true)
-                    captureController.start(resultCode, resultData)
+                    // ★ A27：controller.start 保证不抛（token 失效的 SecurityException、
+                    //   异常 ROM 的 IllegalStateException 都在内部消化），失败拿摘要而不是裸崩主进程。
+                    val startFailure = captureController.start(resultCode, resultData)
+                    if (startFailure != null) {
+                        Log.w(TAG, "capture start failed: $startFailure")
+                        NoticeCenter.error("屏幕共享启动失败：$startFailure")
+                        // 开关落回走既有通路：settingsListener else 分支 ⇒ stopScreenShare()
+                        //（engine.stop + captureController.stop + 前台通知翻回非共享），
+                        // 与下面 resultData == null 分支同款处理。
+                        settingsRepository.setScreenShareEnabled(false)
+                        return START_STICKY
+                    }
                     Log.i(TAG, "capture started; running=${captureController.isRunning()}")
                     engine.start()
                     InputAccessibilityService.ensureEnabled(applicationContext)
@@ -665,7 +707,9 @@ class TriggerForegroundService : Service() {
                     Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
                     Intent.FLAG_ACTIVITY_SINGLE_TOP,
             )
-            .putExtra(MainActivity.EXTRA_AUTO_SHARE, file)
+        // ★ A29：分享文件名不再走 extras（防第三方伪造 putExtra 诱导分享任意 filesDir 文件），
+        //   改经 PendingHandoff；MainActivity 侧另有 good_export_* 文件名白名单与快照拷贝。
+        PendingHandoff.post(PendingHandoff.Request.Share(file))
         startActivity(intent)
     }
 
@@ -701,6 +745,8 @@ class TriggerForegroundService : Service() {
         overlayController.hide()
         runCatching { unregisterReceiver(a11yStateReceiver) }
         stopForeground(STOP_FOREGROUND_REMOVE)
+        // 下次 startForegroundService 必须重新满足时限（本实例的前台态已随 stopForeground 撤销）
+        foregroundSatisfied = false
     }
 
     private fun stopScreenShare() {
@@ -770,7 +816,9 @@ class TriggerForegroundService : Service() {
                         Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
                         Intent.FLAG_ACTIVITY_SINGLE_TOP,
                 )
-                .putExtra(MainActivity.EXTRA_AUTO_REQUEST_CAPTURE, true)
+            // ★ A29：敏感中转不再走 extras（exported 的 MainActivity 可被任意 app putExtra 伪造），
+            //   改为进程内静态交接——服务与 MainActivity 同在主进程，先登记再拉前台。
+            PendingHandoff.post(PendingHandoff.Request.RequestCapture)
             startActivity(intent)
         }
     }
@@ -794,14 +842,15 @@ class TriggerForegroundService : Service() {
             requestingVpnConsent = false
             clearVpnConsentTimeout()
             Log.w(TAG, "direct vpn consent launch failed, bringing app to front", e)
+            // ★ A29：同投影兜底——敏感中转改经 PendingHandoff（进程内静态交接），extras 不再承载。
+            PendingHandoff.post(PendingHandoff.Request.RequestVpn)
             startActivity(
                 Intent(this, MainActivity::class.java)
                     .addFlags(
                         Intent.FLAG_ACTIVITY_NEW_TASK or
                             Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
                             Intent.FLAG_ACTIVITY_SINGLE_TOP,
-                    )
-                    .putExtra(MainActivity.EXTRA_AUTO_REQUEST_VPN, true),
+                    ),
             )
         }
     }
@@ -851,6 +900,7 @@ class TriggerForegroundService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
+        foregroundSatisfied = true
     }
 
     private fun buildNotification(
@@ -902,11 +952,11 @@ class TriggerForegroundService : Service() {
      * ⚠️ **不要用 `--es` 直接传含 `;` 的串**：`adb shell` 会把 `;` 当**命令分隔符**，
      * 只有第一个 ROI 能到达（实测踩过）。故新增 [EXTRA_ROIS_B64]（base64）作为主通道。
      */
-    private fun parseRoiCsv(csv: String): List<com.bettergi.pocket.recognition.IntRect> {
+    private fun parseRoiCsv(csv: String): List<com.bettergi.pocket.core.IntRect> {
         if (csv.isBlank()) return emptyList()
         return csv.split(';').mapNotNull { seg ->
             val p = seg.trim().split(',').mapNotNull { it.trim().toIntOrNull() }
-            if (p.size >= 4) com.bettergi.pocket.recognition.IntRect(p[0], p[1], p[2], p[3]) else null
+            if (p.size >= 4) com.bettergi.pocket.core.IntRect(p[0], p[1], p[2], p[3]) else null
         }
     }
 
@@ -921,7 +971,7 @@ class TriggerForegroundService : Service() {
      * 解析带名字的 ROI 串：`"name:x,y,w,h;name:x,y,w,h;…"` → `List<Pair<String,IntRect>>`。
      * 供 **ROI 稳定性探针** 用（要报出每个候选的名字）。非法片段跳过。
      */
-    private fun parseNamedRois(s: String): List<Pair<String, com.bettergi.pocket.recognition.IntRect>> {
+    private fun parseNamedRois(s: String): List<Pair<String, com.bettergi.pocket.core.IntRect>> {
         if (s.isBlank()) return emptyList()
         return s.split(';').mapNotNull { seg ->
             val i = seg.indexOf(':')
@@ -931,7 +981,7 @@ class TriggerForegroundService : Service() {
             if (name.isEmpty() || p.size < 4) {
                 null
             } else {
-                name to com.bettergi.pocket.recognition.IntRect(p[0], p[1], p[2], p[3])
+                name to com.bettergi.pocket.core.IntRect(p[0], p[1], p[2], p[3])
             }
         }
     }
@@ -944,11 +994,11 @@ class TriggerForegroundService : Service() {
         const val ACTION_CAPTURE_STOP = "com.bettergi.pocket.action.CAPTURE_STOP"
         /** 抓包会话开始（同样经桥过来：发起权在主进程，面板只发指令）。 */
         const val ACTION_CAPTURE_START = "com.bettergi.pocket.action.CAPTURE_START"
-        /** VPN 授权中转页的回报（OK 或玩家拒绝）。 */
-        const val ACTION_VPN_RESULT = "com.bettergi.pocket.action.VPN_RESULT"
-        const val EXTRA_VPN_OK = "vpn_ok"
-        const val ACTION_CAPTURE_RESULT = "com.bettergi.pocket.action.CAPTURE_RESULT"
-        const val ACTION_CAPTURE_DENIED = "com.bettergi.pocket.action.CAPTURE_DENIED"
+        /** VPN 授权中转页的回报（OK 或玩家拒绝）。工单 D：值定义收口到 capture/CaptureContract，此处仅别名引用（值逐字不变）。 */
+        const val ACTION_VPN_RESULT = CaptureContract.ACTION_VPN_RESULT
+        const val EXTRA_VPN_OK = CaptureContract.EXTRA_VPN_OK
+        const val ACTION_CAPTURE_RESULT = CaptureContract.ACTION_CAPTURE_RESULT
+        const val ACTION_CAPTURE_DENIED = CaptureContract.ACTION_CAPTURE_DENIED
         /**
          * 悬浮窗「开始导出」：由无障碍进程经设置桥（`overlay_share_good`）转成服务指令。
          * 之所以不在无障碍进程直接起分享：导出文件名只有本服务知道（`lastGoodFile`），
@@ -1079,7 +1129,8 @@ class TriggerForegroundService : Service() {
         const val EXTRA_CLICK_X = "x"
         const val EXTRA_CLICK_Y = "y"
         const val EXTRA_CLICK_DURATION = "duration"
-        const val EXTRA_RESULT_CODE = "extra_result_code"
+        /** 投影授权页回传的 resultCode（工单 D：值定义收口到 capture/CaptureContract，此处仅别名引用，值逐字不变）。 */
+        const val EXTRA_RESULT_CODE = CaptureContract.EXTRA_RESULT_CODE
         const val EXTRA_RESULT_DATA = "extra_result_data"
 
         private const val NOTIFICATION_CHANNEL_ID = "bettergi_pocket_trigger"

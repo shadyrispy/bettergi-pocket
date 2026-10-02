@@ -15,7 +15,7 @@ set -u
 
 ADB=${ADB:-/Users/esc/.local/share/mise/installs/android-sdk/22.0/platform-tools/adb}
 DEVICE=${DEVICE:-127.0.0.1:5555}
-APK=${APK:-/Users/esc/Documents/genshin-scanner/bettergi-pocket-debug-20260902-fix24.apk}
+APK=${APK:-/Users/esc/Documents/genshin-scanner/bettergi-pocket/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk}
 
 PKG=com.bettergi.pocket
 A11Y="$PKG/.input.InputAccessibilityService"
@@ -30,15 +30,19 @@ log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$LOG"; }
 adb() { "$ADB" -s "$DEVICE" "$@"; }
 
 # 按可见文本点击（uiautomator dump → 解析 bounds → input tap）
+# ⚠️ 设备端 dump 路径按 serial 隔离：多设备/多轮并行时同一 /sdcard/bg_window.xml 会互相覆盖。
+DUMP_REMOTE="/sdcard/bg_window_${DEVICE//[:\/]/_}.xml"
+# 本地侧同样按 serial 隔离：并发跑两台设备时固定 /tmp 路径会互踩（原写死 /tmp/bg_window.xml）。
+DUMP_LOCAL="/tmp/bg_window_${DEVICE//[:\/]/_}.xml"
 tap_text() {
   local pattern="$1" label="${2:-$1}"
-  adb shell uiautomator dump /sdcard/bg_window.xml >/dev/null 2>&1
-  adb shell cat /sdcard/bg_window.xml > /tmp/bg_window.xml 2>/dev/null || { log "  dump failed"; return 1; }
+  adb shell uiautomator dump "$DUMP_REMOTE" >/dev/null 2>&1
+  adb shell cat "$DUMP_REMOTE" > "$DUMP_LOCAL" 2>/dev/null || { log "  dump failed"; return 1; }
   local coords
-  coords=$(python3 - "$pattern" <<'PY'
+  coords=$(python3 - "$pattern" <<PY
 import re, sys
 pat = sys.argv[1]
-xml = open('/tmp/bg_window.xml', encoding='utf-8').read()
+xml = open('$DUMP_LOCAL', encoding='utf-8').read()
 best = None
 for m in re.finditer(r'<node[^>]*>', xml):
     node = m.group(0)
@@ -77,9 +81,18 @@ stage_install() {
 
 stage_grant() {
   log "== grant permissions"
-  adb shell appops set "$PKG" SYSTEM_ALERT_WINDOW allow | tee -a "$LOG"
-  adb shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS 2>&1 | tee -a "$LOG"
-  adb shell settings put secure enabled_accessibility_services "$A11Y" | tee -a "$LOG"
+  # ⚠️ 2026-10-01 清理：原先这里还有 `appops set SYSTEM_ALERT_WINDOW` 与 `pm grant POST_NOTIFICATIONS`。
+  #   前者已无用（悬浮窗搬到 :a11y 的 TYPE_ACCESSIBILITY_OVERLAY，零权限）；后者权限声明已挪到宿主
+  #   清单、且 `pm grant` 对未声明权限会报错刷屏。两条都删。
+  # ⚠️ 追加式启用（对齐 _dev/recover_bs.sh 的 2026-09-27 事故教训）：BlueStacks 的
+  #   BstCommandProcessor 也在用无障碍通路，直接覆盖会动用户模拟器的输入通路 ⇒ 先读现值再追加。
+  local cur
+  cur=$(adb shell settings get secure enabled_accessibility_services | tr -d '\r')
+  case ",$cur," in
+    *",$A11Y,"*) log "  无障碍服务已在列（追加式）: $cur" ;;
+    ",,") adb shell settings put secure enabled_accessibility_services "$A11Y" | tee -a "$LOG" ;;
+    *) adb shell settings put secure enabled_accessibility_services "$cur:$A11Y" | tee -a "$LOG" ;;
+  esac
   adb shell settings put secure accessibility_enabled 1 | tee -a "$LOG"
   log "  无障碍服务: $(adb shell settings get secure enabled_accessibility_services)"
   log "  无障碍开关: $(adb shell settings get secure accessibility_enabled)"
@@ -96,7 +109,7 @@ tap_overlay() {
   frame=$(adb shell dumpsys window windows | grep -A25 "u0 $PKG" | grep -m1 -oE "frame=\[[0-9]+,[0-9]+\]\[[0-9]+,[0-9]+\]")
   if [ -z "$frame" ]; then log "  ✗ 未找到悬浮窗 frame"; return 1; fi
   local nums x1 y1 x2 y2 x y
-  nums=${frame#frame=[}; nums=${nums//[\[\]]/ }
+  nums=${frame#frame=[}; nums=${nums//[\[\],]/ }
   set -- $nums
   x1=$1; y1=$2; x2=$3; y2=$4
   x=$(( (x1 + x2) / 2 )); y=$(( (y1 + y2) / 2 ))
@@ -129,10 +142,17 @@ stage_bubble() {
 stage_projection() {
   log "== 开启投影（共享屏幕）→ 通知 action → 系统 MediaProjection 弹窗"
   svc_cmd "com.bettergi.pocket.action.DEBUG_SET_SCREEN_SHARE" "--ez" "enabled" "true"
-  sleep 2
-  log "  am start 直启 CapturePermissionActivity（shell 启动不受后台限制）"
-  adb shell am start -n "$PKG/.capture.CapturePermissionActivity" 2>&1 | tee -a "$LOG"
-  sleep 4
+  sleep 3
+  # CapturePermissionActivity 已 exported=false，shell 直启会 SecurityException（shell
+  # uid 无 START_ANY_ACTIVITY）。服务收到上面广播后经 settingsListener **内部**拉起
+  # 授权页；内部拉起未就绪时经仍导出的 MainActivity（EXTRA_AUTO_REQUEST_CAPTURE）前台内发起。
+  if adb shell dumpsys media_projection 2>/dev/null | grep -q com.bettergi.pocket; then
+    log "  投影已就绪（服务内部拉起授权页）"
+  else
+    log "  内部拉起未就绪，走 MainActivity 兜底"
+    adb shell am start -n "$PKG/.MainActivity" --ez auto_request_capture true 2>&1 | tee -a "$LOG"
+    sleep 4
+  fi
   log "  点系统授权弹窗确认…"
   tap_text '立即开始|马上开始|Start now|START NOW' '投影确认' || log "  ! 未匹配确认按钮"
   sleep 4

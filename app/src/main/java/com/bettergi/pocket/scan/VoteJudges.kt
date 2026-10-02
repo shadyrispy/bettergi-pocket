@@ -84,23 +84,30 @@ object VoteJudges {
 
     /**
      * 统计 rect 内命中谓词的像素数。frame 为 BGR Mat，rect 已是帧坐标。
-     * ⚠️ Mat.get(row, col, byte[]) 是「单像素」重载——必须逐行 get(row, byte[]) 取整行再切片，
-     * 否则整块缓冲只有首像素有效（真机上判据会近乎恒 0）。
+     * ★ P3（2026-09-30）性能改：逐像素 `frame.get(y, x, px)` 是每像素一次 JNI 调用（大 rect 下
+     *   代价主导）⇒ 改为**整行** `frame.get(y, x0, rowBuf)` 一次取该行 rect 段，再内存内切片。
+     *   结果与逐像素版**逐位一致**（同一 `get(row, col, byte[])` 语义的批量形态，
+     *   同文件 gridRowProfile/:515 是既有先例）。
      */
     fun countMatches(frame: Mat, rect: FrameRect, predicate: RgbPredicate): Int {
+        // 空帧防御（2026-10-01 深测实录）：帧生命周期滑漏交付的空 Mat 会让 cols()-1=-1 的
+        // coerceIn 直接炸掉整轮扫描；判据层按「无像素 = 0 命中」安全降级（等价空 rect 语义）。
+        if (frame.empty()) return 0
         val x0 = rect.left.coerceIn(0, frame.cols() - 1)
         val y0 = rect.top.coerceIn(0, frame.rows() - 1)
         val x1 = rect.right.coerceIn(0, frame.cols())
         val y1 = rect.bottom.coerceIn(0, frame.rows())
         if (x1 <= x0 || y1 <= y0) return 0
-        val px = ByteArray(3)
+        val w = x1 - x0
+        val rowBuf = ByteArray(3 * w)
         var count = 0
         for (y in y0 until y1) {
-            for (x in x0 until x1) {
-                frame.get(y, x, px)
-                val b = px[0].toInt() and 0xFF
-                val g = px[1].toInt() and 0xFF
-                val r = px[2].toInt() and 0xFF
+            frame.get(y, x0, rowBuf)
+            for (i in 0 until w) {
+                val o = i * 3
+                val b = rowBuf[o].toInt() and 0xFF
+                val g = rowBuf[o + 1].toInt() and 0xFF
+                val r = rowBuf[o + 2].toInt() and 0xFF
                 if (predicate.matches(r, g, b)) count++
             }
         }
@@ -252,15 +259,20 @@ object VoteJudges {
         val x1 = rect.right.coerceIn(0, frame.cols())
         val y1 = rect.bottom.coerceIn(0, frame.rows())
         if (x1 <= x0 || y1 <= y0) return -1
-        val rowBuf = ByteArray(3)
+        // ★ P3（2026-10-01）性能改：逐像素 `frame.get(y, x, rowBuf)` 是每像素一次 JNI
+        //   ⇒ 改为**整行**读（countMatches 同手法），求和口径不变 ⇒ 结果逐位一致。
+        val w = x1 - x0
+        val rowBuf = ByteArray(3 * w)
         var sumR = 0L; var sumG = 0L; var sumB = 0L
         var n = 0L
         for (y in y0 until y1) {
+            frame.get(y, x0, rowBuf)
+            var o = 0
             for (x in x0 until x1) {
-                frame.get(y, x, rowBuf)
-                sumB += rowBuf[0].toInt() and 0xFF
-                sumG += rowBuf[1].toInt() and 0xFF
-                sumR += rowBuf[2].toInt() and 0xFF
+                sumB += rowBuf[o].toInt() and 0xFF
+                sumG += rowBuf[o + 1].toInt() and 0xFF
+                sumR += rowBuf[o + 2].toInt() and 0xFF
+                o += 3
                 n++
             }
         }
@@ -328,14 +340,18 @@ object VoteJudges {
         Imgproc.resize(sub, thumb, Size(24.0, 16.0), 0.0, 0.0, Imgproc.INTER_AREA)
         sub.release()
         val out = ByteArray(thumb.rows() * thumb.cols() * 3)
-        val buf = ByteArray(3)
+        // ★ P3（2026-10-01）性能改：24×16=384 次逐点 `thumb.get(y,x,buf)` JNI（settle 轮询每 120ms 一次）
+        //   ⇒ 改为**整行**读（countMatches 同手法），BGR→RGB 量化口径不变 ⇒ 输出逐位一致。
+        val rowBuf = ByteArray(thumb.cols() * 3)
         var i = 0
         for (y in 0 until thumb.rows()) {
+            thumb.get(y, 0, rowBuf)
+            var o = 0
             for (x in 0 until thumb.cols()) {
-                thumb.get(y, x, buf)
-                out[i++] = ((buf[2].toInt() and 0xFF) shr 4).toByte() // R
-                out[i++] = ((buf[1].toInt() and 0xFF) shr 4).toByte() // G
-                out[i++] = ((buf[0].toInt() and 0xFF) shr 4).toByte() // B
+                out[i++] = ((rowBuf[o + 2].toInt() and 0xFF) shr 4).toByte() // R
+                out[i++] = ((rowBuf[o + 1].toInt() and 0xFF) shr 4).toByte() // G
+                out[i++] = ((rowBuf[o].toInt() and 0xFF) shr 4).toByte() // B
+                o += 3
             }
         }
         thumb.release()

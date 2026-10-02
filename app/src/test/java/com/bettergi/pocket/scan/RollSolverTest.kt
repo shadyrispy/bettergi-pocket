@@ -231,4 +231,29 @@ class RollSolverTest {
         assertEquals(239.0, RollTable.snap(5, "hp", 239.6)!!, 1e-9)
         assertEquals(10.9, RollTable.snap(5, "critDMG_", 10.93)!!, 1e-9)
     }
+
+    // ★ A18（2026-09-30）：level+10 候选解出时，Solution 必须带回解出等级，
+    //   否则导出 level（OCR 误读值）与 totalRolls（= init + solvedLevel/4）自相矛盾。
+    @Test
+    fun `level plus ten candidate reports solved level consistent with totalRolls`() {
+        // OCR 丢位场景（+10 候选只在 level<10 时生成，见 RollSolver.solve）。四个显示值的
+        // 最少强化次数都是 2（表内分解长度=2）⇒ 4 条最少 8 次：level=9（init+upgrades ≤ 4+2=6）
+        // 无解；level+10=19（init4+4=8）恰可解。
+        val subs = listOf(
+            RollSolver.In("hp", 508.0),        // 2 次
+            RollSolver.In("hp_", 9.9),         // 2 次
+            RollSolver.In("critRate_", 7.8),   // 2 次
+            RollSolver.In("critDMG_", 14.0),   // 2 次
+        )
+        val solved = RollSolver.solve(5, 9, subs) // 原值 9 无解（最少 8 > 6）⇒ +10 候选 19 解出
+        assertNotNull(solved)
+        assertEquals(19, solved!!.solvedLevel)
+        // totalRolls 与 solvedLevel 自洽：init(4) + 19/4(4) = 8
+        assertEquals(4, solved.initialSubstatCount)
+        assertEquals(solved.initialSubstatCount + solved.solvedLevel / 4, solved.totalRolls)
+        // 对照：原值本身可解时 solvedLevel == 原值（行为不变）
+        val solvedOriginal = RollSolver.solve(5, 19, subs)
+        assertEquals(19, solvedOriginal!!.solvedLevel)
+        assertEquals(8, solvedOriginal.totalRolls)
+    }
 }

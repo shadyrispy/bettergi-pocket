@@ -1,13 +1,10 @@
-package com.bettergi.pocket.recognition.opencv
+package com.bettergi.pocket.core.image
 
-import android.graphics.Bitmap
 import android.media.Image
-import com.bettergi.pocket.capture.Frame
-import com.bettergi.pocket.recognition.ColorBgr
-import com.bettergi.pocket.recognition.ColorConversion
-import com.bettergi.pocket.recognition.IntRect
-import com.bettergi.pocket.recognition.IntSize
-import org.opencv.android.Utils
+import com.bettergi.pocket.core.ColorBgr
+import com.bettergi.pocket.core.ColorConversion
+import com.bettergi.pocket.core.IntRect
+import com.bettergi.pocket.core.IntSize
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
@@ -40,21 +37,37 @@ object MatOps {
     }
 
     fun rgbaToBgr(width: Int, height: Int, rgba8888: ByteArray): Mat {
-        val rgba = Mat(height, width, CvType.CV_8UC4)
+        val bgr = Mat()
+        rgbaToBgrInto(width, height, rgba8888, bgr, rgbaStage = null)
+        return bgr
+    }
+
+    /**
+     * GC P0（工单 A）：写入给定 [dst] 的 rgbaToBgr 重载。
+     *
+     * 与旧 [rgbaToBgr] 的差别**只在缓冲来源**，像素输出逐位一致（同一 `COLOR_RGBA2BGR`）：
+     * - [rgbaStage] 非空时复用为 4 通道中转 Mat（OpenCV `create()` 在尺寸不变时零重分配），
+     *   消除旧路径每次调用分配又立即释放的 ~10-17MB RGBA 暂存（每秒数十次调用 ⇒ 每秒
+     *   数百 MB 的头号 GC 源）。调用方必须保证同一时刻只有一个线程使用该 stage
+     *   （ScreenCaptureController 里 poller 单线程独占，见其 KDoc）。
+     * - [rgbaStage] 为 null 时退化为临时 stage（新建-即弃），语义与旧实现逐位一致。
+     * - [dst] 由调用方提供生命周期（可为池化 Mat）；转换整块覆盖其内容，
+     *   尺寸/类型不符时 cvtColor 会按 src 形状重建 dst（与旧实现行为一致）。
+     */
+    fun rgbaToBgrInto(width: Int, height: Int, rgba8888: ByteArray, dst: Mat, rgbaStage: Mat?) {
+        val stage = rgbaStage ?: Mat(height, width, CvType.CV_8UC4)
+        val ownedStage = rgbaStage == null
         try {
-            val written = rgba.put(0, 0, rgba8888)
+            stage.create(height, width, CvType.CV_8UC4)
+            val written = stage.put(0, 0, rgba8888)
             if (written == 0) {
                 throw IllegalStateException("Failed to copy RGBA into Mat ${width}x$height")
             }
-            val bgr = Mat()
-            Imgproc.cvtColor(rgba, bgr, Imgproc.COLOR_RGBA2BGR)
-            return bgr
+            Imgproc.cvtColor(stage, dst, Imgproc.COLOR_RGBA2BGR)
         } finally {
-            rgba.release()
+            if (ownedStage) stage.release()
         }
     }
-
-    fun frameToBgr(frame: Frame): Mat = rgbaToBgr(frame.width, frame.height, frame.rgba8888)
 
     fun bgrToGray(src: Mat): Mat {
         val gray = Mat()
@@ -131,20 +144,6 @@ object MatOps {
         return Mat(src, roi.toCvRect())
     }
 
-    fun matToBitmap(mat: Mat): Bitmap {
-        val rgba = Mat()
-        when (mat.channels()) {
-            1 -> Imgproc.cvtColor(mat, rgba, Imgproc.COLOR_GRAY2RGBA)
-            3 -> Imgproc.cvtColor(mat, rgba, Imgproc.COLOR_BGR2RGBA)
-            4 -> Imgproc.cvtColor(mat, rgba, Imgproc.COLOR_BGRA2RGBA)
-            else -> throw IllegalArgumentException("Unsupported channel count: ${mat.channels()}")
-        }
-        val bitmap = Bitmap.createBitmap(mat.cols(), mat.rows(), Bitmap.Config.ARGB_8888)
-        Utils.matToBitmap(rgba, bitmap)
-        rgba.release()
-        return bitmap
-    }
-
     fun u8(mat: Mat, y: Int, x: Int): Int {
         val buf = ByteArray(1)
         mat.get(y, x, buf)
@@ -153,6 +152,19 @@ object MatOps {
 
     fun setU8(mat: Mat, y: Int, x: Int, value: Int) {
         mat.put(y, x, byteArrayOf(value.toByte()))
+    }
+
+    /**
+     * P3：整行批量读（一次 JNI 拷贝），替代逐像素 [u8] 循环 —— NMS 的 suppress 区块
+     * 逐像素 get/put 是同语义的慢速版。要求 (y, x..x+len-1) 在同一行内。
+     */
+    fun u8Row(mat: Mat, y: Int, xFrom: Int, out: ByteArray) {
+        mat.get(y, xFrom, out)
+    }
+
+    /** P3：整行批量写（一次 JNI 拷贝），与 [u8Row] 配对。 */
+    fun setU8Row(mat: Mat, y: Int, xFrom: Int, values: ByteArray) {
+        mat.put(y, xFrom, values)
     }
 }
 

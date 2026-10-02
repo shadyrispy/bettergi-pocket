@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import org.json.JSONObject
 import java.io.File
+import com.bettergi.pocket.core.FlowSource
 
 /**
  * 脚本清单（P3，2026-09-18）：**本地**脚本管理（导入 JSON + 启用开关）。
@@ -83,9 +84,20 @@ object ScriptStore {
             out.add(parseEntry(json, key, imported = true, enabled = enabled[key] ?: true))
         }
         // 同一 key 同时存在内置与导入 ⇒ 以导入为准（FlowSource 亦为 override 优先）。
+        // ★ P3（2026-09-30）：原实现是"先按 order 排序、再后写者胜"—— 导入副本 order 小于内置时，
+        //   内置排后面反而覆盖导入 ⇒ 管理器显示内置、执行却是 override（显示与执行不一致）。
+        //   改为：先按 key 合并（导入覆盖内置，与 FlowSource 语义一致），再排序（order 升序，key 作稳定平局键）。
+        return mergeEntries(out)
+    }
+
+    /** 纯函数：按 key 合并（导入覆盖内置）+ 排序（order 升序，key 稳定平局键）。无 Android 依赖，单测可覆盖。 */
+    fun mergeEntries(out: List<Entry>): List<Entry> {
         val merged = LinkedHashMap<String, Entry>()
-        out.sortedWith(compareBy<Entry> { it.order }.thenBy { it.key }).forEach { merged[it.key] = it }
-        return merged.values.toList()
+        out.forEach { e ->
+            val prev = merged[e.key]
+            if (prev == null || (e.imported && !prev.imported)) merged[e.key] = e
+        }
+        return merged.values.sortedWith(compareBy<Entry> { it.order }.thenBy { it.key })
     }
 
     fun setEnabled(context: Context, key: String, enabled: Boolean) {

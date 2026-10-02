@@ -1,17 +1,16 @@
 package com.bettergi.pocket.pcdata
 
-import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
-import com.bettergi.pocket.service.TriggerForegroundService
+import com.bettergi.pocket.capture.CaptureContract
 import com.esc.irminsul.capture.IrminsulCapture
 
 /**
  * VPN 授权中转页（透明、无内容、拿完结果就走）—— 与 `CapturePermissionActivity`（投影）**同一形态**：
- * 本页不做任何业务决定，只把「同意 / 拒绝」回报给 [TriggerForegroundService]，
+ * 本页不做任何业务决定，只把「同意 / 拒绝」经 `capture/CaptureContract` 回报给主进程前台服务，
  * 由主进程决定起不起隧道、要不要提醒、开关落不落回。
  *
  * 为什么必须有这个 Activity：`VpnService.prepare()` 给的是一张**系统弹窗**的 Intent，
@@ -39,11 +38,11 @@ class CaptureConsentActivity : ComponentActivity() {
     }
 
     private fun report(ok: Boolean) {
+        // 工单 D：回传走 capture/CaptureContract 契约（不再 import service；action/extras 值逐字不变）
         ContextCompat.startForegroundService(
             applicationContext,
-            Intent(applicationContext, TriggerForegroundService::class.java)
-                .setAction(TriggerForegroundService.ACTION_VPN_RESULT)
-                .putExtra(TriggerForegroundService.EXTRA_VPN_OK, ok),
+            CaptureContract.resultIntent(applicationContext, CaptureContract.ACTION_VPN_RESULT)
+                .putExtra(CaptureContract.EXTRA_VPN_OK, ok),
         )
         finish()
     }

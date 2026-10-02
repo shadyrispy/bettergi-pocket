@@ -6,9 +6,9 @@ import org.junit.Test
 import java.io.File
 
 /**
- * flow do 原语覆盖守门：遍历 5 个 flow JSON 所有 "do" 字段，
+ * flow do 原语覆盖守门：遍历 **7 个** flow JSON 所有 "do" 字段，
  * 断言 ⊆ ScanEngine 已实现集合——防止 flow 引用未实现原语被静默 skip（unknown step 只 log warn）。
- * 新增原语时同步更新 IMPLEMENTED_DOES。
+ * 新增原语时同步更新 topLevelDoes/visitDoes。
  */
 class DoCoverageTest {
 

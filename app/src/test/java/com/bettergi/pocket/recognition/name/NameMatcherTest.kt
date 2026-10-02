@@ -104,6 +104,64 @@ class NameMatcherTest {
         )
     }
 
+    // ---------- A22：三层兜底的确定性 tie-break（数据序无关）----------
+
+    /** 与 [linkedMapOf] 相同的条目、反转后的插入序（模拟词典数据序颠倒）。 */
+    private fun <K, V> Map<K, V>.reversedOrder(): Map<K, V> {
+        val out = LinkedHashMap<K, V>()
+        for ((k, v) in entries.reversed()) out[k] = v
+        return out
+    }
+
+    @Test
+    fun `A22 tier4 反向子串取最长键且与数据序无关`() {
+        // 西风系列：碎片 OCR 截断成 "西风" 时，剑/枪/秘典三个键都包含它。
+        // 旧实现首键胜出 ⇒ 结果依赖词典构造序；KDoc 铁律是"取最长且迭代顺序无关"。
+        val forward = linkedMapOf(
+            "西风剑" to "FavoniusSword",
+            "西风枪" to "FavoniusLance",
+            "西风秘典" to "FavoniusCodex",
+        )
+        val reversed = forward.reversedOrder()
+        val hitForward = NameMatcher.match("西风", forward)
+        val hitReversed = NameMatcher.match("西风", reversed)
+        assertEquals("FavoniusCodex", hitForward?.key)
+        assertEquals("西风秘典", hitForward?.name)
+        assertEquals(NameMatcher.Tier.SUBSTRING_REVERSE, hitForward?.tier)
+        assertEquals("数据序反转后结果必须一致", hitForward, hitReversed)
+    }
+
+    @Test
+    fun `A22 tier5 编辑距离全并列且视觉分全0时宁miss不误配`() {
+        // "西风贝" 距 西风剑/西风枪 均为 1：视觉分 0、公共前缀 2、长度差 0 全并列
+        // ⇒ 判据耗尽不命中（characters 91.2% 教训：歧义层宁可 miss）。旧实现取首键（依赖数据序）。
+        val forward = linkedMapOf("西风剑" to "FavoniusSword", "西风枪" to "FavoniusLance")
+        val reversed = forward.reversedOrder()
+        assertNull(NameMatcher.match("西风贝", forward))
+        assertNull(NameMatcher.match("西风贝", reversed))
+        // 判据可分层时仍命中：唯一候选不经过并列链
+        assertEquals("FavoniusSword", NameMatcher.match("西风剑镡", forward)?.key)
+        // 视觉分打破并列的旧能力不回退（"里云" 用例见上）
+        assertEquals("Chongyun", NameMatcher.match("里云", chongyun)?.key)
+    }
+
+    @Test
+    fun `A22 tier7 Dice 打平不命中且与数据序无关`() {
+        // "剑刃风"/"风刃剑" 字集合相同 ⇒ 对任意 cleaned Dice 恒相等；
+        // 编辑距离 2 超阈值、LCS 2 < 3 ⇒ 恰好落进 Dice 层。旧实现取首键（依赖数据序），
+        // 新实现唯一性校验拦截（对齐 LCS 层先例）。
+        val forward = linkedMapOf("剑刃风" to "A", "风刃剑" to "B")
+        val reversed = forward.reversedOrder()
+        assertNull(NameMatcher.match("刃风歌", forward))
+        assertNull(NameMatcher.match("刃风歌", reversed))
+        // 唯一最大 + 超阈值仍命中（Dice 层是被单测守护的有效能力，不得误伤）：
+        // "刃风歌" vs "剑刃风"：编辑距离 2 超阈值、LCS 2<3，Dice=2*2/5=0.8 ≥0.55 → DICE 命中
+        val solo = linkedMapOf("剑刃风" to "SoloHit")
+        val soloHit = NameMatcher.match("刃风歌", solo)
+        assertEquals("SoloHit", soloHit?.key)
+        assertEquals(NameMatcher.Tier.DICE, soloHit?.tier)
+    }
+
     // ---------- 真实词典用例（模拟器实测错字对）----------
     private fun names(): GoodNames = GoodNames.fromJson(dictJson())
 

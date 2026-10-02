@@ -1,6 +1,6 @@
 package com.bettergi.pocket.recognition.ocr.onnx
 
-import com.bettergi.pocket.recognition.IntRect
+import com.bettergi.pocket.core.IntRect
 import nu.pattern.OpenCV
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -287,6 +287,93 @@ class OnnxOcrBenchmarkTest {
         }
     }
 
+    // ================= Stage 4-4：det 预处理短命分配复用 =================
+
+    /**
+     * 正确性闸门：复用路径（服务实例级缓冲池）与逐次分配对照路径的 det 预处理输出**逐位一致**。
+     *
+     * - 多帧、不同宽高比/尺寸：覆盖 canvas pad 条带重清、resized/floatMat/planes/out/tmp
+     *   在形状变化下的复用。
+     * - 每帧跑两轮：第二轮时工作区残留上一帧内容，必须与全新分配等价（残留擦除验证）。
+     * - probMap：同输入喂真实 tiny det 模型，两次推理输出必须逐位一致
+     *   （预处理逐位一致 ⇒ 推理确定性 ⇒ 概率图一致）。
+     */
+    @Test
+    fun `Stage4-4 det 预处理复用与逐次分配逐位一致`() {
+        val service = buildService()
+        val frames = listOf(
+            renderText("Lv.90 1026/2400", size = 56), // 宽幅（左右 pad）
+            renderText("攻\n击\n力", size = 120, cjk = true), // 窄高（上下 pad）
+            renderText("7.8%", size = 300), // 极宽（强烈非等比 pad）
+        )
+        val engine = run {
+            val dir = onnxAssets()
+            OnnxOcrEngine(File(dir, "det.onnx"), File(dir, "rec.onnx"))
+        }
+        try {
+            check(engine.initialize(EpTierPicker.Tier.CPU)) { "det 引擎初始化失败" }
+            // 预热一轮（含工作区首次 grow + ORT 惰性分配），之后两轮逐位比对
+            for (round in 1..2) {
+                frames.forEachIndexed { i, f ->
+                    val oldR = service.detPreprocessOnceForTest(f)
+                    val newR = service.detPreprocessReuseForTest(f)
+                    assertTrue("帧 $i 预处理返回 null", oldR != null && newR != null)
+                    val (oldArr, oldGeo) = oldR!!
+                    val (newArr, newGeo) = newR!!
+                    assertTrue(
+                        "round=$round 帧 $i（${f.cols()}x${f.rows()}）NCHW 非逐位一致",
+                        oldArr.contentEquals(newArr),
+                    )
+                    assertEquals("round=$round 帧 $i 几何不一致 round=$round", oldGeo, newGeo)
+                    // 真实推理：同输入 ⇒ probMap 逐位一致
+                    val oldProb = engine.runDet(java.nio.FloatBuffer.wrap(oldArr))
+                    val newProb = engine.runDet(java.nio.FloatBuffer.wrap(newArr))
+                    assertEquals("round=$round 帧 $i probMap 长度不一致", oldProb.size, newProb.size)
+                    assertTrue("round=$round 帧 $i probMap 非逐位一致", oldProb.contentEquals(newProb))
+                }
+            }
+        } finally {
+            frames.forEach { it.release() }
+            engine.close()
+        }
+    }
+
+    /**
+     * 性能自证：det 预处理耗时，逐次分配（对照）vs 复用（生产路径），大帧多轮取中位。
+     * 只报告数据不设阈值——收益主要在省掉每帧 ~17MB 的分配/GC 与画布清零，JVM 桌面
+     * OpenCV 上分配开销比例与真机不同，数字作方向参考。
+     */
+    @Test
+    fun `Stage4-4 det 预处理复用前后耗时对比`() {
+        val service = buildService()
+        // 1920×1080 随机噪声帧（尺寸与采集链全帧同级；噪声防止 pad/内容被特判）
+        val frame = Mat(1080, 1920, CvType.CV_8UC3)
+        val noise = ByteArray(1080 * 1920 * 3) { (it * 31 and 0xFF).toByte() }
+        frame.put(0, 0, noise)
+        try {
+            fun benchOnce(reuse: Boolean, runs: Int): Long {
+                val xs = LongArray(runs) {
+                    val t0 = System.nanoTime()
+                    if (reuse) service.detPreprocessReuseForTest(frame) else service.detPreprocessOnceForTest(frame)
+                    (System.nanoTime() - t0) / 1_000
+                }
+                return xs.sorted()[runs / 2] // 预热含在 xs[0]，取中位天然抗首帧
+            }
+            benchOnce(reuse = false, runs = 3) // 预热
+            benchOnce(reuse = true, runs = 3)
+            val runs = 50
+            val oldUs = benchOnce(reuse = false, runs = runs)
+            val newUs = benchOnce(reuse = true, runs = runs)
+            println(
+                "\n=== Stage 4-4 det 预处理耗时（1920x1080, n=$runs, 中位）===\n" +
+                    "逐次分配 ${oldUs / 1000.0}ms vs 复用 ${newUs / 1000.0}ms（省 %.1f%%）"
+                        .format((oldUs - newUs) * 100.0 / oldUs),
+            )
+        } finally {
+            frame.release()
+        }
+    }
+
     // ================= 契约（防回归）=================
 
     @Test
@@ -466,5 +553,128 @@ class OnnxOcrBenchmarkTest {
         val res = CtcDecoder.decode(logits, 5, c, dict)
         assertEquals("AB", res.text)
         assertTrue("置信度应在 0..1：${res.confidence}", res.confidence in 0f..1f)
+    }
+
+    // ================= A20 / P3 =================
+
+    /**
+     * A20：预热剔除必须丢**首帧**（先 drop(1) 再排序），而不是排序后丢最快样本。
+     * 用"首帧即最慢"的时序区分两种实现：旧写法丢 10 得中位 12，正确写法丢 999 得中位 11。
+     */
+    @Test
+    fun `A20 基准中位丢的是首帧预热而不是最快样本`() {
+        // 首帧 999（编译/分配），稳态 10/11/12
+        val samples = longArrayOf(999, 10, 11, 12)
+        // 丢首帧后 [10,11,12] → 中位 11；旧写法 sorted().drop(1) → [11,12,999] → 中位 12
+        assertEquals(11L, OnnxOcrEngine.medianAfterDroppingWarmup(samples))
+        // 常规时序（首帧最慢、尾部还有一个离群慢值）：丢首帧后取中位，不受尾部离群影响
+        assertEquals(12L, OnnxOcrEngine.medianAfterDroppingWarmup(longArrayOf(1000, 10, 12, 11, 13, 12)))
+        // runs=0（空样本）→ 与"基准失败"同口径
+        assertEquals(Long.MAX_VALUE, OnnxOcrEngine.medianAfterDroppingWarmup(longArrayOf()))
+    }
+
+    /** P3：manifest `recOutputType` 声明驱动置信度来源，三条路径均可单测。 */
+    @Test
+    fun `P3 recOutputType 声明驱动置信度计算`() {
+        val dict = listOf("A")
+        val c = 2
+        // 单时间步，argmax=A，maxv=0.9（落在 0..1，旧启发式会直接当概率）
+        val logits = floatArrayOf(0.1f, 0.9f)
+        // 缺省 auto：保持旧行为（0..1 → 直取）
+        assertEquals(0.9f, CtcDecoder.decode(logits, 1, c, dict).confidence, 1e-6f)
+        assertEquals(0.9f, CtcDecoder.decode(logits, 1, c, dict, declaredOutput = "auto").confidence, 1e-6f)
+        // 声明 softmax：导出已含 softmax，直接当概率
+        assertEquals(0.9f, CtcDecoder.decode(logits, 1, c, dict, declaredOutput = "softmax").confidence, 1e-6f)
+        // 声明 logits：必做真 softmax（0.9/(0.1+0.9)=0.9 这里恰为 0.9；
+        // 用非平凡值验证：maxv=3 → exp(0)/(exp(-2.9)+exp(0)) ≈ 0.9476，而旧启发式会误取 3 → 截断语义不同）
+        val raw = floatArrayOf(0.1f, 3f)
+        val decoded = CtcDecoder.decode(raw, 1, c, dict, declaredOutput = "logits").confidence
+        assertEquals((1.0 / (Math.exp(-2.9) + 1.0)).toFloat(), decoded, 1e-4f)
+        assertTrue("logits 声明下置信度必须 <1：$decoded", decoded < 1f)
+    }
+
+    // ================= GC P0（工单 B）：ORT 输出免物化 =================
+
+    /**
+     * 正确性闸门：FloatArray（物化）路径与 FloatBuffer（直通）路径的解码结果**逐位一致**。
+     *
+     * 三层覆盖：
+     * 1. CtcDecoder / DbPostProcessor 纯函数层：同一 float[] wrap 成两种入参，文本/置信度、
+     *    RowBox 逐位一致（确定性伪随机数据，含 NaN 无、越界无的正常域）。
+     * 2. 真实 rec 推理：同输入两次 run，一次物化后解码、一次 runRecInto 内直通解码，
+     *    Result 完全相等（同一模型同一输入 ⇒ 推理确定 ⇒ 差异只可能来自解码路径）。
+     * 3. 真实 det 推理：runDet 物化概率图后 toTextBoxes(FloatArray)，与 runDetInto 内
+     *    toTextBoxes(FloatBuffer) 的框列表逐项一致。
+     */
+    @Test
+    fun `工单B FloatArray 与 FloatBuffer 解码路径逐位一致`() {
+        val dict = listOf("A", "B", "力", "7")
+        val c = dict.size + 1
+        val t = 6
+        val rng = java.util.Random(20261001)
+        val logits = FloatArray(t * c) { rng.nextFloat() * 4f - 2f }
+
+        // 1) 纯函数层
+        val fromArr = CtcDecoder.decode(logits, t, c, dict, declaredOutput = "logits")
+        val fromBuf = CtcDecoder.decode(java.nio.FloatBuffer.wrap(logits), t, c, dict, declaredOutput = "logits")
+        assertEquals(fromArr.text, fromBuf.text)
+        assertEquals("置信度应逐位一致", fromArr.confidence, fromBuf.confidence, 0f)
+
+        // DbPostProcessor：64×48 伪随机概率图（0..1，含大片低于阈值与若干条状高值）
+        val w = 64
+        val h = 48
+        val prob = FloatArray(w * h) { i ->
+            val y = i / w
+            // 两段"文本行"（y∈[8,16) 与 [30,34)）概率偏高，其余压低
+            if ((y in 8..15) && rng.nextFloat() < 0.4f) 0.5f + rng.nextFloat() * 0.5f
+            else if ((y in 30..33) && rng.nextFloat() < 0.4f) 0.5f + rng.nextFloat() * 0.5f
+            else rng.nextFloat() * 0.2f
+        }
+        val boxesArr = DbPostProcessor.toTextBoxes(prob, w, h)
+        val boxesBuf = DbPostProcessor.toTextBoxes(java.nio.FloatBuffer.wrap(prob), w, h)
+        assertEquals("RowBox 应逐项一致", boxesArr, boxesBuf)
+
+        // 2)+3) 真实推理（与 det 复用闸门同一套引擎装配）
+        val dir = onnxAssets()
+        val engine = OnnxOcrEngine(File(dir, "det.onnx"), File(dir, "rec.onnx"))
+        try {
+            check(engine.initialize(EpTierPicker.Tier.CPU)) { "引擎初始化失败" }
+
+            // rec：零张量输入（纯执行开销口径，与 recProbe 相同）输出确定
+            val recW = 320
+            val recIn = FloatArray(3 * OnnxOcrEngine.REC_H * recW)
+            val recMat = engine.runRec(java.nio.FloatBuffer.wrap(recIn), recW)
+            val steps = recMat.size / OnnxPaddleOcrService.MODEL_CLASS_COUNT
+            val decArr = if (steps > 0) {
+                CtcDecoder.decode(recMat, steps, OnnxPaddleOcrService.MODEL_CLASS_COUNT, dict, declaredOutput = "logits")
+            } else null
+            val decBuf = engine.runRecInto(java.nio.FloatBuffer.wrap(recIn), recW) { buf, n ->
+                val s = n / OnnxPaddleOcrService.MODEL_CLASS_COUNT
+                if (s <= 0) null
+                else CtcDecoder.decode(buf, s, OnnxPaddleOcrService.MODEL_CLASS_COUNT, dict, declaredOutput = "logits")
+            }
+            assertEquals("rec 路径成败应一致", decArr == null, decBuf == null)
+            if (decArr != null && decBuf != null) {
+                assertEquals("rec 文本应逐位一致", decArr.text, decBuf.text)
+                assertEquals("rec 置信度应逐位一致", decArr.confidence, decBuf.confidence, 0f)
+            }
+
+            // det：物化概率图 vs 直通框列表
+            val detIn = FloatArray(OnnxOcrEngine.DET_SIZE * OnnxOcrEngine.DET_SIZE * 3)
+            val probMat = engine.runDet(java.nio.FloatBuffer.wrap(detIn))
+            val boxesArrReal = if (probMat.size >= OnnxOcrEngine.DET_SIZE * OnnxOcrEngine.DET_SIZE) {
+                DbPostProcessor.toTextBoxes(probMat, OnnxOcrEngine.DET_SIZE, OnnxOcrEngine.DET_SIZE)
+            } else null
+            val boxesBufReal = engine.runDetInto(java.nio.FloatBuffer.wrap(detIn)) { buf, n ->
+                if (n < OnnxOcrEngine.DET_SIZE * OnnxOcrEngine.DET_SIZE) null
+                else DbPostProcessor.toTextBoxes(buf, OnnxOcrEngine.DET_SIZE, OnnxOcrEngine.DET_SIZE)
+            }
+            assertEquals("det 路径成败应一致", boxesArrReal == null, boxesBufReal == null)
+            if (boxesArrReal != null && boxesBufReal != null) {
+                assertEquals("det RowBox 应逐项一致", boxesArrReal, boxesBufReal)
+            }
+        } finally {
+            engine.close()
+        }
     }
 }

@@ -1,7 +1,7 @@
 package com.bettergi.pocket.recognition.ocr.onnx
 
 import android.util.Log
-import com.bettergi.pocket.recognition.IntRect
+import com.bettergi.pocket.core.IntRect
 import com.bettergi.pocket.recognition.ocr.IOcrService
 import com.bettergi.pocket.recognition.ocr.OcrResult
 import com.bettergi.pocket.recognition.ocr.OcrResultRegion
@@ -9,6 +9,7 @@ import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.Rect
+import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
 import java.nio.FloatBuffer
@@ -30,21 +31,30 @@ import kotlin.math.roundToInt
 class OnnxPaddleOcrService(
     private val engine: OnnxOcrEngine,
     private val dict: List<String>,
+    /** rec 输出类型声明（P3，来自 manifest 可选键 `recOutputType`，缺省 auto = 旧口径）。 */
+    private val recOutputType: String = OnnxModelAssets.OUTPUT_AUTO,
 ) : IOcrService {
 
     init {
         // 防呆：irminsul 20260827 踩过的坑——rec.onnx 是 PP-OCRv6 模型却误绑 ppocr_keys_v1.txt
         // （v1 字符序），症状是**汉字全部解码错乱但 ASCII/数字看起来正常**，极易漏检。
+        // A24：由 Log.w 升级为**硬失败**——字典错绑的引擎等于全量乱码，宁可 OCR 不可用
+        // （init 抛出 → OcrFactory.createOnnx 失败 → prepare 通路返回 false）也不能静默错下去。
         if (dict.size != EXPECTED_DICT_SIZE) {
-            Log.w(
-                TAG,
+            throw IllegalStateException(
                 "字典条目数 ${dict.size}，预期 $EXPECTED_DICT_SIZE。" +
                     "若模型不是 PP-OCRv6-tiny，需同时核对 MODEL_CLASS_COUNT 与字典文件。",
             )
         }
     }
 
-    /** 已准备（会话就绪）则可识别；否则所有方法返回空，调用方应降级到 ML Kit。 */
+    /**
+     * 引擎会话是否就绪（降档/重建窗口、首启预热未完成时为 false）。
+     * ★ 2026-09-30（A7）：旧注释「否则所有方法返回空，调用方应降级到 ML Kit」已废弃 ——
+     * ML Kit 兜底从未实现、方案裁决**不做**静默兜底。scan 层网关（OcrGatewayImpl）在调用前
+     * 查询本字段，未就绪时抛 OcrUnavailableException 与「图上没字」区分。
+     * 下方 recognize* 在未就绪时仍返回空结果，只是探针/直接调用者的最后一道防御。
+     */
     val ready: Boolean get() = engine.ready
 
     override val hasFastRecOnlyBatch: Boolean = true
@@ -94,8 +104,24 @@ class OnnxPaddleOcrService(
                         table.entries.joinToString { "${it.key}=${it.value}ms" } + "）",
                 )
             } else {
-                Log.w(TAG, "intra=$best 重开会话失败，沿用 $incumbent")
-                engine.initialize(engine.tier, incumbent)
+                // ★ 2026-09-30（A19，optimization-plan-20260930 轨 E）：兜底初始化的返回值此前
+                //   **未检查** —— best 与 incumbent 两次建会话都失败（典型：低内存 OOM）时
+                //   ready=false 却照样返回 true、日志打 "ready=true"，调用方（OcrFactory.createOnnx）
+                //   以为引擎可用。现显式接住：沿用也失败 ⇒ prepare 返回 false（createOnnx 已有
+                //   失败路径：engine.close() + 返回 null）。
+                //   A6 build-then-swap 之后：initialize(best) 失败时 incumbent 会话**未受影响**
+                //   （ready 仍为 true），此时无需真的重开 —— 仅当 incumbent 已不在（防御：
+                //   首启从未成功过 / 已被 close）才走兜底重建，且必须检查其返回值。
+                if (engine.ready) {
+                    Log.w(TAG, "intra=$best 重开会话失败，沿用 $incumbent（原会话未受影响）")
+                } else {
+                    val restored = engine.initialize(engine.tier, incumbent)
+                    if (!restored) {
+                        Log.e(TAG, "intra=$best 重开失败，沿用 $incumbent 亦失败 ⇒ OCR 不可用")
+                        return false
+                    }
+                    Log.w(TAG, "intra=$best 重开失败，已重建 $incumbent 会话")
+                }
             }
         } else if (table.isNotEmpty()) {
             Log.i(
@@ -116,29 +142,42 @@ class OnnxPaddleOcrService(
 
     override fun recognize(mat: Mat): OcrResult {
         if (!engine.ready || mat.empty()) return OcrResult.EMPTY
-        val prepared = preprocessDet(mat) ?: return OcrResult.EMPTY
-        val (input, geo) = prepared
-        val probMap = engine.runDet(input)
-        if (probMap.size < DET_SIZE * DET_SIZE) return OcrResult.EMPTY
-        val boxes = DbPostProcessor.toTextBoxes(probMap, DET_SIZE, DET_SIZE)
-        val regions = ArrayList<OcrResultRegion>(boxes.size)
-        for (box in boxes) {
-            val rect = DbPostProcessor.toRect(box, geo, mat.cols(), mat.rows())
-            if (rect.isEmpty()) continue
-            val line = recognizeLine(mat, rect) ?: continue
-            if (line.text.isBlank()) continue
-            regions += OcrResultRegion(rect, line.text, line.score)
+        val ws = acquireWorkspace()
+        try {
+            val prepared = preprocessDet(ws, mat) ?: return OcrResult.EMPTY
+            val (input, geo) = prepared
+            // GC P0（工单 B）：det 概率图（~1.6MB）免物化——DbPostProcessor 直接顺序读
+            // ORT 输出 FloatBuffer（在张量 close 前消费），argmax/阈值遍历与 FloatArray
+            // 路径逐位一致。null = 推理失败或输出长度不足（与旧判据同口径）。
+            val boxes = engine.runDetInto(input) { buf, n ->
+                if (n < DET_SIZE * DET_SIZE) null else DbPostProcessor.toTextBoxes(buf, DET_SIZE, DET_SIZE)
+            } ?: return OcrResult.EMPTY
+            val regions = ArrayList<OcrResultRegion>(boxes.size)
+            for (box in boxes) {
+                val rect = DbPostProcessor.toRect(box, geo, mat.cols(), mat.rows())
+                if (rect.isEmpty()) continue
+                val line = recognizeLine(ws, mat, rect) ?: continue
+                if (line.text.isBlank()) continue
+                regions += OcrResultRegion(rect, line.text, line.score)
+            }
+            return OcrResult(regions.sortedWith(compareBy({ it.rect.centerY }, { it.rect.centerX })))
+        } finally {
+            releaseWorkspace(ws)
         }
-        return OcrResult(regions.sortedWith(compareBy({ it.rect.centerY }, { it.rect.centerX })))
     }
 
     /** rec-only：整块 Mat 当作一行直接识别（跳过 det）。稳态扫描的槽位识别走这条。 */
     override fun recognizeWithoutDetector(mat: Mat): OcrResult {
         if (!engine.ready || mat.empty()) return OcrResult.EMPTY
-        val rect = IntRect(0, 0, mat.cols(), mat.rows())
-        val line = recognizeLine(mat, rect) ?: return OcrResult.EMPTY
-        if (line.text.isBlank()) return OcrResult.EMPTY
-        return OcrResult(listOf(OcrResultRegion(rect, line.text, line.score)))
+        val ws = acquireWorkspace()
+        try {
+            val rect = IntRect(0, 0, mat.cols(), mat.rows())
+            val line = recognizeLine(ws, mat, rect) ?: return OcrResult.EMPTY
+            if (line.text.isBlank()) return OcrResult.EMPTY
+            return OcrResult(listOf(OcrResultRegion(rect, line.text, line.score)))
+        } finally {
+            releaseWorkspace(ws)
+        }
     }
 
     /**
@@ -159,11 +198,16 @@ class OnnxPaddleOcrService(
         //   精度结论：批量与逐槽**逐字段完全等价**（武器 36 件 vs 改动前 golden、圣遗物 20 件
         //   批量 vs 逐槽，均 100% 一致）⇒ 纯性能取舍，故回退。
         //   （若再试：仅当各槽 scaledW 彼此接近时才可能有收益，必须单独实测，勿凭直觉重上。）
-        return rois.map { roi ->
-            if (roi.isEmpty()) return@map OcrResultRegion(roi, "", 0f)
-            val line = recognizeLine(mat, roi)
-            if (line == null || line.text.isBlank()) OcrResultRegion(roi, "", 0f)
-            else OcrResultRegion(roi, line.text, line.score)
+        val ws = acquireWorkspace()
+        try {
+            return rois.map { roi ->
+                if (roi.isEmpty()) return@map OcrResultRegion(roi, "", 0f)
+                val line = recognizeLine(ws, mat, roi)
+                if (line == null || line.text.isBlank()) OcrResultRegion(roi, "", 0f)
+                else OcrResultRegion(roi, line.text, line.score)
+            }
+        } finally {
+            releaseWorkspace(ws)
         }
     }
 
@@ -230,15 +274,19 @@ class OnnxPaddleOcrService(
         return times.sorted()[times.size / 2]
     }
 
-    /** 单行：rec 预处理 → 推理 → CTC 解码。返回 null 表示推理失败（调用方跳过该行）。 */
-    private fun recognizeLine(src: Mat, rect: IntRect): Line? {
-        val prepared = preprocessRec(src, rect) ?: return null
+    /** 单行：rec 预处理 → 推理 → CTC 解码。返回 null 表示推理失败（调用方跳过该行）。
+     *  ws：调用方持有的预处理工作区（Stage 4-4），输入缓冲在本次 runRec 返回前一直有效。
+     *  GC P0（工单 B）：logits（9 槽一轮 ≈10MB）免物化——CtcDecoder 直接顺序读 ORT 输出
+     *  FloatBuffer（在张量 close 前消费完）；解码结果 Result 是不可变值对象，块外使用安全。
+     *  判据与旧实现同口径：空输出/步数为 0 ⇒ null。 */
+    private fun recognizeLine(ws: PreprocWorkspace, src: Mat, rect: IntRect): Line? {
+        val prepared = preprocessRec(ws, src, rect) ?: return null
         val (input, width) = prepared
-        val logits = engine.runRec(input, width)
-        if (logits.isEmpty()) return null
-        val steps = logits.size / MODEL_CLASS_COUNT
-        if (steps <= 0) return null
-        val decoded = CtcDecoder.decode(logits, steps, MODEL_CLASS_COUNT, dict)
+        val decoded = engine.runRecInto(input, width) { buf, n ->
+            val steps = n / MODEL_CLASS_COUNT
+            if (n == 0 || steps <= 0) null
+            else CtcDecoder.decode(buf, steps, MODEL_CLASS_COUNT, dict, declaredOutput = recOutputType)
+        } ?: return null
         return Line(rect, decoded.text, decoded.confidence)
     }
 
@@ -246,13 +294,76 @@ class OnnxPaddleOcrService(
 
     // ---- 预处理（Mat 直通，归一化与缩放全在 OpenCV 原生侧完成）----
 
+    // ================= Stage 4-4：短命分配复用 =================
+
     /**
-     * det 预处理：等比缩放 + 黑边 pad 到 640×640（左上锚定，pad 在右/下）。
+     * 预处理工作区：det/rec 共用的画布与 NCHW 中转缓冲，逐帧复用。
+     *
+     * 单个工作区约 **17.5MB 常驻**（native：canvas 1.2 + floatMat 4.7 + planes 3×1.6 + resized ≤1.2；
+     * Java 堆：out 4.7 + tmp 1.6MB），对应旧路径**每次全帧 det 的一次性分配**（见 [preprocessDetReference]）。
+     *
+     * 生命周期契约：acquire → 一次 det 预处理+runDet（或 N 次 rec 预处理+runRec）→ release。
+     * 输入 FloatBuffer 包装的是 [out]，必须在推理返回前不被下一个预处理覆盖 ——
+     * 推理是同步的且在持有工作区期间执行，单线程内天然满足。
+     */
+    private class PreprocWorkspace {
+        /** det 画布：构造时 Mat.zeros 一次，之后逐帧只清 pad 条带（见 preprocessDet） */
+        val detCanvas: Mat = Mat.zeros(DET_SIZE, DET_SIZE, CvType.CV_8UC3)
+        /** resize 目标（det/rec 共用；同一工作区单线程内顺序使用） */
+        val resized: Mat = Mat()
+        /** convertTo 的 32FC3 中转 */
+        val floatMat: Mat = Mat()
+        /** split 输出的 3 个通道平面（原生序 B,G,R） */
+        val planes: ArrayList<Mat> = arrayListOf(Mat(), Mat(), Mat())
+        /** 通道平面→Java 的中转（grow-only，永不收缩） */
+        var tmp: FloatArray = FloatArray(0)
+        /** NCHW 输出（grow-only；det 恒 3×640×640，rec 随宽度变化取最大） */
+        var out: FloatArray = FloatArray(0)
+
+        fun release() {
+            detCanvas.release()
+            resized.release()
+            floatMat.release()
+            planes.forEach { it.release() }
+        }
+    }
+
+    /**
+     * 工作区池的**并发依据**：runDet/runRec 在引擎里只持 `sessionLock.read`（见
+     * OnnxOcrEngine）——读写锁允许多线程同时推理，OR T session 本身并发安全。生产调用面上
+     * 并发**确实可能**：OcrFactory.default 是单例服务，ScriptRunner.ocrDetProbe（调试探针，
+     * 任意界面可触发）与扫描主协程（Dispatchers.Default，startScan 快速重启窗口里新旧 job 并存）
+     * 都可能同时调 recognize/recognizeRois。因此**不能**用裸实例字段当缓冲（会把线程 A 的输入
+     * 覆盖线程 B 的推理），也不能 ThreadLocal（Dispatchers.Default 每个 worker 都会物化一份
+     * 17.5MB，且 Mat 持 native 内存无法随线程池回收）。
+     *
+     * 取舍：**小型独占池**（上限 [WS_POOL_MAX]）。常态单线程零争用（acquire 一次、release 归还）；
+     * 并发时各取独占工作区互不干扰；池耗尽的极端调用走「新建-即弃」，语义等同旧逐次分配路径，
+     * 只慢不错。上限 2 覆盖已知并发面（扫描 + 探针），常驻上限约 2×17.5MB。
+     */
+    private val wsPool = ArrayDeque<PreprocWorkspace>()
+    private val wsLock = Any()
+
+    private fun acquireWorkspace(): PreprocWorkspace =
+        synchronized(wsLock) { wsPool.removeFirstOrNull() ?: PreprocWorkspace() }
+
+    private fun releaseWorkspace(ws: PreprocWorkspace) = synchronized(wsLock) {
+        if (wsPool.size < WS_POOL_MAX) wsPool.addLast(ws) else ws.release()
+    }
+
+    /**
+     * det 预处理（复用版）：等比缩放 + 黑边 pad 到 640×640（左上锚定，pad 在右/下）。
+     * 逻辑与 [preprocessDetReference]（逐次分配对照版）逐位等价；差别只在缓冲来源：
+     * - 画布不再逐帧 `Mat.zeros`：构造时清零一次，之后逐帧只清 **pad 条带**（右条 x∈[sw,640)
+     *   全高 + 下条 y∈[sh,640) x∈[0,sw)，两条并集恰为内容区 (0,0,sw,sh) 的补集）——
+     *   上一帧内容只可能落在其内容区 (0,0,sw_prev,sh_prev) ⊂ 本帧 pad 区（或本帧内容区，
+     *   会被 resize+copyTo 整块覆盖），故逐帧重清两条即与全新零画布逐位一致。
+     * - resized/floatMat/planes/out/tmp 全部复用（OpenCV 的 create() 在尺寸不变时零重分配）。
      *
      * 为什么不直接拉伸到 640×640：irminsul B1 教训——拉伸会让宽屏截图里的文字压扁，
      * 汉字识别直接错乱。pad 区域归一化后为 -1（最黑）→ 低概率，不会产框。
      */
-    private fun preprocessDet(src: Mat): Pair<FloatBuffer, DbPostProcessor.DetGeometry>? {
+    private fun preprocessDet(ws: PreprocWorkspace, src: Mat): Pair<FloatBuffer, DbPostProcessor.DetGeometry>? {
         val w = src.cols()
         val h = src.rows()
         if (w <= 0 || h <= 0) return null
@@ -260,32 +371,40 @@ class OnnxPaddleOcrService(
         val sw = (w * scale).roundToInt().coerceIn(1, DET_SIZE)
         val sh = (h * scale).roundToInt().coerceIn(1, DET_SIZE)
         val bgr = ensureBgr(src) ?: return null
-        val canvas = Mat.zeros(DET_SIZE, DET_SIZE, CvType.CV_8UC3)
-        val resized = Mat()
         val ownedBgr = bgr !== src
         try {
-            Imgproc.resize(bgr, resized, Size(sw.toDouble(), sh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
-            val roi = Mat(canvas, Rect(0, 0, sw, sh))
+            // 清 pad 条带（与逐帧 Mat.zeros 等价，理由见上 KDoc）
+            if (sw < DET_SIZE) {
+                val right = Mat(ws.detCanvas, Rect(sw, 0, DET_SIZE - sw, DET_SIZE))
+                try { right.setTo(ZERO_SCALAR) } finally { right.release() }
+            }
+            if (sh < DET_SIZE) {
+                val bottom = Mat(ws.detCanvas, Rect(0, sh, sw, DET_SIZE - sh))
+                try { bottom.setTo(ZERO_SCALAR) } finally { bottom.release() }
+            }
+            Imgproc.resize(bgr, ws.resized, Size(sw.toDouble(), sh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            val roi = Mat(ws.detCanvas, Rect(0, 0, sw, sh))
             try {
-                resized.copyTo(roi)
+                ws.resized.copyTo(roi)
             } finally {
                 roi.release()
             }
-            val nchw = toNchw(canvas)
-            return FloatBuffer.wrap(nchw) to DbPostProcessor.DetGeometry(sw.toFloat() / w, sh.toFloat() / h)
+            val nchw = toNchw(ws, ws.detCanvas)
+            // 显式限定长度：out 可能被更宽的 rec 预处理撑大，det 张量必须恰为 3×640×640
+            return FloatBuffer.wrap(nchw, 0, 3 * DET_SIZE * DET_SIZE) to
+                DbPostProcessor.DetGeometry(sw.toFloat() / w, sh.toFloat() / h)
         } finally {
-            resized.release()
-            canvas.release()
             if (ownedBgr) bgr.release()
         }
     }
 
     /**
-     * rec 预处理：按宽高比等比缩放到高 48（**不拉伸、不固定宽**），归一化 → NCHW。
+     * rec 预处理（复用版）：按宽高比等比缩放到高 48（**不拉伸、不固定宽**），归一化 → NCHW。
+     * 与 [preprocessRec] 原逐次分配逻辑逐位等价，缓冲改用 [ws]（crop/resized 内容整块覆盖）。
      *
      * irminsul 教训：原实现固定宽 320 拉伸，破坏字符纵横比，是汉字识别错乱的根因。
      */
-    private fun preprocessRec(src: Mat, rect: IntRect): Pair<FloatBuffer, Int>? {
+    private fun preprocessRec(ws: PreprocWorkspace, src: Mat, rect: IntRect): Pair<FloatBuffer, Int>? {
         val w = src.cols()
         val h = src.rows()
         if (w <= 0 || h <= 0) return null
@@ -297,19 +416,18 @@ class OnnxPaddleOcrService(
         val ownedBgr = bgr !== src
         val crop = Mat(bgr, Rect(x, y, rw, rh)) // 零拷贝视图（仅新建 Mat 头）
         val scaledW = scaledWidthFor(rw, rh)
-        val resized = Mat()
         try {
-            Imgproc.resize(crop, resized, Size(scaledW.toDouble(), REC_H.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
-            val nchw = toNchw(resized)
-            return FloatBuffer.wrap(nchw) to scaledW
+            Imgproc.resize(crop, ws.resized, Size(scaledW.toDouble(), REC_H.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            val nchw = toNchw(ws, ws.resized)
+            // 显式限定长度：out/tmp 可能被更宽的上一行撑大，rec 张量必须恰为 3×48×scaledW
+            return FloatBuffer.wrap(nchw, 0, 3 * scaledW * REC_H) to scaledW
         } finally {
-            resized.release()
             crop.release()
             if (ownedBgr) bgr.release()
         }
     }
 
-    /** 非 3 通道输入统一转成 BGR（采集链正常就是 BGR，这里是防御） */
+    /** 非 3 通道输入统一转成 BGR（采集链正常就是 BGR，这里是防御；防御路径保留逐次分配） */
     private fun ensureBgr(src: Mat): Mat? {
         return when (src.channels()) {
             3 -> src
@@ -329,11 +447,63 @@ class OnnxPaddleOcrService(
 
     /**
      * Mat(BGR, CV_8UC3) → NCHW float，归一化到 [-1, 1]（v/127.5 - 1，det 与 rec 同一公式）。
+     * 复用版：floatMat/planes/out/tmp 来自 [ws]（grow-only，尺寸不足时才重新分配）。
      *
      * 归一化与缩放都在 OpenCV 原生侧做（`convertTo` 带 scale/shift + `split`），
      * Kotlin 侧只做 3 次整块读取 + 3 次 arraycopy 完成通道重排，避免逐像素循环。
      */
-    private fun toNchw(mat: Mat): FloatArray {
+    private fun toNchw(ws: PreprocWorkspace, mat: Mat): FloatArray {
+        val stride = mat.cols() * mat.rows()
+        val out = if (ws.out.size >= 3 * stride) ws.out else FloatArray(3 * stride).also { ws.out = it }
+        val tmp = if (ws.tmp.size >= stride) ws.tmp else FloatArray(stride).also { ws.tmp = it }
+        mat.convertTo(ws.floatMat, CvType.CV_32FC3, 1.0 / 127.5, -1.0)
+        Core.split(ws.floatMat, ws.planes) // 顺序 B, G, R
+        // 输出通道序 R,G,B（模型约定），源 planes 序 B,G,R
+        for (ch in 0 until 3) {
+            ws.planes[2 - ch].get(0, 0, tmp)
+            System.arraycopy(tmp, 0, out, ch * stride, stride)
+        }
+        return out
+    }
+
+    // ================= 对照实现（Stage 4-4 之前的逐次分配原路径）=================
+    // 仅供逐位一致性测试（OnnxOcrBenchmarkTest）与耗时对比使用，生产路径不再调用。
+
+    /**
+     * 对照：det 预处理，逐次分配（原版逐字保留）。
+     * 每次调用分配：canvas 1.2MB + resized ≤1.2MB（native），floatMat 4.7MB + planes 4.7MB（native），
+     * out 4.7MB + tmp 1.6MB（Java 堆）→ 全帧 det 约 **17~18MB/帧** 的短命分配。
+     */
+    private fun preprocessDetReference(src: Mat): Pair<FloatArray, DbPostProcessor.DetGeometry>? {
+        val w = src.cols()
+        val h = src.rows()
+        if (w <= 0 || h <= 0) return null
+        val scale = minOf(DET_SIZE.toFloat() / w, DET_SIZE.toFloat() / h)
+        val sw = (w * scale).roundToInt().coerceIn(1, DET_SIZE)
+        val sh = (h * scale).roundToInt().coerceIn(1, DET_SIZE)
+        val bgr = ensureBgr(src) ?: return null
+        val canvas = Mat.zeros(DET_SIZE, DET_SIZE, CvType.CV_8UC3)
+        val resized = Mat()
+        val ownedBgr = bgr !== src
+        try {
+            Imgproc.resize(bgr, resized, Size(sw.toDouble(), sh.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            val roi = Mat(canvas, Rect(0, 0, sw, sh))
+            try {
+                resized.copyTo(roi)
+            } finally {
+                roi.release()
+            }
+            val nchw = toNchwOnce(canvas)
+            return nchw to DbPostProcessor.DetGeometry(sw.toFloat() / w, sh.toFloat() / h)
+        } finally {
+            resized.release()
+            canvas.release()
+            if (ownedBgr) bgr.release()
+        }
+    }
+
+    /** 对照：toNchw，逐次分配（原版逐字保留）。 */
+    private fun toNchwOnce(mat: Mat): FloatArray {
         val stride = mat.cols() * mat.rows()
         val out = FloatArray(3 * stride)
         val floatMat = Mat()
@@ -357,12 +527,36 @@ class OnnxPaddleOcrService(
         return out
     }
 
+    // ---- 测试钩子（仅 JVM 单测使用）----
+
+    /** 旧路径（逐次分配）det 预处理结果。 */
+    internal fun detPreprocessOnceForTest(src: Mat): Pair<FloatArray, DbPostProcessor.DetGeometry>? =
+        preprocessDetReference(src)
+
+    /** 新路径（复用）det 预处理结果：走生产 acquire/release，返回 out 数组副本（防工作区复写）。 */
+    internal fun detPreprocessReuseForTest(src: Mat): Pair<FloatArray, DbPostProcessor.DetGeometry>? {
+        val ws = acquireWorkspace()
+        try {
+            val prepared = preprocessDet(ws, src) ?: return null
+            val (buf, geo) = prepared
+            return FloatArray(3 * DET_SIZE * DET_SIZE).also { buf.get(it) } to geo
+        } finally {
+            releaseWorkspace(ws)
+        }
+    }
+
     companion object {
         private const val TAG = "BetterGI.Ocr.Onnx"
 
         const val DET_SIZE = 640
         const val REC_H = 48
         const val REC_W_MAX = 4096
+
+        /** pad 条带清零用的黑标量（det 画布复用，见 preprocessDet） */
+        private val ZERO_SCALAR = Scalar(0.0, 0.0, 0.0)
+
+        /** 预处理工作区池上限（并发依据与取舍见 wsPool 的 KDoc；≈2×17.5MB 常驻上限） */
+        private const val WS_POOL_MAX = 2
 
         /**
          * rec 模型输出类数（index 0 = CTC blank，1..6905 = 字符类）。

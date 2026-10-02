@@ -36,7 +36,7 @@ object CaptureReplay {
     /** @return 一行结果，进 logcat 也回给调用方（adb 调试链直接打印它）。 */
     suspend fun replay(context: Context, pcapPath: String): String {
         val ticket = CaptureGate.tryEnter()
-        if (ticket == 0L) return fail("已有抓包在跑（在线会话或另一次回放），本次不启动")
+        if (ticket == 0L) return failureMessage("已有抓包在跑（在线会话或另一次回放），本次不启动")
         try {
             return run(context, pcapPath)
         } finally {
@@ -47,11 +47,11 @@ object CaptureReplay {
     private suspend fun run(context: Context, pcapPath: String): String {
         val file = File(pcapPath)
         if (!file.canRead()) {
-            return fail("文件不可读：$pcapPath（投放到 ${context.getExternalFilesDir(null)?.absolutePath} 下）")
+            return failureMessage("文件不可读：$pcapPath（投放到 ${context.getExternalFilesDir(null)?.absolutePath} 下）")
         }
         when (val support = IrminsulCapture.probeNativeSupport()) {
             is CaptureResult.Ok -> Unit
-            is CaptureResult.Err -> return fail("本机跑不了抓包栈（ABI 没装到原生库？）：${support.error}")
+            is CaptureResult.Err -> return failureMessage("本机跑不了抓包栈（ABI 没装到原生库？）：${support.error}")
         }
 
         // 每轮从干净的 sniffer 开始：原生收集是跨会话累加的，不清就把上一份 pcap
@@ -60,7 +60,7 @@ object CaptureReplay {
         runCatching { IrminsulCapture.close() }
         when (val init = IrminsulCapture.initNative(context)) {
             is CaptureResult.Ok -> Unit
-            is CaptureResult.Err -> return fail("原生栈初始化失败：${init.error}")
+            is CaptureResult.Err -> return failureMessage("原生栈初始化失败：${init.error}")
         }
 
         val startedAt = System.currentTimeMillis()
@@ -71,7 +71,7 @@ object CaptureReplay {
             IrminsulCapture.Config(completionNotification = false),
         )) {
             is CaptureResult.Ok -> Unit
-            is CaptureResult.Err -> return fail("回放没起来：${start.error}")
+            is CaptureResult.Err -> return failureMessage("回放没起来：${start.error}")
         }
 
         val (finished, outcome) = awaitReplay()
@@ -80,12 +80,12 @@ object CaptureReplay {
             // 一存就把上一份完整输入顶掉，随后被 `artifact_lock` / `auto_equip` 当成全库依据。
             // 与在线会话「只有四段齐才落盘」是同一条定策。
             IrminsulCapture.stop(context)
-            return fail("$outcome ⇒ 不入库（上一份输入保持不变）")
+            return failureMessage("$outcome ⇒ 不入库（上一份输入保持不变）")
         }
         val json = when (val export = IrminsulCapture.exportGood(GOOD_EXPORT_SETTINGS)) {
             is CaptureResult.Err -> {
                 IrminsulCapture.stop(context)
-                return fail("导出失败：${export.error}（$outcome）")
+                return failureMessage("导出失败：${export.error}（$outcome）")
             }
             is CaptureResult.Ok -> export.value
         }
@@ -94,7 +94,7 @@ object CaptureReplay {
         IrminsulCapture.stop(context)
 
         val (ok, message) = GoodRepository.save(context, "抓包回放 ${file.name}", json)
-        if (!ok) return fail("解析完成但存不进输入仓库：$message（$outcome）")
+        if (!ok) return failureMessage("解析完成但存不进输入仓库：$message（$outcome）")
         return line("抓包回放 ${System.currentTimeMillis() - startedAt}ms：$outcome ${countsOf(json)} → $message")
     }
 
@@ -139,7 +139,7 @@ object CaptureReplay {
         return text
     }
 
-    private fun fail(text: String): String {
+    private fun failureMessage(text: String): String {
         Log.w(TAG, text)
         return "抓包回放失败：$text"
     }

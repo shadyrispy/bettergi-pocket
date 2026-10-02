@@ -1,4 +1,4 @@
-package com.bettergi.pocket.settings
+package com.bettergi.pocket.bridge
 
 import android.content.Context
 import android.database.ContentObserver
@@ -8,6 +8,9 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import java.util.concurrent.CopyOnWriteArrayList
+import com.bettergi.pocket.settings.SettingsGateway
+import com.bettergi.pocket.settings.SettingsWire
+import com.bettergi.pocket.settings.TriggerSettings
 
 /**
  * **无障碍进程侧**的设置仓库：经 [SettingsBridgeProvider] 代理主进程的权威实例。

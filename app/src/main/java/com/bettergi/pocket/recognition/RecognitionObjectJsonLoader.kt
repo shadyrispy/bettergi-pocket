@@ -2,6 +2,8 @@ package com.bettergi.pocket.recognition
 
 import org.json.JSONObject
 import kotlin.math.round
+import com.bettergi.pocket.core.IntRect
+import com.bettergi.pocket.core.IntSize
 
 class RecognitionObjectJsonLoadContext(
     val captureWidth: Int,

@@ -104,7 +104,11 @@ object Expr {
         }
 
         private fun lookup(name: String): Long {
-            val v = vars[name] ?: return 0
+            // ★ A16：未知变量名抛异常而非静默按 0 —— 否则变量名拼错（如 `lvel`）会让
+            //   `stopWhen="level == 0"` 之类的判据静默恒真/恒假（判据反向）。
+            //   调用方（stopWhen/ifMatch/pageSkip）均以 runCatching 兜底为"按未命中处理"，
+            //   抛出后落到 loud 失败（warn 日志），不会被吞成"判据通过"。
+            val v = vars[name] ?: throw EvalException("unknown variable '$name' in expr")
             return when (v) {
                 is Int -> v.toLong()
                 is Long -> v

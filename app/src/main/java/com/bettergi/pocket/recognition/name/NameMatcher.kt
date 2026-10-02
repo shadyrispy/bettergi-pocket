@@ -1,5 +1,7 @@
 package com.bettergi.pocket.recognition.name
 
+import kotlin.math.abs
+
 /**
  * 通用 OCR 文本 → GOOD key 模糊匹配器（全项目唯一一处名称匹配算法）。
  *
@@ -162,13 +164,15 @@ object NameMatcher {
             return MatchResult(table.getValue(bestKey), bestKey, Tier.SUBSTRING, bestLen.toDouble())
         }
 
-        // ── 4. 反向子串：词典键包含 cleaned（OCR 截断）
+        // ── 4. 反向子串：词典键包含 cleaned（OCR 截断），取**最长**键
+        //（A22：旧实现对每个命中键都用 cleaned.length 打分，首个命中键胜出 ⇒ 结果依赖
+        //  词典迭代序（LinkedHashMap 数据序）。与 tier3 同口径改为取最长键，顺序无关。）
         bestKey = null
         bestLen = 0
         for (key in table.keys) {
-            if (key.length >= MIN_LEN_FOR_FUZZY && key.contains(cleaned) && cleaned.length > bestLen) {
+            if (key.length >= MIN_LEN_FOR_FUZZY && key.contains(cleaned) && key.length > bestLen) {
                 bestKey = key
-                bestLen = cleaned.length
+                bestLen = key.length
             }
         }
         if (bestKey != null) {
@@ -191,12 +195,34 @@ object NameMatcher {
         }
         val levCandidates = candidates
         if (!levCandidates.isNullOrEmpty()) {
-            val picked = if (levCandidates.size == 1) {
+            val picked: Pair<String, String>? = if (levCandidates.size == 1) {
                 levCandidates.first()
             } else {
-                // 并列：按视觉相似组打分（同形字替换更可能是 OCR 误读）
-                levCandidates.maxByOrNull { (key, _) -> visualScore(key, cleaned) } ?: levCandidates.first()
+                // 并列：先按视觉相似组打分（同形字替换更可能是 OCR 误读）；
+                // 视觉分并列时比公共前缀（截断/前缀噪声是主场景），再比与 cleaned 的长度差；
+                // 仍并列 ⇒ 判据耗尽，宁可 miss 不误配（characters 91.2% 教训：歧义层宁可不命中）。
+                val ranked = levCandidates
+                    .map { c ->
+                        RankedLevCandidate(
+                            c,
+                            visualScore(c.first, cleaned),
+                            commonPrefixLen(c.first, cleaned),
+                            abs(c.first.length - cleaned.length),
+                        )
+                    }
+                    .sortedWith(
+                        compareByDescending<RankedLevCandidate> { it.visual }
+                            .thenByDescending { it.prefix }
+                            .thenBy { it.lenDiff },
+                    )
+                val top = ranked.first()
+                // 唯一最大才命中（与 LCS 层的唯一性校验同思路）
+                val isUniqueTop = ranked.drop(1).none {
+                    it.visual == top.visual && it.prefix == top.prefix && it.lenDiff == top.lenDiff
+                }
+                if (isUniqueTop) top.candidate else null
             }
+            if (picked == null) return null
             val longest = maxOf(cleaned.length, picked.first.length)
             return MatchResult(
                 picked.second, picked.first, Tier.LEVENSHTEIN,
@@ -223,19 +249,42 @@ object NameMatcher {
         }
 
         // ── 7. 单字 Dice 兜底（整名错字但字集合高度重合）
+        //（A22：对齐 LCS 层加唯一性校验 —— 唯一最大且超阈值才命中；多个键打平则不命中，
+        //  否则结果依赖词典迭代序，会把碎片名随机绑到同级候选之一。）
         var bestDice = 0.0
         var bestDiceKey: String? = null
+        var diceUnique = true
         for (key in table.keys) {
             val score = unigramDice(cleaned, key)
             if (score > bestDice) {
                 bestDice = score
                 bestDiceKey = key
+                diceUnique = true
+            } else if (score == bestDice && score > 0.0) {
+                // 与 bestLcs 同口径：同 value（同一实体多键）不算歧义
+                if (table.getValue(bestDiceKey!!) != table.getValue(key)) diceUnique = false
             }
         }
-        if (bestDice >= DICE_MIN && bestDiceKey != null) {
+        if (bestDice >= DICE_MIN && bestDiceKey != null && diceUnique) {
             return MatchResult(table.getValue(bestDiceKey), bestDiceKey, Tier.DICE, bestDice)
         }
         return null
+    }
+
+    /** 编辑距离并列时的候选项排序键（A22 tier5 tie-break 链）。 */
+    private data class RankedLevCandidate(
+        val candidate: Pair<String, String>,
+        val visual: Int,
+        val prefix: Int,
+        val lenDiff: Int,
+    )
+
+    /** 公共前缀长度（tier5 tie-break 第三判据）。 */
+    internal fun commonPrefixLen(a: String, b: String): Int {
+        var i = 0
+        val n = minOf(a.length, b.length)
+        while (i < n && a[i] == b[i]) i++
+        return i
     }
 
     private fun applyAllConfusions(text: String): String {

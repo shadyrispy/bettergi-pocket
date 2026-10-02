@@ -73,7 +73,13 @@ object GridRowCheck {
             return if (anchorsRead) Result(null, Verdict.SKIP, null) else Result(null, Verdict.UNKNOWN, null)
         }
         // 两次估计一致（或只有一次）才采信；不一致 ⇒ 以较小者为准并标记 UNKNOWN 由调用方决定
-        val advance = ests.groupingBy { it }.eachCount().maxByOrNull { it.value }!!.key
+        // ★ P3（2026-09-30）：原实现用 maxByOrNull 取"众数"，两票各一时是**任意**取一（注释却承诺
+        //   取较小者）⇒ 与注释不符。改为：不一致 ⇒ 取较小估计（更保守，欠滚侧安全）并置 UNKNOWN。
+        val distinct = ests.distinct()
+        if (distinct.size > 1) {
+            return Result(distinct.min(), Verdict.UNKNOWN, null)
+        }
+        val advance = distinct.single()
         val verdict = when {
             advance >= pageSize -> Verdict.SKIP
             stallBelow > 0 && advance <= stallBelow -> Verdict.STALL

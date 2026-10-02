@@ -101,13 +101,13 @@ object CaptureSession {
     /** @return 没能开始的用户可读原因；null = 隧道已在起。 */
     fun start(context: Context): String? {
         val ticket = CaptureGate.tryEnter()
-        if (ticket == 0L) return say("已有抓包在跑（在线会话或 pcap 回放），本次不启动")
+        if (ticket == 0L) return message("已有抓包在跑（在线会话或 pcap 回放），本次不启动")
         gateTicket = ticket
         return try {
             startLocked(context)
         } catch (e: Exception) {
             releaseGate()
-            say("抓包启动异常：${e.javaClass.simpleName} ${e.message}")
+            message("抓包启动异常：${e.javaClass.simpleName} ${e.message}")
         }
     }
 
@@ -139,7 +139,7 @@ object CaptureSession {
             is CaptureResult.Err -> return refuse("隧道没起来：${started.error}")
         }
         _ui.value = Ui(running = true, phase = SessionPhase.AwaitingLogin)
-        say("抓包已启动：隧道只吸原神流量，进游戏（或回标题屏重进）后即可采集")
+        message("抓包已启动：隧道只吸原神流量，进游戏（或回标题屏重进）后即可采集")
         NoticeCenter.post(NoticeCenter.Level.INFO, "抓包已启动：进游戏或回标题屏重进即可采集")
         if (!blocked.vpnPermissionGranted) {
             Log.w(TAG, "vpn reported not granted right after start: $blocked")
@@ -151,7 +151,7 @@ object CaptureSession {
     /** 起不来的统一出口：让出闸门 + 记一句原因。 */
     private fun refuse(text: String): String? {
         releaseGate()
-        return say(text)
+        return message(text)
     }
 
     /** 只还**自己**那份凭据；已被别人接手时是空操作（见 [CaptureGate] 的 P2-1 说明）。 */
@@ -184,7 +184,7 @@ object CaptureSession {
         val text = "抓包停止：本次解到 $seen，未入库（上一份输入保持不变）"
         _ui.value = Ui(hint = "已停止")
         NoticeCenter.post(NoticeCenter.Level.WARN, "中途停止：本次数据未入库")
-        return say(text)
+        return message(text)
     }
 
     private fun stopTunnel(app: Context) {
@@ -260,13 +260,13 @@ object CaptureSession {
 
     private fun exportAndStore(app: Context, why: String): String =
         when (val export = IrminsulCapture.exportGood(GOOD_EXPORT_SETTINGS)) {
-            is CaptureResult.Err -> say("导出失败（$why）：${export.error}")
+            is CaptureResult.Err -> message("导出失败（$why）：${export.error}")
             is CaptureResult.Ok -> {
                 val (ok, message) = GoodRepository.save(app, "抓包·在线会话", export.value)
-                if (!ok) say("存不进输入仓库（$why）：$message")
+                if (!ok) message("存不进输入仓库（$why）：$message")
                 else {
                     val line = "$message ${countsOf(export.value)}"
-                    say("入库（$why）：$line")
+                    message("入库（$why）：$line")
                     line
                 }
             }
@@ -297,7 +297,7 @@ object CaptureSession {
             "材料=${root.optJSONObject("materials")?.length() ?: 0}"
     }
 
-    private fun say(text: String): String {
+    private fun message(text: String): String {
         Log.i(TAG, text)
         return text
     }

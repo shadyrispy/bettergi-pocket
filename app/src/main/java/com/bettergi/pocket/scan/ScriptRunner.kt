@@ -8,16 +8,20 @@ import android.util.Log
 import com.bettergi.pocket.capture.FrameSource
 import com.bettergi.pocket.capture.ScreenCaptureController
 import com.bettergi.pocket.input.InputAccessibilityService
-import com.bettergi.pocket.overlay.OverlayBridge
-import com.bettergi.pocket.dsl.FlowSource
+import com.bettergi.pocket.log.RecognitionLog
+import com.bettergi.pocket.bridge.OverlayBridge
+import com.bettergi.pocket.core.FlowSource
 import com.bettergi.pocket.dsl.FlowValidator
 import com.bettergi.pocket.recognition.ocr.OcrFactory
 import com.bettergi.pocket.recognition.name.GoodNames
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
 
 /**
@@ -39,11 +43,15 @@ class ScriptRunner(
     private val mainHandler = Handler(Looper.getMainLooper())
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
-    @Volatile
-    private var currentJob: kotlinx.coroutines.Job? = null
+    /**
+     * A15（2026-09-30）：扫描**单飞**状态机（start/stop 原子化）。
+     * 事故依据与关键语义见 [ScanLifecycle] 类注释；stop 的等待上限 [STOP_JOIN_TIMEOUT_MS]。
+     */
+    private val lifecycle = ScanLifecycle(STOP_JOIN_TIMEOUT_MS)
 
+    /** 旧口径（isActive）：服务端 applySettings/isRunning 观察用，语义不变（收尾中的 Cancelling 不算在跑）。 */
     private val running: Boolean
-        get() = currentJob?.isActive == true
+        get() = lifecycle.isActive
 
     /**
      * 学到的**账户级**性质，跨轮持久。目前只有「上锁确认框不再弹」——那是一次性提示，
@@ -128,21 +136,18 @@ class ScriptRunner(
 
         private fun <T> dispatchOnMain(block: () -> T): T? {
             if (Looper.myLooper() == Looper.getMainLooper()) return block()
-            var result: T? = null
-            val latch = java.util.concurrent.CountDownLatch(1)
-            mainHandler.post {
-                try {
-                    result = block()
-                } finally {
-                    latch.countDown()
-                }
-            }
-            // 超时兜底：主线程异常阻塞时不挂死扫描协程（按 dispatch 失败处理）
-            if (!latch.await(MAIN_DISPATCH_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-                Log.w(TAG, "main dispatch timed out")
-                return null
-            }
-            return result
+            // 超时兜底：主线程异常阻塞时不挂死扫描协程（按 dispatch 失败处理）——语义不变，仍返回 null。
+            // A14（2026-09-30）：原实现超时返回 null 后，已 post 到主线程的 task 稍后仍会执行
+            // ⇒ 引擎按「派发失败」处理后的**游离点击**（主线程卡 5s+ 解除后补一刀，引擎不知情）。
+            // 改经 MainDispatchGate：原子「终结权」CAS——超时方抢先置位后，之后才被主线程取出
+            // 的 task 入口 CAS 失败，不再执行 block；removeCallbacks 再摘一遍未入队的。
+            return MainDispatchGate.dispatch(
+                post = { mainHandler.post(it) },
+                removePending = { mainHandler.removeCallbacks(it) },
+                timeoutMs = MAIN_DISPATCH_TIMEOUT_MS,
+                onTimeout = { cleanly -> Log.w(TAG, "main dispatch timed out (cancelledClean=$cleanly)") },
+                block = block,
+            )
         }
     }
 
@@ -210,8 +215,14 @@ class ScriptRunner(
     ) {
         FlowSource.install(appContext)
         Log.i(TAG, "timing: ${TimingOverrides.apply(timingSpec)}")
-        if (running) {
-            Log.w(TAG, "scan already running")
+        // A15（2026-09-30）：上一轮未**真正**终结（含取消收尾中——isActive 在 cancel() 后立即
+        // 变 false，不能再用它判忙）⇒ 拒绝新启动，但必须回执：原先静默 return，悬浮窗停在
+        // 「启动中」且没有任何结束信号。走 onFinished 既有通路：服务端会复位 scanEnabled 并
+        // 显示「已结束（already_running）」，与「本轮没有新扫描起跑」一致（悬浮窗单飞模型下，
+        // 重复 start 本就该终止等待态；adb 在扫描进行中重复起扫同此口径）。
+        lifecycle.unfinishedJob()?.let {
+            Log.w(TAG, "scan already running (cancelling=${!it.isActive})")
+            listener.onFinished("already_running")
             return
         }
         if (!captureController.isRunning()) {
@@ -235,7 +246,10 @@ class ScriptRunner(
             Log.e(TAG, "no OCR engine available; abort scan")
             listener.onFinished("ocr_unavailable"); return
         }
-        currentJob = scope.launch {
+        // A15：先 launch 再经 tryAttach 原子装入（装入前的竞态终检 + 回执见 startScan 尾部）。
+        // 残余 TOCTOU（既有语义）：校验窗口内的 stop() 看不到尚未装入的 job，拦不住随后
+        // 起跑的本次扫描——主线程串行调用下不存在该窗口。
+        val newJob = scope.launch {
             // 提到 try 外：`catch` 块看不到 try 体内声明的局部函数（P2-3 的导出就靠这两行才可达）。
             val exported = java.util.concurrent.atomic.AtomicBoolean(false)
             var exportResults: (() -> Unit)? = null
@@ -315,14 +329,21 @@ class ScriptRunner(
                 val wdStop = java.util.concurrent.atomic.AtomicBoolean(false)
                 fun exportNow(why: String) {
                     if (!exported.compareAndSet(false, true)) return
-                    val arts = engine.results.toList()
-                    val wps = engine.resultsWeapons.toList()
-                    val chs = engine.resultsCharacters.toList()
-                    if (arts.isEmpty() && wps.isEmpty() && chs.isEmpty()) {
-                        Log.w(TAG, "导出跳过（$why）：无已入库结果")
-                        return
-                    }
+                    // A13（2026-09-30）：engine.results* 是扫描协程并发写的 ArrayList
+                    // （ScanEngine :283/:288/:3381），本函数可能从看门狗线程调用 ⇒ 裸 toList()
+                    // 会吃 ConcurrentModificationException，且此处原先整体无 try/catch ⇒
+                    // 看门狗线程未捕获异常直接杀进程（恰发生在抢救数据的时刻）。
+                    // 修法（受白名单限制，不动 ScanEngine 加锁）：快照走 [ResultsSnapshot]
+                    // 有界重试（挂死 ⇒ 扫描协程不再 add ⇒ 重试必然拿到稳定快照，见该类注释），
+                    // 整个导出体包 runCatching——失败走 RecognitionLog + logcat，绝不裸抛。
                     runCatching {
+                        val arts = ResultsSnapshot.withRetry { engine.results.toList() }
+                        val wps = ResultsSnapshot.withRetry { engine.resultsWeapons.toList() }
+                        val chs = ResultsSnapshot.withRetry { engine.resultsCharacters.toList() }
+                        if (arts.isEmpty() && wps.isEmpty() && chs.isEmpty()) {
+                            Log.w(TAG, "导出跳过（$why）：无已入库结果")
+                            return
+                        }
                         val file = GoodExporter.export(appContext, arts, wps, chs)
                         Log.i(TAG, "导出完成（$why）: $file (${arts.size}a ${wps.size}w ${chs.size}c)")
                         listener.onProgress(
@@ -334,7 +355,14 @@ class ScriptRunner(
                                 "characters" to chs.size,
                             ),
                         )
-                    }.onFailure { Log.e(TAG, "导出失败（$why）", it) }
+                    }.onFailure { e ->
+                        Log.e(TAG, "导出失败（$why）", e)
+                        RecognitionLog.log(
+                            RecognitionLog.Tag.SCAN,
+                            RecognitionLog.Level.W,
+                            "结果导出失败（$why）：${e.message ?: e.javaClass.simpleName}",
+                        )
+                    }
                 }
                 // 交给 try 外的 catch 用：异常发生时本轮已识别的结果不能跟着一起没了（P2-3）。
                 exportResults = { exportNow("aborted") }
@@ -389,14 +417,43 @@ class ScriptRunner(
                 listener.onFinished("error: ${e.message}")
             }
         }
+        // A15：装入前竞态终检（与 stop/其他 start 并发时锁内单飞；主线程调用方串行 ⇒ 纯防御）。
+        // 竞态输家：取消自己刚起的 job（尚未推进实质工作）并发同一回执；输家协程体的
+        // catch(CancellationException) 会补一条 "cancelled" 回执——双回执幂等，无害。
+        lifecycle.tryAttach(newJob)?.let {
+            newJob.cancel()
+            Log.w(TAG, "scan already running (raced)")
+            listener.onFinished("already_running")
+            return
+        }
     }
 
     /** 兼容旧调用：artifact_scan 流程。 */
     fun startArtifactScan() = startScan("artifact_scan")
 
+    /**
+     * A15（2026-09-30）：stop→start 原子化。原实现 `cancel(); currentJob = null` —— cancel 是
+     * **异步**的，立刻置 null 后新 startScan 直接 launch ⇒ 新旧引擎并存（快速「停止→开始」即
+     * 复现：旧引擎在下一个取消检查点之前仍会点击/抓帧）。
+     *
+     * 现改为：cancel 后**有界等待**取消真正完成（stop 可能从主线程调 ⇒ 不能无界阻塞主线程，
+     * 上限 [STOP_JOIN_TIMEOUT_MS]，正常收尾毫秒级即返回）；等待期间 job 引用保留 ⇒
+     * [ScanLifecycle.unfinishedJob]/[ScanLifecycle.tryAttach] 全程拒绝新启动（「期间拒绝新启动」）。
+     *
+     * **超时兜底放行**（工单口径）与残余窗口：旧协程若卡在不可中断的阻塞段（如 dispatchOnMain
+     * 的 latch.await——cancel 不会打断它，须等手势完成），放行后新旧引擎至多短暂并存、旧协程
+     * 至多再推进一个在途动作/一个取消检查点即退出；真挂死由会话级看门狗（SESSION_STALL_MS）
+     * 兜底。放行优先于把主线程/重启通道无限期挂住（卡死场景下用户必须还能重启）。
+     */
     fun stop() {
-        currentJob?.cancel()
-        currentJob = null
+        when (lifecycle.stop()) {
+            is ScanLifecycle.StopOutcome.Settled -> Unit
+            is ScanLifecycle.StopOutcome.LooseEnd ->
+                Log.w(
+                    TAG,
+                    "stop: 旧扫描协程 ${STOP_JOIN_TIMEOUT_MS}ms 内未收尾，放行后续启动（A15 残余窗口：旧协程至多推进到下一个取消检查点）",
+                )
+        }
     }
 
     /**
@@ -465,6 +522,14 @@ class ScriptRunner(
          */
         const val SESSION_STALL_MS = 120_000L
         const val MAIN_DISPATCH_TIMEOUT_MS = 5000L
+
+        /**
+         * A15：stop() 等待旧扫描协程真正终结的上限（几百 ms 量级）。
+         * stop 可能从主线程调（悬浮窗/applySettings/服务销毁）⇒ 不能无界阻塞主线程；
+         * 400ms 远低于 ANR 阈值，正常取消收尾毫秒级即达，超时仅出现在协程正卡在
+         * 不可中断阻塞段（如 dispatchOnMain 的 latch.await）时——残余窗口见 [stop] 注释。
+         */
+        const val STOP_JOIN_TIMEOUT_MS = 400L
         /** 点击后恢复悬浮窗可触摸的宽放余量：须晚于 a11y 手势 UP 注入（否则 UP 被吞→无 click）。 */
         const val PASSTHROUGH_RESTORE_SLACK_MS = 600L
         /**
@@ -477,5 +542,163 @@ class ScriptRunner(
          * 想复现旧行为（扫描期常驻穿透）只需把本常量改 `true` 重建。
          */
         const val SCAN_OVERLAY_HIDDEN = false
+    }
+}
+
+/**
+ * A14（2026-09-30）：主线程派发闸门——「超时取消标记」的原子化。
+ * 纯 JVM（无 Android 依赖；post/removePending/onTimeout 均注入），ScriptRunnerTest 直接驱动。
+ *
+ * 事故依据：原 dispatchOnMain 超时返回 null（引擎按派发失败处理）后，已 post 到主线程的
+ * task 稍后仍会执行 ⇒ 游离点击。终结权用一个原子位表达：task 执行入口与超时分支各做一次
+ * CAS(false→true)，**谁先抢到谁说了算**——超时方抢到 ⇒ 之后才被取出的 task 不再执行 block；
+ * task 抢到 ⇒ block 已开始执行（点击已发生，无法抢占，属 TOCTOU 残余窗口，语义仍按超时
+ * 返回 null——与旧实现一致）。
+ */
+internal object MainDispatchGate {
+
+    /**
+     * @param post          把 task 投递到目标线程（生产侧 = mainHandler::post）
+     * @param removePending 超时后摘除尚未执行的 task（生产侧 = mainHandler::removeCallbacks；
+     *                      先 CAS 后 remove，保证「检查过标记但尚未执行」的窗口收敛到 CAS 一瞬）
+     * @param onTimeout     超时回调（参数 = 是否干净取消：false 表示 task 恰在超时分支前已开始）
+     * @return block 的结果；超时一律返回 null（约定：生产侧 block 永不返回 null ⇒ null 即超时）
+     */
+    fun <T> dispatch(
+        post: (Runnable) -> Unit,
+        removePending: (Runnable) -> Unit,
+        timeoutMs: Long,
+        onTimeout: (cancelledClean: Boolean) -> Unit = {},
+        block: () -> T,
+    ): T? {
+        val settled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var result: T? = null
+        val task = Runnable {
+            val won = settled.compareAndSet(false, true)
+            try {
+                if (won) result = block()
+            } finally {
+                latch.countDown()
+            }
+        }
+        post(task)
+        return if (latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            result
+        } else {
+            val cancelledClean = settled.compareAndSet(false, true)
+            removePending(task)
+            onTimeout(cancelledClean)
+            null
+        }
+    }
+}
+
+/**
+ * A13（2026-09-30）：并发容器的**有界重试**快照（纯 JVM，ScriptRunnerTest 直接驱动）。
+ *
+ * 背景：会话级看门狗线程在扫描协程可能仍持锁 add 的情况下读 engine.results（ArrayList）
+ * ⇒ ConcurrentModificationException。有界重试必然成功的依据（工单口径）：看门狗只在判
+ * 「挂死」（SESSION_STALL_MS 无进展）后才并发读——挂死 = 扫描协程不再 add ⇒ 重试必然拿到
+ * 稳定快照。retries 耗尽仍冲突 ⇒ 原样抛出，交给 exportNow 的 runCatching 兜底（绝不裸抛）。
+ *
+ * 测试口径：真 CME 的并发构造不稳定，单测用「第 N 次调用才成功」的桩模拟冲突；
+ * 真机验证方式：DEBUG_SCAN_FLOW 注入挂死触发看门狗导出，观察 logcat BetterGI.ScanRunner
+ * 无未捕获异常且导出完成（A13 工单允许的注释验证口径）。
+ */
+internal object ResultsSnapshot {
+
+    /**
+     * @param retries 总尝试次数（≥1）；每次 CME 后睡 [retryDelayMs] 再试
+     *                （睡眠被打断则不吞中断标记、不再睡，立即补试剩余次数）
+     */
+    fun <T> withRetry(retries: Int = 3, retryDelayMs: Long = 50L, snapshot: () -> T): T {
+        require(retries >= 1) { "retries must be >= 1" }
+        var last: Throwable? = null
+        repeat(retries) { attempt ->
+            try {
+                return snapshot()
+            } catch (e: ConcurrentModificationException) {
+                last = e
+                if (attempt < retries - 1) {
+                    try {
+                        Thread.sleep(retryDelayMs)
+                    } catch (_: InterruptedException) {
+                        // 看门狗被 wd.interrupt() 收尾打断：保留中断标记，跳过睡眠立即补试
+                        Thread.currentThread().interrupt()
+                    }
+                }
+            }
+        }
+        val final = last ?: IllegalStateException("ResultsSnapshot retry loop exited without exception")
+        throw final
+    }
+}
+
+/**
+ * A15（2026-09-30）：扫描**单飞**状态机（start/stop 原子化）。
+ * 纯 JVM——只依赖 kotlinx.coroutines.Job，ScriptRunnerTest 用真实 Job + runBlocking 驱动。
+ *
+ * 事故依据：原 stop() `cancel(); currentJob = null` —— cancel 是异步的，置 null 后新
+ * startScan 立即 launch ⇒ 新旧引擎并存：旧引擎在下一个取消检查点之前仍会点击/抓帧。
+ *
+ * 关键语义：Job.cancel() 后 isActive **立即**变 false（Job 进入 Cancelling 态）⇒ 不能用
+ * isActive 判「还在收尾」；「未终结」必须用 !isCompleted（涵盖正常完成 / 取消完成两种终态）。
+ * isActive 旧口径保留给 isRunning()（服务端 applySettings 观察用），收尾中的半格余量由
+ * 本类的 unfinishedJob 判据兜住。
+ */
+internal class ScanLifecycle(private val stopJoinTimeoutMs: Long) {
+
+    @Volatile
+    private var job: Job? = null
+
+    /** 旧口径：仅 Active 算在跑（Cancelling 收尾不算）。isRunning() 沿用。 */
+    val isActive: Boolean get() = job?.isActive == true
+
+    /**
+     * 未终结的 job（Active 或 Cancelling 收尾中）；已终结 / 从未启动 ⇒ null。
+     * 新启动必须据此拒绝并发 already_running 回执（A15）。
+     */
+    fun unfinishedJob(): Job? {
+        val j = job ?: return null
+        return if (j.isCompleted) null else j
+    }
+
+    /**
+     * 装入新 job（与 stop/其他 start 并发时锁内单飞）。
+     * @return null = 受理；非 null = 拒绝，携带当时未终结的旧 job
+     *         （调用方取消自己刚起的 candidate 并发回执——竞态输家自取消）。
+     */
+    fun tryAttach(candidate: Job): Job? = synchronized(this) {
+        val cur = job
+        if (cur != null && !cur.isCompleted) return cur
+        job = candidate
+        null
+    }
+
+    sealed interface StopOutcome {
+        /** 取消已在有界时间内真正终结：引用已清，可干净重启（无双引擎）。 */
+        object Settled : StopOutcome
+
+        /** 有界等待超时：旧协程仍在收尾。已放行（引用已清），残余窗口见 ScriptRunner.stop 注释。 */
+        object LooseEnd : StopOutcome
+    }
+
+    /**
+     * stop：cancel + 有界 join。等待期间引用保留 ⇒ unfinishedJob/tryAttach 全程拒绝新启动
+     * （工单口径「期间拒绝新启动」）；join 完成或超时后统一清引用（放行）。
+     */
+    fun stop(): StopOutcome {
+        val j = synchronized(this) { job } ?: return StopOutcome.Settled
+        j.cancel()
+        val joined = runCatching {
+            runBlocking { withTimeout(stopJoinTimeoutMs) { j.join() } }
+        }.isSuccess
+        synchronized(this) {
+            // 只清自己：join 期间若有并发 start 装入了新 job（busy 拒绝下理论上不可能），
+            // 防御性判断避免误清新 job 的引用导致后续 stop 失灵
+            if (job === j) job = null
+        }
+        return if (joined) StopOutcome.Settled else StopOutcome.LooseEnd
     }
 }

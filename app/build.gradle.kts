@@ -21,8 +21,6 @@ android {
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
-
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     splits {
@@ -36,7 +34,11 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // ★ Stage 4-1（2026-10-01）：开启 R8/minify（A33 keep 规则已就位）。
+            //   规则见 proguard-rules.pro：项目自身无 JNI/反射面，重心在三方库
+            //   （onnxruntime / opencv / irminsul capture）整包 keep；另保留行号供崩溃栈解混淆。
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -51,17 +53,17 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
         // ── 单测闸门分层（2026-09-28 实测后定的）────────────────────────────────
-        // 全量 53 类 / 374 条里，`ScanEngineDryRunTest` 占 640.8s / 643.6s，其余 51 类合计 2.8s。
+        // 全量 69 类 / 509 条里，`ScanEngineDryRunTest`（17 条）占 ~316s，其余 68 类合计 ~6s。
         // 两个原因（第二个是本轮查出来的，第一条一开始被我猜错过）：
         //   ① 引擎的 settle 常量是**真实墙钟**（CLICK/ENTER/SCREEN_SETTLE、PANEL_* …），干跑
         //      用 `runBlocking { engine.run() }` 真等 ⇒ 健康路径 ≈0.66s/格 × 每页 21 格。
         //   ② 三条用例把合成计数器写成不可达的 1026 ⇒ "已入库 ≥ 计数器"永不成立 ⇒ 多扫一页
         //      "同帧假页"，那页同格名字不变 ⇒ **每格等满 PANEL_CHANGE_WAIT_MAX_MS(6000)**
-        //      ⇒ 单条 ~167s。已改成可达计数器（断言一字未动），该类 640.8s → **185.5s**。
+        //      ⇒ 单条 ~167s。已改成可达计数器（断言一字未动），该类当场 640.8s → 185.5s（后随用例增多，现 ~316s）。
         // 干跑仍占 98% ⇒ 分层：
-        //   默认（不带属性） 摘掉干跑 ⇒ 实测 52 类 / 362 条 / 测试 3.0s（BUILD 5s）
-        //   -Pdryrun        连干跑一起（**改了 ScanEngine 或 dsl/flows 必须带**）⇒ 188.5s
-        //   -PdryrunOnly    只跑干跑 ⇒ 185.5s
+        //   默认（不带属性） 摘掉干跑 ⇒ 实测 68 类 / 492 条 / 测试 6s 级
+        //   -Pdryrun        连干跑一起（**改了 ScanEngine 或 dsl/flows 必须带**）⇒ 全量约 5.4min
+        //   -PdryrunOnly    只跑干跑 ⇒ 约 316s
         // ⚠️ 默认绿 ≠ 引擎 e2e 绿 —— 跳过时会打一行提示，别只看 BUILD SUCCESSFUL。
         unitTests.all { test ->
             if (dryRunOnly) {
@@ -70,7 +72,7 @@ android {
                 test.filter.excludeTestsMatching(DRY_RUN_CLASS)
                 test.doFirst {
                     logger.lifecycle(
-                        "BetterGI: 已跳过 $DRY_RUN_CLASS（引擎干跑 e2e，185s / 全量 189s）。" +
+                        "BetterGI: 已跳过 $DRY_RUN_CLASS（引擎干跑 e2e，~316s / 全量约 5.4min）。" +
                             "改了 ScanEngine 或 dsl/flows ⇒ 请用 -Pdryrun 重跑。",
                     )
                 }
@@ -86,9 +88,8 @@ dependencies {
     implementation(libs.androidx.activity)
     implementation(libs.androidx.constraintlayout)
     implementation(libs.opencv)
-    implementation(libs.mlkit.text.recognition.chinese)
     implementation(libs.kotlinx.coroutines.android)
-    // ONNX Runtime：PaddleOCR det+rec 推理（方案 §6.1）；~10-15MB/ABI，ML Kit 保留为降级兜底
+    // ONNX Runtime：PaddleOCR det+rec 推理（方案 §6.1），唯一 OCR 引擎（ML Kit 已移除）
     implementation(libs.onnxruntime.android)
     // 抓包数据源（irminsul-android :capture）：VPN 取包 + 会话解密 + proto 解析，
     // 与 OCR 扫描并列为第二数据源。版本 = 该仓库 gradle.properties 的 captureVersion。
@@ -96,15 +97,15 @@ dependencies {
     testImplementation(libs.junit)
     // JVM 版 onnxruntime：本地单测跑真实推理（速度/精度对拍），不进 Android 主包
     testImplementation(libs.onnxruntime.jvm)
-    val desktopOpenCv = file("libs/opencv-4.9.0-0.jar")
-    if (desktopOpenCv.exists()) {
-        testImplementation(files(desktopOpenCv))
-    } else {
-        testImplementation(libs.opencv.desktop)
-    }
+    // 桌面单测 OpenCV：统一走 openpnp org.opencv:opencv（与 libs.opencv.desktop 同源，A35）。
+    // 曾有的 file 分叉（本地 app/libs/opencv-4.9.0-0.jar 存在则用 file，否则 openpnp）
+    // 已删除：app/libs/ 目录本仓库并不存在（jar 未入库，非空分支只对个别机器生效），
+    // 两台机器 classpath 因此不同，属隐形分叉。openpnp 4.9.0-0 是 OpenCV 4.9.0 官方
+    // Java 绑定的桌面打包，org.opencv.core/imgproc/imgcodecs API 与 AAR 完全一致，
+    // 单测所用 API（见下方 configurations.exclude：仅单测 classpath 换源）已由
+    // VoteJudgesRealDataTest 等真实用例验证可跑。
+    testImplementation(libs.opencv.desktop)
     testImplementation("org.json:json:20240303")
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
 }
 
 configurations.matching {

@@ -2,7 +2,8 @@ package com.bettergi.pocket.scan
 
 import android.content.res.AssetManager
 import android.util.Log
-import com.bettergi.pocket.dsl.FlowSource
+import com.bettergi.pocket.core.FlowSource
+import java.util.concurrent.ConcurrentHashMap
 import org.json.JSONObject
 import org.opencv.core.Core
 import org.opencv.core.CvType
@@ -45,8 +46,18 @@ object TemplateMatcher {
     /** 模板是否已注册（无需取帧/解码，供调用方判断是否可用）。 */
     fun hasTemplate(key: String): Boolean = templateSpec(key) != null
 
-    /** 模板位图缓存（解码一次，避免每帧 IO）。 */
-    private val templateCache = HashMap<String, Mat>()
+    /** 模板位图缓存（解码一次，避免每帧 IO）。★ P3：换 ConcurrentHashMap —— 写原在锁外，HashMap 并发写有竞态。 */
+    private val templateCache = ConcurrentHashMap<String, Mat>()
+
+    /**
+     * ★ P3（2026-10-01）缩放模板缓存：按 `(模板 key, 帧行数, 模板原始尺寸)` 缓存 resize 结果，
+     * 避免每次匹配都 `Imgproc.resize` 新建 Mat。缩放比 `s = frame.rows() / 1440` 只依赖帧行数
+     * （fit-height 布局），同 key 同帧尺寸下 resize 输出**逐位一致**。
+     * 条目数上界 = 模板数 × 帧高度档数，天然有限（同一会话帧高度恒定，实际 ≈ 模板数），
+     * 无需 LRU。失效时机：[attach] 被再次调用时清空（ScriptRunner 每次扫描启动前注入 assets，
+     * 覆盖词典/资源重载场景；模板原始尺寸入 key 兜底 templateCache 内容变化）。
+     */
+    private val scaledCache = ConcurrentHashMap<String, Mat>()
 
     private val lock = Any()
 
@@ -60,6 +71,9 @@ object TemplateMatcher {
                 Log.w(TAG, "templates.json 读取失败，模板锚点将不可用：${e.message}")
                 null
             }
+            // 缩放模板随 assets/config 重载一并失效（见 scaledCache 注释）
+            scaledCache.values.forEach { it.release() }
+            scaledCache.clear()
         }
     }
 
@@ -110,13 +124,35 @@ object TemplateMatcher {
                 Log.w(TAG, "模板解码失败：$key ($file)")
                 null
             } else {
-                synchronized(lock) { templateCache[key] = mat }
+                templateCache[key] = mat // ConcurrentHashMap：写安全（读亦无锁）
                 mat
             }
         } catch (e: Exception) {
             Log.w(TAG, "模板读取失败：$key ($file) ${e.message}")
             null
         }
+    }
+
+    /**
+     * 缩放模板（带缓存，见 [scaledCache]）。resize 比例只依赖 frameRows（fit-height），
+     * 命中缓存时返回**共享只读** Mat —— 调用方不得 release。退化（0 尺寸）返回 null 且不缓存。
+     */
+    private fun scaledTemplate(templateKey: String, tpl: Mat, frameRows: Int): Mat? {
+        val s = frameRows.toDouble() / TEMPLATE_BASE_H
+        val cacheKey = "$templateKey@${frameRows}@${tpl.cols()}x${tpl.rows()}"
+        scaledCache[cacheKey]?.let { return it }
+        val scaled = Mat()
+        Imgproc.resize(tpl, scaled, Size(), s, s, Imgproc.INTER_AREA)
+        if (scaled.cols() <= 0 || scaled.rows() <= 0) {
+            scaled.release()
+            return null
+        }
+        val raced = scaledCache.putIfAbsent(cacheKey, scaled)
+        if (raced != null) {
+            scaled.release() // 并发竞态输家：释放自建的，复用先到者
+            return raced
+        }
+        return scaled
     }
 
     /**
@@ -129,12 +165,12 @@ object TemplateMatcher {
 
         // 模板恒按 3200×1440 基准裁切 → 统一按「高比」缩放（游戏的 fit-height 布局）。
         // 不能用 profile.scaleX/scaleY：2244×1080 profile 的 scale 恒为 1，会让 3200 系坐标直接越界。
-        val s = frame.rows().toDouble() / TEMPLATE_BASE_H
-        val scaled = Mat()
-        Imgproc.resize(tpl, scaled, Size(), s, s, Imgproc.INTER_AREA)
+        // ★ P3：resize 结果按 (模板, 帧行数) 缓存，不再每次匹配新建（缓存条目只读共享，不在此 release）。
+        val s = frame.rows().toDouble() / TEMPLATE_BASE_H // ROI 兜底换算仍需此比例
+        val scaled = scaledTemplate(templateKey, tpl, frame.rows())
+            ?: return MatchResult(false, -1.0, 0, 0)
         val (tw, th) = scaled.cols() to scaled.rows()
-        if (tw <= 0 || th <= 0 || tw > frame.cols() || th > frame.rows()) {
-            scaled.release()
+        if (tw > frame.cols() || th > frame.rows()) {
             return MatchResult(false, -1.0, 0, 0)
         }
 
@@ -179,11 +215,20 @@ object TemplateMatcher {
             var by = 0
             val thr = threshold()
             // 步长 1：result 尺寸 = ROI - 模板，部位 tab 场景约百余见方，开销可忽略
+            // ★ P3（2026-10-01）性能改：逐像素 `result.get(y,x)` + `dilated.get(y,x)` 是每像素两次
+            //   JNI 调用 ⇒ 改为**整行** FloatArray 批量读（matchTemplate 输出恒 CV_32F 单通道，
+            //   `get(row, col, FloatArray)` 与逐像素 `get(y,x)[0]` 同语义），内存内比对。
+            //   结果逐位一致（VoteJudges.countMatches 整行读同手法）。
+            val w = result.cols()
+            val resRow = FloatArray(w)
+            val dilRow = FloatArray(w)
             for (y in 0 until result.rows()) {
-                for (x in 0 until result.cols()) {
-                    val v = result.get(y, x)[0]
-                    if (v >= thr && v >= dilated.get(y, x)[0] && v > best) {
-                        best = v
+                result.get(y, 0, resRow)
+                dilated.get(y, 0, dilRow)
+                for (x in 0 until w) {
+                    val v = resRow[x]
+                    if (v >= thr && v >= dilRow[x] && v > best) {
+                        best = v.toDouble()
                         bx = x
                         by = y
                     }
@@ -198,7 +243,6 @@ object TemplateMatcher {
         } finally {
             result.release()
             search.release()
-            scaled.release()
         }
     }
 

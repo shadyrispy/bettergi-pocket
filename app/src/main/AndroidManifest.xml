@@ -35,8 +35,9 @@
         </intent>
     </queries>
 
+    <!-- ★ A30：allowBackup=false + 两份规则 XML 全排除 —— 备份/迁移整体关闭（依据见各 XML 注释）。 -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:name=".PocketApplication"
@@ -46,7 +47,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.BetterGIPocket">
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:excludeFromRecents="true"
@@ -67,9 +68,12 @@
             </intent-filter>
         </activity>
 
+        <!-- 投影授权页不导出：仅应用内部拉起（服务 settingsListener 触发 requestCapturePermission，
+             或 MainActivity 持 EXTRA_AUTO_REQUEST_CAPTURE 前台内发起）。adb 调试统一走服务广播
+             DEBUG_SET_SCREEN_SHARE 触发内部链路，不直启本页。 -->
         <activity
             android:name=".capture.CapturePermissionActivity"
-            android:exported="true"
+            android:exported="false"
             android:excludeFromRecents="true"
             android:noHistory="true"
             android:taskAffinity=""
@@ -114,7 +118,7 @@
 
         <!-- 无障碍进程 → 主进程：读/写设置、请求导出与退出、拉识别日志镜像 -->
         <provider
-            android:name=".settings.SettingsBridgeProvider"
+            android:name=".bridge.SettingsBridgeProvider"
             android:authorities="${applicationId}.settings"
             android:exported="false" />
 
@@ -132,21 +136,6 @@
             android:exported="false"
             android:excludeFromRecents="true"
             android:launchMode="singleInstance" />
-        <receiver
-            android:name=".debug.DebugControlReceiver"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="com.bettergi.pocket.debug.SET_SCREEN_SHARE" />
-                <action android:name="com.bettergi.pocket.debug.SET_SCAN" />
-                <action android:name="com.bettergi.pocket.debug.SET_PROBE" />
-                <action android:name="com.bettergi.pocket.debug.SET_VERBOSE" />
-                <action android:name="com.bettergi.pocket.debug.SWIPE_TEST" />
-                <action android:name="com.bettergi.pocket.debug.SCAN_FLOW" />
-                <action android:name="com.bettergi.pocket.debug.STATUS" />
-                <action android:name="com.bettergi.pocket.debug.REPLAY_PCAP" />
-                <action android:name="com.bettergi.pocket.debug.CAPTURE" />
-            </intent-filter>
-        </receiver>
     </application>
 
 </manifest>

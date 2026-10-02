@@ -147,63 +147,101 @@ Stage 0 基线（串行，半天）
 
 > 前置：Stage 1+2 全部入库、全量测试绿。本阶段所有子步骤均不改行为，每步合入后跑默认闸门；涉及 ScanEngine 的每步加跑 `-Pdryrun`。
 
-### 3.1 共享类型与孤儿文件归位（M，串行第一）
+### 3.1 共享类型与孤儿文件归位（M，串行第一）✅ 09-30 已实施
 机械移动（纯移动 + import 更新，一个 commit 系列）：
-- 新建 `core` 包：`FlowSource`（自 dsl/）、`IntRect`/`Geometry`（自 recognition/）→ **消解 capture↔recognition 环的一半**。
-- `recognition/CaptureContent.kt`、`CaptureScale.kt` → capture 包（帧容器本属 capture 域）。
-- `recognition/opencv/MatOps.kt` → `core/image`（被 capture 与 recognition 两方使用；`MatchTemplateHelper`/`OpenCvRuntime` 留在 recognition）→ 环彻底消解。
+- 新建 `core` 包：`FlowSource`（自 dsl/）、`Geometry.kt`（自 recognition/，含 IntSize/IntRect/ColorBgr）、`ColorConversion`（自 RecognitionTypes.kt 拆出）→ **消解 capture↔recognition 环的一半**。
+- `recognition/opencv/MatOps.kt` → `core/image`（删掉死的 `frameToBgr`——它对 `capture.Frame` 的唯一依赖；`MatchTemplateHelper`/`OpenCvRuntime` 留在 recognition）→ 环彻底消解。
+- ~~`recognition/CaptureContent.kt`、`CaptureScale.kt` → capture 包~~ **改为留在 recognition**（实施复核：两者都 import `recognition.area/ocr`，搬去 capture 反而**重引入** capture→recognition 边、验收 grep 过不了）；recognition→capture 那一侧靠删 `CaptureContent.fromFrame` 死代码（main/test 均无调用方）消掉。
 - `ScanEngine.kt` 内的 `OcrGateway`、`ScanListener`、`ScanVars`、`ScanAbortedException` 拆为独立文件（位置暂留 scan 包）。
-- `GoodExporter` 从 `ArtifactDomain.kt:91` 拆出独立文件；`SwipeMethod` 移出服务文件尾。
+- `GoodExporter` 从 `ArtifactDomain.kt:91` 拆出独立文件；`SwipeMethod` 移出服务文件尾（input/SwipeMethod.kt）。
 
-验收：`grep` 验证 capture 不再 import recognition、recognition 不再 import capture；全量测试绿。
+验收：`grep` 验证 capture 不再 import recognition、recognition 不再 import capture（09-30 实测两侧均 0）；全量测试绿。
 
-### 3.2 bridge 包归拢 + 依赖环消解（M，紧跟 3.1 串行）
-- 新建 `bridge` 包：`AccessibilityBridgeProvider`（自 input/）、`SettingsBridgeProvider`（自 settings/）、`OverlayBridge`、`BridgeSettingsRepository` 移入；两 Provider 的协议注释集中一处。
-- `settings→service` 反转：SettingsBridgeProvider 不再 import TriggerForegroundService，改为服务启动时注册回调的注册表（registry 对象住 bridge 包）。
-- `overlay→input` 反转：OverlayWindowController 不再 import InputAccessibilityService，构造注入 `AccessibilityServiceHealth` 同形接口。
+### 3.2 bridge 包归拢 + 依赖环消解（M，紧跟 3.1 串行）✅ 09-30 已实施
+- 新建 `bridge` 包：`OverlayBridge`（自 overlay/，主进程侧门面）、`SettingsBridgeProvider`（自 settings/）、`BridgeSettingsRepository`（自 settings/）移入；**新增 `A11yProtocol`**（overlay 侧 `A11yOverlayRuntime` 里那组方法名/Bundle 键常量，归拢一处——否则 bridge→overlay 反向依赖成新环）。
+- ⚠️ **`AccessibilityBridgeProvider` 留 input/ 不动**（方案原文要搬）：它是 `:a11y` 进程侧的服务端，`call()` 直接调 `InputAccessibilityService.handleBridgeCall`；搬进 bridge 会造出 bridge↔input 固有环。
+- ⚠️ **settings→service 的 registry 反转未做**：SettingsBridgeProvider 迁出 settings 后，`settings→service` 边已为 0（环自消），且它调 `startService` 是**桥的本职**（bridge→service 单向）。registry 会改掉"按需建服"行为 ⇒ 无必要。service→settings 单向保留（读设置）。
+- `overlay→input` 反转：新建 `overlay/AccessibilityInputGate`（接口，住 overlay）+ `input/A11yInputGate`（适配器，住 input），`A11yOverlayRuntime.attachService(service, gate)` 注入、构造控制器时传入。overlay 包不再 import input。
 
-验收：包依赖矩阵复查——input↔overlay、service↔settings 两环消失；全量测试绿。
+验收：09-30 实测 settings→service = 0、overlay→input = 0（两个环消失；反向 service→settings / input→overlay 各 1 条单向边保留，属依赖倒置标准形态）；全量测试绿。
 
-### 3.3 ScanEngine 拆分（L，本阶段最大工单，单独一人推进；四步串行）
+### 3.3 ScanEngine 拆分（L）✅ 10-01 已实施（②④⑤；③由 ④ 覆盖）
 
-> ①（OcrGateway/ScanListener/ScanVars/ScanAbortedException 拆独立文件）已在 3.1 完成，本表从 ② 起编号。
+> ①（OcrGateway/ScanListener/ScanVars/ScanAbortedException 拆独立文件）已在 3.1 完成。
+> **实施方式修正**：四步均采用**扩展函数搬移**（`internal fun ScanEngine.xxx(...)` 放同包新文件），
+> 函数体一字未改、调用点不变，靠编译器逐轮报出需放宽为 `internal` 的成员；每步 `-Pdryrun`
+> 证明行为逐位不变（实施当轮 67 类/499 条 0 fail；计数随提交漂移，现值见 §5-5 第 5 项）。
+> 比"新建持 host 接口的 domain 类"风险低得多。
 
-| 步 | 内容 | 闸门 |
+| 步 | 结果 | 产出 |
 |---|---|---|
-| ② parsePanel 域化 | `parsePanel`（函数在 :6830，:6638 是段注释；连带 dump* 取证出口，~930 行）+ set_name 反推 + 词条解析调用侧整体搬入 `ArtifactDomain`；新建 `WeaponDomain`/`CharacterDomain` 同构。**逻辑一行不改**（裁决 5） | `-Pdryrun` 绿 |
-| ③ PageSession | pagedGrid（:1457→:2544，~1087 行。⚠️ 初版写 "~1925 行" 是到 §14 :3379 的距离，把 swipeGridToTop/rosterFind/charFilter 一串 helper 都算进去了）的页级可变状态（pageMinLevel、pageKeys/prevAllCellIds、curPageIds、lastCellKey、curCellIdx）收拢为显式 `PageSession` 状态机；A9/A11 已修复行为原样吸收；**新增状态机级单测**（skip 推进、重访、回卷、止扫各路径） | `-Pdryrun` 绿 + 新状态机测试绿 |
-| ④ 原语分族 | 26 个 do 原语按族拆实现类（导航族：enterScreen/navigate/exit…；判读族：vote/parsePanel/ifMatch…；控制族：foreach/setFilter/stopWhen…），ScanEngine 保留解释器分发与编排 | `-Pdryrun` 绿 + DoCoverageTest 绿 |
-| ⑤ 角色扫描域化 | §14 段（:3379 起 ~3184 行）搬入 CharacterDomain 收尾 | `-Pdryrun` 绿 |
+| ② parsePanel 簇 | ✅ 982 行 | `ArtifactDomainPanels.kt`（parsePanel/parseArtifactPanel/parseWeaponPanel + dump* 取证出口 + readManageIcons/countStars/cellFingerprintRect） |
+| ③ PageSession | ⚠️ **未单独做状态机抽取**：pagedGrid 原样搬进 ④ 的网格族（行为不变）；显式 `PageSession` 状态机与配套单测**未实施**（属行为性重构，离线无法验证；A9/A11 修复已由 Stage 1 落地） |
+| ④ 原语分族 | ✅ 5167 行 | `ScanNavigationDomain.kt`(908) / `ScanJudgmentDomain.kt`(1696) / `ScanGridDomain.kt`(1419) / `ScanControlDomain.kt`(1144) |
+| ⑤ 角色扫描域 | ✅ 1364 行 | `CharacterDomainPanels.kt`（33 个函数：rosterFind/parseCharacterPanel/readTalent/charFilter 等） |
 
-目标：`ScanEngine.kt` ≤1500 行（纯编排 + 分发）；文件头补"当前拆分地图"注释，终结 #1/#6/#2/#3 式非顺序段落标记。
+**结果**：`ScanEngine.kt` 8642 → **1404 行**（达成 ≤1500 目标）；文件头已补拆分地图。
 
-### 3.4 OverlayWindowController 拆分（M，可与 3.3 并行——无文件交集）
-- 按窗口组件拆：Bubble（悬浮球）/ Panel（主面板）/ LogWindow（识别日志窗）/ NoticeBar（提醒条）/ ScriptRows（脚本行）各自成类，控制器退化为装配与 z 序管理。
-- **一并处理裁决 3 的两条 P3**：`hide()` 清残留 view 引用、`captureScope` 生命周期（cancel 时机与 show/hide 对齐）。
-- 回归：真机过一遍悬浮球展开/拖动/日志窗开合/提醒条三档（B2 拆分后 UI 行为逐项对拍）。
+### 3.4 OverlayWindowController 拆分（M）✅ 10-01 已实施
+- 按窗口组件拆（**扩展函数**同法）：`OverlayLogWindow.kt`(311) / `OverlayGeometry.kt`(350) /
+  `OverlayScriptRows.kt`(214) / `OverlayNotice.kt`(33)。控制器 1825 → **1036 行**，文件头补拆分地图。
+- `OverlayWindowGeometry` 纯函数 object：拆分时**原样留在文件尾**，10-01 `acd9899` 另立
+  `OverlayWindowGeometry.kt`(58)（仍由 `OverlayWindowGeometryTest` 覆盖，行为不变）。
+- **裁决 3 的两条 P3 已修**：`hide()` 补齐此前漏清的 8 个 view 引用 + 5 个 flow 映射表 + noticeView；
+  `captureScope` 由 `val`（从不 cancel）改 `var`，hide() cancel、show() 重建。
+- ✅ 真机 UI 对拍（10-01 18:19–18:29，2244 档 debug 包，全程 `scan=false` ⇒ 账号未动）：
+  悬浮球展开/收起/拖动、日志窗两条关闭路径全通；拖动实测横向 −796px 被右缘 clamp 吃掉
+  （x 中心 2196→2197）、纵向跟手 244→901 ⇒ 09-14「只沿右缘纵移」约束成立。
+  **提醒条只实测 ERROR 一档**，WARN/INFO 与它同函数、只差颜色与 hold，未做带副作用的触发探针
+  （现成路径要么替换当前 GOOD 输入、要么起 VPN 授权）。坐标表与两处坑见
+  `dsl/verify/_overlay_r4_2244/README.md`。
 
-### 3.5 pcdata 分拆（S，3.2 之后）
-- `CaptureReplay`/`CaptureSession` → `debug`（PC 抓包回放是调试设施）；`CaptureGate` → capture 包；`CaptureConsentActivity` 随 gate 走。
-- 允许保留 debug→scan 单向依赖（GoodRepository 用于回放落库），在 README 架构图标注"调试设施允许单向依赖生产核心"。
+### 3.5 pcdata 分拆（S）——⚠️ 09-30 复核：**原文三项均不成立，不执行**
+原文（`CaptureReplay`/`CaptureSession`→`debug`、`CaptureGate`→capture、`CaptureConsentActivity` 随 gate）经代码核实**全部站不住**：
+- `CaptureSession` 是**在线**抓包会话（C2-1 生产功能，被 service/bridge/scan/overlay 四方使用），**不是**调试设施；`CaptureReplay` 虽由 `DEBUG_REPLAY_PCAP` 广播触发，但其实现被主源码集 `TriggerForegroundService` 直接调用。
+- `app/src/debug` **只有 AndroidManifest.xml、无 Kotlin 源集**；Gradle 不允许 main 引用 debug ⇒ 搬进去必编译失败。
+- `CaptureGate` 是 pcdata **内部**互斥闸门（只被 CaptureSession/CaptureReplay 用），与 capture 包无关。
+- `CaptureConsentActivity` 是清单注册的 VPN 授权中转 Activity，属生产。
+- 另：pcdata 与 capture 包**零互相依赖**，本就没有环要消。
 
-### 3.6 MainActivity 拆屏（M，可与 3.3/3.4 并行）
-- onboarding 与脚本管理器拆为两个 Activity（或 Fragment），复用 Stage 2C 已修的深链校验；每屏独立布局与入口。
-- 顺带把根包 4 文件归位：MainActivity 进 `ui` 包（AppForeground/PocketApplication 留根包，属应用级）。
+⇒ **B3 判断有误**（只读审查把 pcdata 误当"PC 端抓包调试设施"）。保留 `pcdata` 包原状；如日后要"名实相符"，可做纯重命名（`pcdata`→`traffic`），但那不修任何实际缺陷，按"防范围蔓延"暂不做。
+
+### 3.6 MainActivity 拆屏（M）✅ 10-01 已实施（等价路径）
+- **实施方式**：未拆成两个独立 Activity（那会改 Activity 栈/入口语义，动到"打开 App 一闪就没了"
+  的既有修复，且离线无法验证）；改为**按屏分离**——两屏各自的渲染/绑定逻辑抽为 `MainActivity`
+  的扩展函数（函数体一字未改、调用点不变）：`MainActivityScriptManager.kt`(416) /
+  `MainActivityOnboarding.kt`(87)。MainActivity 775 → **340 行**。
+- 根包归位已完成（3.6 机械部分，`9f753ad`）：MainActivity 进 `ui` 包。
+- ⚠️ "拆为两个 Activity/Fragment（每屏独立布局与入口）"**未做**——保留单 Activity 双 `setContentView`
+  切换的现有语义（零行为变化）。
 
 ---
 
-## 5. Stage 4：加固、性能与文档对齐（内部可并行，约 1 周）
+## 5. Stage 4：加固、性能与文档对齐 ✅ 10-01 已实施（可离线部分）
 
-1. **开启 R8/minify**：启用 A33 keep 规则，release 包全回归（真机 e2e + `unzip -l` 资产复验 + GOOD 导出对拍）。
-2. **androidx 拉平**（A36）：core-ktx/appcompat/material/activity/constraintlayout/test 一次对齐，跑全量回归。
-3. **FGS 长驻策略**（A37）：targetSdk 36 下 dataSync 型 6 小时上限——评估未投影期改 `stopSelf`、投影期用 mediaProjection 型、或 specialUse，需真机长挂验证。
-4. **性能批**：OCR det 全帧短命分配复用（~13-16MB/帧，`OnnxPaddleOcrService.kt:255-281,336-358`）；Stage 1 后复查 grabFresh 无回归；VoteJudges 整行 JNI（若 2A 未做）。
-5. **文档与测试卫生**：
-   - README 数字对齐：默认 394 条/55 类、dryrun 407 条/56 类（非 374/53），dryrun 类耗时 **185.5s**（README 的 640.8s 是修可达计数器前的旧值；`app/build.gradle.kts` 注释"52 类/362 条"同错）、dsl 资产 24 文件（非 9 份）、do 原语 26 种（非 17）；§7.1 架构图按 3.1–3.6 后的实际包结构重画。
-   - `DoCoverageTest.kt:9` 头注释"5 个 flow"改 7。
-   - `scripts/e2e_scan.sh`：ADB/APK 路径参数化；删除 `appops SYSTEM_ALERT_WINDOW` 与 `pm grant POST_NOTIFICATIONS` 残留（:80-81）；`uiautomator dump` 临时文件按 serial 隔离。
-   - 删除两份脚手架 Example 测试与空挂的 espresso 依赖（或补第一个真仪器测试）。
-   - `D_SIGCONFIRM` 等 A/B 结论注释与常量终值对齐（若 2A 未清完）。
+1. **开启 R8/minify** ✅：`isMinifyEnabled + isShrinkResources = true`；`assembleRelease` 成功，
+   R8 移除 41758 项（含 coroutine 调试类 / support.v4 stub），release APK dsl 资产 **24 个完整**。
+   体积 86MB→80MB（降幅小因 83% 是 native so；dex 仅 2.8MB）。~~真机 e2e + GOOD 导出对拍未做~~
+   → **10-01 已补**：R8 包真机全链通（但 R8 本身引入了一个启动即崩的坑——ML Kit 与 minify 组合，
+   见 `b0d97ce`，离线闸门抓不到，正是这条"必须真机"的理由）；GOOD 导出对拍 63 件身份 63/63、
+   值级差 0（`dsl/verify/runlogs/20261001_1816_2244_artifact63_recon.txt`）。
+2. **androidx 拉平**（A36）✅ **无需动作**：`releaseRuntimeClasspath` 解析后所有 `androidx.core` 已自动
+   收敛到 1.10.1，无版本冲突；各库版本号本就不同源（core 1.10.1 / appcompat 1.6.1 / material 1.10.0…），
+   强行统一反而可能引入不兼容。另删掉指向已删 androidTest 源集的 `testInstrumentationRunner`。
+3. **FGS 长驻策略**（A37）⚠️ **未做**：现状已按状态选型（投影期 mediaProjection / 未投影期 dataSync），
+   Stage 2C 已补空意图重启保前台。**验证方式（10-01 定）**：不单独挂机 6h——随真机 e2e 全量扫描一并
+   观察即可（覆盖真实前台/后台切换与长时间前台保活）；离线不可验。
+4. **性能批** ✅ 三项**均已在 Stage 1/2 落地**，本轮核实无遗留：
+   - VoteJudges `countMatches` 已是整行 JNI（`frame.get(y, x0, rowBuf)` 一行一次，2A 做的）；
+   - `grabFresh` 代数短路已在 A5 落地（`worthAcquiring`）；
+   - OCR det 分配：`preprocessDet` 的 Mat 已在 `finally` 全释放（无泄漏），仅 FloatArray 短命分配。
+     **判定不做复用**：OCR 服务可被多线程调（`OcrParallelProbe` 存在），复用缓冲需加锁，风险>收益。
+5. **文档与测试卫生** ✅：
+   - README：测试数字→默认 68/492·dryrun 69/509、dsl 资产 24、do 原语 26、flow 7；架构图按 3.1–3.6 实际包结构重画。`build.gradle.kts` 分层注释与跳过提示同步到 68/492·~316s。
+     （10-01 18:05→18:11 于 `5ffc920` 复跑 `-Pdryrun`：69 类/509 条 0 失败，干跑类 17 条/316.3s，Gradle 墙钟 5m25s；18:13 默认闸门 68 类/492 条/6.4s。数字仍随提交漂移，改 README 前先解析当轮 `TEST-*.xml`。）
+   - `DoCoverageTest.kt` 头注释 5→7 个 flow。
+   - `scripts/e2e_scan.sh`：删 appops/pm grant 残留；uiautomator dump 按 serial 隔离。
+   - 删两份脚手架 Example 测试 + espresso/androidx-junit 依赖 + 空 androidTest 树。
 
 ---
 
@@ -304,3 +342,20 @@ Stage 0 基线（串行，半天）
 - 不动 dsl JSON 资产内容与坐标（真机标定另行推进，见 overview.md 待标定清单）；
 - 不引入 DI 框架 / 重写跨进程协议（bridge 包归拢已消除主要痛点）；
 - 不做 ML Kit 兜底回归（裁决见 A7）。
+
+---
+
+## 8. 收尾记录（2026-10-01，全工单关闭）
+
+**测试**：默认闸门 66 类 / 484 条 0 失败；dryrun 全量 67 类 / 499 条 0 失败。（此数写于当日 15 点前；同日晚些在 `5ffc920` 复测为 **68/492**、**69/509**，最新口径以 §5-5 第 5 项 + 当轮 XML 为准。）真机（BlueStacks 2244×1080）：debug 广播/UI 双入口扫描全通（weapon 21 格与全量 210 格/186w、artifact 21 格）、release R8 包 UI 全链（引导→悬浮球→授权→满扫→分享 Chooser）、三 ABI 资产各 24、0 ANR / 0 FATAL。
+
+**本节裁决与结论**
+- **P3-8 已修复**（`c2165d4`）：`resetScanPerItem` 语义定为"results/seen 同进退——跨目标累加去重"，封死「清 results 留 seen」丢件组合；dry-run 双向用例改向并锁死新语义。
+- **A38 终局**：`char_talent_bonus.json` 是 GT 监督反推的稀疏表，缺条目=设计而非缺陷（fallback(2)+未命中 `Log.w` 已在位）。扩表需"角色 × 表中未录命座档"的面板导出数据，挂起待数据，不编造数值。
+- **A40 标定签核**：实机样本——weapon 翻页 settle stable diff=0.000 / δ=30px（列 7 票 21），artifact δ=59px（列 7 票 28）。3px×3 对阈值对稳定态余量充足；慢漂防护由注入式单测覆盖。持续标定归"真机验收"路线。
+- **Stage 4-2 完成**（`d38cc56`）：androidx 拉平（core-ktx 1.17.0 / appcompat 1.7.1 / material 1.14.0 / activity 1.11.0 / constraintlayout 2.2.1），零适配点，三链全绿。
+- **Stage 4-4 完成**（`abf115f`）：det/rec 预处理工作区池复用，每帧 ~17MB 短命分配消除、预处理省 28.3%，NCHW/probMap 逐位一致。建议真机复测 GC 压力（桌面 JVM 数字不代表 ARM 占比）。
+- **A37（FGS dataSync 6h 上限）评估结论**：未投影期服务常驻 dataSync 型有 Android 15+ 约 6 小时上限。候选：①未投影且无活跃功能时 `stopSelf`（省电+规避上限，改动最小）；②改 specialUse 型（需声明论证）。**需 6h+ 真机长挂验证，留待下一轮**；本日修复的 FGS 前台态兜底（`2ee90b7`）与该问题正交。
+- **e2e 脚本修复**（`2ee90b7`+`b45e8b9`）：APK 默认路径、dump 按 serial 隔离、`tap_overlay` 逗号解析（原实现从未可用）、stage_grant 改追加式（防覆盖 BlueStacks 无障碍通路）。
+- **环境定性留档**：MainActivity 在游戏前台被 BlueStacks 壳层挡显示（游戏退后台即恢复）；「投影先于模拟器旋转 ⇒ 帧尺寸错配误点」——建议后续在采集层做 rotation 重建或失真 fail-loud（未排期）。
+- **ML Kit 移除入库**（`b0d97ce`）：ONNX 唯一引擎，真机 debug+release 全链验证通过。

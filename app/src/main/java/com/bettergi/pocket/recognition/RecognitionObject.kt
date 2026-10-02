@@ -1,8 +1,12 @@
 package com.bettergi.pocket.recognition
 
-import com.bettergi.pocket.recognition.opencv.MatOps
+import com.bettergi.pocket.core.ColorConversion
+import com.bettergi.pocket.core.IntRect
+import com.bettergi.pocket.core.IntSize
+import com.bettergi.pocket.core.image.MatOps
 import org.opencv.core.Mat
 import kotlin.math.round
+import com.bettergi.pocket.core.ColorBgr
 
 class RecognitionObject {
     var recognitionType: RecognitionTypes = RecognitionTypes.None

@@ -1,19 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
+   ★ A30：数据提取规则（targetSdk 31+：云备份与设备迁移由本文件接管，
+   android:fullBackupContent 在 36 下只对 ≤Android 11 生效，两份都写全）。
+   取舍与 backup_rules.xml 一致：allowBackup="false" 整体关闭 + 此处对 cloud-backup 与
+   device-transfer 两个通道各域全排除（双保险）。device-transfer 原模板是注释掉的空段 ——
+   空段/缺省语义是"不过滤"（等于全量），必须显式写 exclude 才真正关死。
 -->
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
     </device-transfer>
-    -->
 </data-extraction-rules>

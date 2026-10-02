@@ -1,13 +1,33 @@
 package com.bettergi.pocket.scan
 
 import android.util.Log
-import com.bettergi.pocket.recognition.IntRect
+import com.bettergi.pocket.core.IntRect
 import com.bettergi.pocket.recognition.OcrText
 import com.bettergi.pocket.recognition.ocr.IOcrService
 import com.bettergi.pocket.recognition.ocr.OcrFactory
 import com.bettergi.pocket.recognition.ocr.UnavailableOcrService
-import com.bettergi.pocket.recognition.opencv.MatOps
+import com.bettergi.pocket.recognition.ocr.onnx.OnnxPaddleOcrService
+import com.bettergi.pocket.core.image.MatOps
 import org.opencv.core.Mat
+
+/**
+ * OCR 引擎不可用（未就绪 / 从未初始化）——与「图上没字」严格区分。
+ *
+ * ★ 2026-09-30（A7，optimization-plan-20260930 轨 E）：降档/重建窗口内
+ * （[com.bettergi.pocket.recognition.ocr.onnx.OnnxOcrEngine] 换 EP 档、intra 重开，
+ * 或首启后台预热未完成）`ready=false`，旧网关把这一状态当成「OCR 结果为空」写进扫描数据
+ * ——静默脏数据比显式失败更难查。方案裁决：**不做**静默 ML Kit 兜底（该注释声称的降级
+ * 从未实现），一律 loud 失败。
+ *
+ * 异常落点（ScanEngine 现状，2026-09-30 只读核查）：
+ * - 主解析路径（parsePanel → parseWeaponPanel/parseArtifactPanel、ocrWithRetry 等**无本地
+ *   catch** 的调用点）：异常穿过 executeStep（只有 finally）抛出 ScanEngine.run()，
+ *   由 ScriptRunner `catch (Exception)` 记 "scan failed" 并导出已识别部分 —— **loud**；
+ * - 少数本地吞异常的调用点（parseCharacterPanel 的函数级 catch、重读循环/页签判据的
+ *   runCatching）会把本异常降级为「该格跳过/放弃重读」——已汇报主线，集成时对这些
+ *   catch 放行本异常（一行级改动，见工单汇报）。
+ */
+class OcrUnavailableException(message: String) : Exception(message)
 
 /**
  * OcrGateway 实现（ScanEngine 不感知具体引擎——方案 P1 验收
@@ -19,8 +39,31 @@ import org.opencv.core.Mat
  * 分发策略（审计建议 #1）：按 [IOcrService.hasFastRecOnlyBatch] 选择单槽路径——
  * - ONNX：recognizeRois（rec-only，跳过整帧 det），每槽 ~2ms vs 全管线 ~44ms；
  * - ML Kit（待移除）：原逐槽 recognizeText，保留 <80px 2x 放大增强（见 recognizeText 注释）。
+ *
+ * ★ 2026-09-30（A7）：所有入口在调 OCR 前过 [requireReady] 闸门 —— 引擎没就绪 ≠ 图上没字，
+ *   前者抛 [OcrUnavailableException]，后者才是空结果。
+ *   TOCTOU 说明：闸门检查与推理之间 ready 理论上可翻转（降档恰在两步之间），此时引擎层
+ *   run 返回空数组作最后防御；窗口为秒级重建的极小截面，不值得为此加跨层锁。
+ *
+ * @param serviceProvider 服务源；默认全局 [OcrFactory]，构造注入仅为 JVM 单测能替换引擎桩。
  */
-class OcrGatewayImpl : OcrGateway {
+class OcrGatewayImpl(
+    private val serviceProvider: () -> IOcrService = { OcrFactory.default },
+) : OcrGateway {
+
+    /** A7 可用性闸门：只区分「引擎不可用（抛）」与「放行」。 */
+    private fun requireReady(service: IOcrService) {
+        when {
+            service is UnavailableOcrService ->
+                throw OcrUnavailableException(
+                    "OCR 引擎未初始化（OcrFactory 仍为 UnavailableOcrService；ScriptRunner 应在开跑前查 OcrFactory.available）",
+                )
+            service is OnnxPaddleOcrService && !service.ready ->
+                throw OcrUnavailableException(
+                    "ONNX OCR 引擎未就绪（EP 降档/重建窗口或首启预热未完成，tier=${service.tierLabel}）",
+                )
+        }
+    }
 
     /**
      * 只读计时包装（2026-09-12 探针）：把一次网关调用的耗时累计进 [PerfProbe]。
@@ -36,7 +79,9 @@ class OcrGatewayImpl : OcrGateway {
     }
 
     override suspend fun readNumber(frame: Mat, rect: FrameRect): Int? = timedOcr {
-        val text = recognizeText(frame, rect) ?: return@timedOcr null
+        val service = serviceProvider()
+        requireReady(service)
+        val text = recognizeText(frame, rect, service) ?: return@timedOcr null
         // "圣遗物 1026/2400" → 斜杠前数字；无斜杠取最后一个数字
         val cleaned = StatParser.clean(text)
         val slash = Regex("(\\d+)\\s*/\\s*\\d+").find(cleaned)
@@ -46,16 +91,22 @@ class OcrGatewayImpl : OcrGateway {
     }
 
     override suspend fun readLines(frame: Mat, rects: List<FrameRect>): List<String> = timedOcr {
-        rects.mapNotNull { rect -> recognizeText(frame, rect)?.takeIf { it.isNotBlank() } }
+        val service = serviceProvider()
+        requireReady(service)
+        rects.mapNotNull { rect -> recognizeText(frame, rect, service)?.takeIf { it.isNotBlank() } }
     }
 
     /**
      * 批量槽位读取：rec-only 引擎（ONNX）走一次 recognizeRois（N 个 rec 推理，~2ms/槽）；
      * ML Kit 逐槽原路径（含 <80px 2x 放大）。返回与 rects 一一对应，blank 保留为空串。
+     *
+     * ★ 2026-09-30（A7）：旧实现 `service is UnavailableOcrService` / 引擎未就绪时返回
+     *   `rects.map { "" }` —— 把「没引擎」冒充「没字」写进扫描数据，已改为抛
+     *   [OcrUnavailableException]（loud）。空串现在只可能来自真的识别不到文本。
      */
     override suspend fun readRois(frame: Mat, rects: List<FrameRect>): List<String> = timedOcr {
-        val service = OcrFactory.default
-        if (service is UnavailableOcrService) return@timedOcr rects.map { "" }
+        val service = serviceProvider()
+        requireReady(service)
         if (frame.cols() <= 0 || frame.rows() <= 0) return@timedOcr rects.map { "" }
         if (service.hasFastRecOnlyBatch) {
             service.recognizeRois(frame, rects.map { it.toIntRect() })
@@ -68,13 +119,11 @@ class OcrGatewayImpl : OcrGateway {
     /**
      * 单槽文本，按引擎能力分发。
      *
-     * ⚠️ <80px 2x 放大**不能**挪进 MlKitOcrService.recognize：ImageRegion 的 OcrMatch
+     * ⚠️ <80px 2x 放大**不能**挪进 IOcrService.recognize：ImageRegion 的 OcrMatch
      * 直接消费 recognize 返回的 region 坐标（放大后坐标会错位），所以放大只能留在
      * 这里这条「只要文本不要坐标」的路径上。
      */
-    private fun recognizeText(frame: Mat, rect: FrameRect): String? {
-        val service = OcrFactory.default
-        if (service is UnavailableOcrService) return null
+    private fun recognizeText(frame: Mat, rect: FrameRect, service: IOcrService): String? {
         if (frame.cols() <= 0 || frame.rows() <= 0) return null
         if (service.hasFastRecOnlyBatch) {
             // rec-only：PP-OCR rec 以 48px 高为工作点，无需预放大

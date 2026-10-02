@@ -8,7 +8,6 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -23,6 +22,7 @@ import android.view.accessibility.AccessibilityEvent
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.bettergi.pocket.bridge.A11yProtocol
 import com.bettergi.pocket.genshin.GenshinPackages
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -34,7 +34,7 @@ class InputAccessibilityService : AccessibilityService() {
         notifyStateChanged()
         // 2026-09-18 宿主迁移：登记悬浮窗运行时的宿主服务。**此处不上窗** ——
         // 「什么时候显示」仍由主进程前台服务决定（收到 overlay_show 才构建控制器）。
-        com.bettergi.pocket.overlay.A11yOverlayRuntime.attachService(this)
+        com.bettergi.pocket.overlay.A11yOverlayRuntime.attachService(this, DefaultAccessibilityInputGate)
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -43,6 +43,10 @@ class InputAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        // ★ P3：BAL 探针是静态 View 持服务上下文 —— 服务销毁时把窗口摘下来并清引用，
+        //   否则窗口随 WindowManager 泄漏一个已销毁的 service 实例（探针本是一次性诊断设施）。
+        //   ⚠️ 必须在 clearInstance 之前：unmount 要用 instance 取 WindowManager。
+        unmountBalProbeOverlay()
         clearInstance()
         super.onDestroy()
     }
@@ -75,15 +79,9 @@ class InputAccessibilityService : AccessibilityService() {
         const val DEFAULT_PROMPT = "请开启无障碍权限，才能模拟点击"
         const val CRASHED_PROMPT = "无障碍服务已异常，请先关闭再重新打开"
         const val ACTION_STATE_CHANGED = "com.bettergi.pocket.action.ACCESSIBILITY_CHANGED"
-        private const val AUTHORITY_SUFFIX = ".a11y"
-        private const val METHOD_STATUS = "status"
-        private const val METHOD_CLICK = "click"
-        private const val METHOD_SWIPE = "swipe"
-        private const val METHOD_SCAN_PROGRESS = "scan_progress"
-        private const val METHOD_PROBE = "probe"
-        private const val METHOD_PROBE_BAL = "probe_bal"
+        // 工单 D：authority 后缀 / method 名收口到 bridge/A11yProtocol（值逐字不变），
+        // 本类只 import；Bundle 键仍留此处（与 handleBridgeCall 同文件成对维护）。
         private const val KEY_MOUNT_OVERLAY = "mount_overlay"
-        private const val METHOD_BACK = "back"
         private const val KEY_TEXT = "text"
         private const val KEY_CONNECTED = "connected"
         private const val KEY_LAST_PACKAGE = "last_package"
@@ -285,7 +283,7 @@ class InputAccessibilityService : AccessibilityService() {
                 putInt(KEY_Y, y)
                 putLong(KEY_DURATION, durationMs)
             }
-            return remoteCall(METHOD_CLICK, extras)?.getBoolean(KEY_OK, false) == true
+            return remoteCall(A11yProtocol.M_CLICK, extras)?.getBoolean(KEY_OK, false) == true
         }
 
         /**
@@ -319,7 +317,7 @@ class InputAccessibilityService : AccessibilityService() {
          */
         fun back(): Boolean {
             if (instance != null) return backLocal()
-            return remoteCall(METHOD_BACK, null)?.getBoolean(KEY_OK, false) == true
+            return remoteCall(A11yProtocol.M_BACK, null)?.getBoolean(KEY_OK, false) == true
         }
 
         private fun backLocal(): Boolean {
@@ -372,28 +370,28 @@ class InputAccessibilityService : AccessibilityService() {
                 //   靠这条 extra 才能跨过进程桥，修前这条日志根本不会出现。
                 putString(KEY_METHOD, methodKey(method))
             }
-            return remoteCall(METHOD_SWIPE, extras)?.getBoolean(KEY_OK, false) == true
+            return remoteCall(A11yProtocol.M_SWIPE, extras)?.getBoolean(KEY_OK, false) == true
         }
 
         fun handleBridgeCall(method: String, extras: Bundle?): Bundle {
             return when (method) {
-                METHOD_BACK -> Bundle().apply {
+                A11yProtocol.M_BACK -> Bundle().apply {
                     putBoolean(KEY_OK, backLocal())
                 }
-                METHOD_STATUS -> Bundle().apply {
+                A11yProtocol.M_STATUS -> Bundle().apply {
                     putBoolean(KEY_CONNECTED, instance != null)
                     putString(KEY_LAST_PACKAGE, lastAppPackage)
                 }
-                METHOD_SCAN_PROGRESS -> Bundle().apply {
+                A11yProtocol.M_SCAN_PROGRESS -> Bundle().apply {
                     putBoolean(KEY_OK, pushScanProgressLocal(extras?.getString(KEY_TEXT) ?: ""))
                 }
-                METHOD_PROBE -> Bundle().apply {
+                A11yProtocol.M_PROBE -> Bundle().apply {
                     putBoolean(KEY_OK, toggleProbeOverlay())
                 }
-                METHOD_PROBE_BAL -> Bundle().apply {
+                A11yProtocol.M_PROBE_BAL -> Bundle().apply {
                     putBoolean(KEY_OK, probeBalLocal(extras?.getBoolean(KEY_MOUNT_OVERLAY, true) ?: true))
                 }
-                METHOD_CLICK -> Bundle().apply {
+                A11yProtocol.M_CLICK -> Bundle().apply {
                     putBoolean(
                         KEY_OK,
                         clickLocal(
@@ -403,7 +401,7 @@ class InputAccessibilityService : AccessibilityService() {
                         ),
                     )
                 }
-                METHOD_SWIPE -> Bundle().apply {
+                A11yProtocol.M_SWIPE -> Bundle().apply {
                     putBoolean(
                         KEY_OK,
                         swipeLocal(
@@ -815,17 +813,17 @@ class InputAccessibilityService : AccessibilityService() {
         /**
          * 挂/卸探针（主进程入口）。
          * ⚠️ View 不能跨进程——:a11y 小窗必须在 :a11y 进程内构建。
-         * 主进程仅发 METHOD_PROBE 指令，:a11y 进程桥内构建并挂载视图（P2 跨进程视图模式验证）。
+         * 主进程仅发 A11yProtocol.M_PROBE 指令，:a11y 进程桥内构建并挂载视图（P2 跨进程视图模式验证）。
          */
         fun toggleProbe(context: Context): Boolean {
             if (instance != null) return toggleProbeOverlay()
-            return remoteCall(METHOD_PROBE, Bundle())?.getBoolean(KEY_OK, false) == true
+            return remoteCall(A11yProtocol.M_PROBE, Bundle())?.getBoolean(KEY_OK, false) == true
         }
 
         /**
          * 挂/卸 A11y Overlay 探针（:a11y 进程内执行）：色块 + 扫描进度行。
          * 真机在原神上方能看到 = P2「零权限悬浮窗」核心假设成立；
-         * 进度行经 METHOD_SCAN_PROGRESS 桥从主进程实时更新 = 跨进程状态桥机制验证。
+         * 进度行经 A11yProtocol.M_SCAN_PROGRESS 桥从主进程实时更新 = 跨进程状态桥机制验证。
          */
         private fun toggleProbeOverlay(): Boolean {
             val service = instance ?: return false
@@ -920,7 +918,7 @@ class InputAccessibilityService : AccessibilityService() {
         fun probeBal(context: Context, mount: Boolean): Boolean {
             if (instance != null) return probeBalLocal(mount)
             val extras = Bundle().apply { putBoolean(KEY_MOUNT_OVERLAY, mount) }
-            return remoteCall(METHOD_PROBE_BAL, extras)?.getBoolean(KEY_OK, false) == true
+            return remoteCall(A11yProtocol.M_PROBE_BAL, extras)?.getBoolean(KEY_OK, false) == true
         }
 
         private fun probeBalLocal(mount: Boolean): Boolean {
@@ -969,9 +967,24 @@ class InputAccessibilityService : AccessibilityService() {
                 y = 300
             }
             val ok = attachA11yView(container, lp)
-            balProbeView = container
+            // ★ P3：只在挂载**成功**时赋值 —— 原先无条件赋值，attachA11yView 失败（窗口令牌异常等）
+            //   也会把失败的花壳存进静态字段，泄漏服务上下文且 unmount 会去 removeView 一个没挂的 view。
+            if (ok) balProbeView = container
             Log.i(TAG, "bal-probe: overlay mounted=$ok（type=TYPE_ACCESSIBILITY_OVERLAY, 可点击）")
             return ok
+        }
+
+        /**
+         * ★ P3：BAL 探针的卸载路径。摘掉窗口并把静态引用清空（此前全文件没有任何卸载，
+         *   静态 View 一直持着服务上下文）。服务 onDestroy 时调用；重复调用幂等。
+         */
+        private fun unmountBalProbeOverlay() {
+            val service = instance ?: return
+            val view = balProbeView ?: return
+            balProbeView = null
+            runCatching {
+                (service.getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(view)
+            }.onFailure { Log.w(TAG, "bal-probe unmount failed", it) }
         }
 
         private fun balTryStart(service: AccessibilityService, why: String) {
@@ -986,14 +999,29 @@ class InputAccessibilityService : AccessibilityService() {
             }
         }
 
-        /** 主进程 → :a11y 推送扫描进度文本（probe 挂载时更新进度行；本地直调/远程桥双路径）。 */
+        /**
+         * 主进程 → :a11y 推送扫描进度文本（probe 挂载时更新进度行；本地直调/远程桥双路径）。
+         * ★ A26：远程路径改异步 fire-and-forget —— 本函数在扫描期的主线程（scanListener 的
+         * mainHandler）被逐 tick 调用，同步 binder 会在 :a11y 忙时拖住主进程主线程。探针进度行
+         * 只显示"最新一条"，无需确认；改在单线程执行器上发（保序、后到覆盖先到）。
+         * 返回值由"对端是否受理"变为"是否已入队"（唯一调用方 TriggerForegroundService 忽略返回值）。
+         * 本地路径（:a11y 进程内直调）保持同步——没有 IPC，直接 view.post 即可。
+         */
         fun pushScanProgress(text: String): Boolean {
             if (instance != null) {
                 probeProgressView?.post { probeProgressView?.text = text }
                 return probeProgressView != null
             }
             val extras = Bundle().apply { putString(KEY_TEXT, text) }
-            return remoteCall(METHOD_SCAN_PROGRESS, extras)?.getBoolean(KEY_OK, false) == true
+            progressPushExecutor.execute {
+                remoteCall(A11yProtocol.M_SCAN_PROGRESS, extras)
+            }
+            return true
+        }
+
+        /** 扫描进度推送的执行器：单线程（保序）+ daemon（不拦进程退出）。 */
+        private val progressPushExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "a11y-progress-push").apply { isDaemon = true }
         }
 
         private fun pushScanProgressLocal(text: String): Boolean {
@@ -1042,20 +1070,16 @@ class InputAccessibilityService : AccessibilityService() {
             }
         }
 
-        private fun remoteStatus(): Bundle? = remoteCall(METHOD_STATUS)
+        private fun remoteStatus(): Bundle? = remoteCall(A11yProtocol.M_STATUS)
 
         private fun remoteCall(method: String, extras: Bundle? = null): Bundle? {
             val ctx = appContext ?: return null
             return try {
-                ctx.contentResolver.call(bridgeUri(ctx), method, null, extras)
+                ctx.contentResolver.call(A11yProtocol.a11yUri(ctx), method, null, extras)
             } catch (e: Exception) {
                 Log.e(TAG, "remoteCall failed: $method", e)
                 null
             }
-        }
-
-        private fun bridgeUri(context: Context): Uri {
-            return Uri.parse("content://${context.packageName}$AUTHORITY_SUFFIX")
         }
 
         private const val ACTION_ACCESSIBILITY_DETAILS_SETTINGS =
@@ -1064,6 +1088,3 @@ class InputAccessibilityService : AccessibilityService() {
         private const val EXTRA_SHOW_FRAGMENT_ARGS = ":settings:show_fragment_args"
     }
 }
-
-/** 翻页滑动实现方式：三段式（3-stroke continueStroke 链）/ 路标链（9-waypoint continueStroke 链）。 */
-enum class SwipeMethod { THREE_SEGMENT, WAYPOINT_CHAIN }

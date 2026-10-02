@@ -10,6 +10,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
+import com.bettergi.pocket.core.IntRect
+import com.bettergi.pocket.core.IntSize
 
 class ReferenceSearchTest {
     @Test

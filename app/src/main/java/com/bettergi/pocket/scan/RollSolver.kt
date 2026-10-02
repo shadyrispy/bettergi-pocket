@@ -69,6 +69,12 @@ object RollSolver {
         val initialSubstatCount: Int,
         val totalRolls: Int,
         /**
+         * ★ A18：解出所用的等级候选（原值或 +10）。`level+10` 解出时它与调用方 OCR 读到的
+         * `level` 不同 —— 导出必须用本值，否则 `level` 与 `totalRolls`（= init + solvedLevel/4）
+         * 字段自相矛盾（GT 对账必炸）。
+         */
+        val solvedLevel: Int,
+        /**
          * 解出的**已激活词条条数**（= `substats` 里 `inactive == false` 的条数）。
          *
          * ⚠️ 2026-09-16 更正（GT 实测定案）：`+0` 且 `init < maxInit` 时游戏在词条块**末尾多显示
@@ -173,7 +179,13 @@ object RollSolver {
                         )
                     }
                 }
-                return Solution(solved, init, solveTotal, expectedActive)
+                return Solution(
+                    substats = solved,
+                    initialSubstatCount = init,
+                    totalRolls = solveTotal,
+                    solvedLevel = lv,
+                    activeCount = expectedActive,
+                )
             }
         }
         return null

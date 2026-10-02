@@ -3,7 +3,7 @@ package com.bettergi.pocket.input
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.bettergi.pocket.overlay.OverlayBridge
+import com.bettergi.pocket.bridge.OverlayBridge
 
 /**
  * 动作原语执行端（dispatchGesture 收敛在 :a11y / 本地服务双路径，见 InputAccessibilityService）。
@@ -45,7 +45,7 @@ class AccessibilityAutomationController(
             }
             if (needPassthrough) {
                 mainHandler.removeCallbacks(restorePassthrough)
-                mainHandler.postDelayed(restorePassthrough, durationMs + RESTORE_TOUCH_DELAY_MS)
+                mainHandler.postDelayed(restorePassthrough, passthroughRestoreDelayMs(durationMs))
             }
             onActionCompleted?.invoke()
         }
@@ -83,14 +83,35 @@ class AccessibilityAutomationController(
             }
             if (needPassthrough) {
                 mainHandler.removeCallbacks(restorePassthrough)
-                mainHandler.postDelayed(restorePassthrough, totalMs + RESTORE_TOUCH_DELAY_MS)
+                mainHandler.postDelayed(restorePassthrough, passthroughRestoreDelayMs(totalMs))
             }
             onActionCompleted?.invoke()
         }
     }
 
+    /**
+     * 穿透还原延时 = 手势名义时长（抬高到 [MIN_GESTURE_STROKE_MS]）+ [PASSTHROUGH_RESTORE_SLACK_MS]。
+     *
+     * ⚠️ 约束：还原点必须**晚于 a11y 手势的实际 UP 注入** —— 手势还在跑就把悬浮窗恢复可触摸，
+     * 落在窗口上的 UP 会被自家窗吃掉 ⇒ 游戏只见 DOWN 无 UP ⇒ 不触发 click。
+     * 下限 120ms 的出处：clickLocal 把 stroke 强制 `durationMs.coerceAtLeast(120L)`
+     * （真机标定：零位移短按在 EMUI + 原神背包详情上不可靠），故 durationMs=50 的
+     * ClickAction 实际手势时长也是 120ms；余量 600ms 对齐 scan/ScriptRunner.PASSTHROUGH_RESTORE_SLACK_MS
+     * （那边是 private 常量，无法直接引用，只能复制量级）—— dispatchGesture 受理与逐段续排均异步，
+     * 名义时长 ≠ 实际结束点，窗口晚几百毫秒恢复可点的代价远小于吞掉一次有效点击。
+     * swipe 同走本函数：单段名义时长 = durationMs（服务侧仅 coerceAtLeast(1L)），
+     * 三段式 = SWIPE_TOTAL_MS；下限只会把还原再往后推，方向安全。
+     */
+    private fun passthroughRestoreDelayMs(gestureDurationMs: Long): Long =
+        gestureDurationMs.coerceAtLeast(MIN_GESTURE_STROKE_MS) + PASSTHROUGH_RESTORE_SLACK_MS
+
     private companion object {
         const val TAG = "BetterGI.Input"
-        const val RESTORE_TOUCH_DELAY_MS = 40L
+
+        /** 手势实际时长下限 = clickLocal 的 stroke 下限（`durationMs.coerceAtLeast(120L)`）。 */
+        const val MIN_GESTURE_STROKE_MS = 120L
+
+        /** 还原宽放余量，量级对齐 scan/ScriptRunner.PASSTHROUGH_RESTORE_SLACK_MS。 */
+        const val PASSTHROUGH_RESTORE_SLACK_MS = 600L
     }
 }

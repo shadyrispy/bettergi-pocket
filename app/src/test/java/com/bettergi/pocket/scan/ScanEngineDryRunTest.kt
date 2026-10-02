@@ -158,6 +158,17 @@ class ScanEngineDryRunTest {
         val firstCellNameStuck: Boolean = false,
         /** 入口链的点击数（`clicks.size` 用它区分"前置链点击"与"第一个格"）。 */
         val entryClicks: Int = 0,
+        /**
+         * ★ A11 夹具：**面板冻结注入**。`N > 0` 时第 2..N+1 格的第一次抓帧返回**上一格保存帧的克隆**
+         * （模拟：点格后详情面板停在上格、面板指纹闸门等待期间才渲染出新面板）。
+         * OCR 夹具按**帧身份**回放该帧被抓时的面板内容 —— 真机上解析旧帧读到的就是旧面板，
+         * 这是对"闸门等到了新帧、解析却用旧帧 ⇒ contentKey 撞已入库件被去重吞掉"的最贴近注入。
+         * 局限（真机差异）：真机的"冻结"是像素级渲染停滞，本夹具靠帧身份侧信道复放旧内容；
+         * 判稳信号/点击时序仍由引擎真实代码驱动。
+         */
+        val freezeCells: Int = 0,
+        /** A10 夹具：weapon_backpack 面板的名字 OCR 回放（须为 good_names 词典内的武器名）。 */
+        val weaponNames: List<String>? = null,
     ) {
         var pageIndex = 0
             private set
@@ -171,6 +182,9 @@ class ScanEngineDryRunTest {
         private val NAME_RECT = FrameRect(2230, 220, 2630, 270)
         private val SUB0_RECT = FrameRect(2230, 794, 2990, 848)
         private val SUB0_RECT_CRAFTED = FrameRect(2230, 857, 2990, 911)
+        // ★ A10：weapon_backpack 面板的 name/level ROI（profiles.json 3200 基坐标，calibrate 后不变）
+        private val WEAPON_NAME_RECT = FrameRect(2221, 214, 2728, 273)
+        private val WEAPON_LEVEL_RECT = FrameRect(2210, 709, 2455, 763)
         /** 当前「面板名」= 由**最后一次点击坐标**决定：同一格跨页同名（去重可判），
          *  且不受遍历前链式点击影响。初始值供首次点击前读取。 */
         private var lastNameCell = "晨光的明誓#0"
@@ -180,6 +194,14 @@ class ScanEngineDryRunTest {
 
         // readNumber 可编程脚本（onZero 重试等按次序变化场景）；空则回退页静态值
         val numberScript = ArrayDeque<Int?>()
+
+        // ── A11 冻结注入状态 ──
+        /** 帧身份 → 该帧被抓时的 (格序, 面板名)。OCR 夹具据此回放"这一帧里显示的是哪一格"。 */
+        private val frameOcrState = HashMap<Int, Pair<Int, String>>()
+        /** 第 i 格 post-click 帧的克隆（第 i+1 格的"冻结面板"素材）。 */
+        private val frozenFrames = HashMap<Int, Mat>()
+        /** 已服务到的最大冻结格序（每格只在 visit 的第一帧服务一次）。 */
+        private var servedFreezes = 0
 
         val frameSource = object : FrameSource {
             /**
@@ -191,6 +213,22 @@ class ScanEngineDryRunTest {
              *   且避开全部像素判据区（锁 2811..2845、收藏 2900..2947、星带 y599..640、祝圣点 y703）。
              */
             override suspend fun grabFresh(afterTimestampMs: Long, timeoutMs: Long): Mat {
+                // ★ A11：冻结服务 —— 第 k 格（k ∈ 1..freezeCells）visit 的第一次抓帧返回
+                //   第 k−1 格保存帧的**新克隆**（旧克隆会被引擎释放，故每次服务都克隆）。
+                //   重访（定点重读）也照常服务 ⇒ 冻结场景下重访救不回（与真机页级冻结一致）。
+                if (freezeCells > 0) {
+                    val visitingCell = clicks.size - entryClicks - 1
+                    if (visitingCell in 1..freezeCells && servedFreezes < visitingCell &&
+                        frozenFrames.containsKey(visitingCell - 1)
+                    ) {
+                        servedFreezes = visitingCell
+                        val src = frozenFrames.getValue(visitingCell - 1)
+                        val clone = src.clone()
+                        frameOcrState[System.identityHashCode(clone)] =
+                            frameOcrState.getValue(System.identityHashCode(src))
+                        return clone
+                    }
+                }
                 val m = pages[pageIndex].frame.clone()
                 val tick = clicks.size
                 // ⚠️ harness 是**嵌套类**（非 inner）⇒ 拿不到外层测试类的 rect 辅助函数，直接调 Imgproc
@@ -201,6 +239,17 @@ class ScanEngineDryRunTest {
                     org.opencv.core.Scalar(0.0, 0.0, 255.0),
                     -1,
                 )
+                if (freezeCells > 0) {
+                    frameOcrState.putIfAbsent(System.identityHashCode(m), cellIdx to lastNameCell)
+                    val visitingCell = clicks.size - entryClicks - 1
+                    // 第 k 格 post-click 的第一帧 = 它的 ctx 收敛帧 ⇒ 存为下一格的冻结素材
+                    if (visitingCell in 0 until freezeCells && !frozenFrames.containsKey(visitingCell)) {
+                        val saved = m.clone()
+                        frozenFrames[visitingCell] = saved
+                        // 克隆是新对象 ⇒ 帧状态映射要**同帧登记**（服务/重访时按克隆身份回放）
+                        frameOcrState[System.identityHashCode(saved)] = cellIdx to lastNameCell
+                    }
+                }
                 return m
             }
 
@@ -263,9 +312,17 @@ class ScanEngineDryRunTest {
                     // ★ 2026-09-16（用户定稿"名字不能作为去重依据"后）：**名字出键** ⇒ 夹具若仍只靠
                     //   名字区分 21 格，去重会把它们并成 1 件（判据失真）⇒ 这里让 **sub0 也随之变化**
                     //   （由同一点击坐标派生 ⇒ 同一格跨页取同值、不同格不同值，与真实"每件词条不同"一致）。
-                    val sub0 = "暴击率+%.1f%%".format(5.4 + cellIdx * 0.1) // 每格一个不同值（$CELLS_PER_PAGE 格/页）
+                    // ★ A11：**按帧身份回放** —— 冻结帧（上一格保存帧的克隆）在真机里 OCR 读到的就是
+                    //   旧面板 ⇒ 这里按帧被抓时的 (格序, 名字) 回放，使"解析旧帧 ⇒ 读到旧内容"成立。
+                    //   未注入冻结时映射为空 ⇒ 与原行为逐位一致（cellIdx/lastNameCell 直取）。
+                    val st = frameOcrState[System.identityHashCode(frame)]
+                    val stateCell = st?.first ?: cellIdx
+                    val stateName = st?.second ?: lastNameCell
+                    val sub0 = "暴击率+%.1f%%".format(5.4 + stateCell * 0.1) // 每格一个不同值（$CELLS_PER_PAGE 格/页）
                     when (r) {
-                        NAME_RECT -> lastNameCell
+                        NAME_RECT -> stateName
+                        WEAPON_NAME_RECT -> weaponNames?.getOrNull(stateCell % weaponNames.size)
+                        WEAPON_LEVEL_RECT -> "Lv.90"
                         SUB0_RECT, SUB0_RECT_CRAFTED -> sub0
                         else -> pages[pageIndex].ocrLines[r]
                     }
@@ -316,6 +373,28 @@ class ScanEngineDryRunTest {
         return base
     }
 
+    /**
+     * ★ A10：weapon_scan 干跑的静态 OCR 行。名字/等级由 [Harness] 按**格序**回放
+     * （[Harness.WEAPON_NAME_RECT] / [Harness.WEAPON_LEVEL_RECT]），这里只放位置静态的字段：
+     *   · titleBar：weapon_scan 两段 enterScreen 的锚点（第一段 expect「背包」、第二段 expect「武器」）；
+     *   · count [2603,60,2846,98]：readCount 走 readNumber 夹具（ocrNumber），不消费本行 —— 仅备查。
+     */
+    private fun weaponLines(): Map<FrameRect, String> = mapOf(
+        FrameRect(157, 21, 1084, 136) to "背包/武器",
+        FrameRect(2603, 60, 2846, 98) to "武器 ${CELLS_PER_PAGE}/${CELLS_PER_PAGE}",
+    )
+
+    /** ★ A10：从 good_names.json 取 CELLS_PER_PAGE 个真实武器名（词典必命中 ⇒ key != null）。 */
+    private fun weaponDictNames(): List<String> {
+        val arr = JSONObject(File(assetsDir(), "tools/good_names.json").readText())
+            .getJSONArray("weapons")
+        val names = (0 until arr.length())
+            .map { arr.getJSONObject(it).getString("zh") }
+            .distinct()
+        check(names.size >= CELLS_PER_PAGE) { "词典武器名不足 $CELLS_PER_PAGE 个" }
+        return names.take(CELLS_PER_PAGE)
+    }
+
     private data class RunResult(
         val engine: ScanEngine,
         val harness: Harness,
@@ -331,6 +410,16 @@ class ScanEngineDryRunTest {
         foregroundOk: (() -> Boolean?)? = null,
         /** #48：把第一个格做成"名字不变"，用来逼出名字路径的**首格豁免**分支。 */
         firstCellNameStuck: Boolean = false,
+        /** ★ A10：flow 文件（weapon_scan 回归用）；默认仍是 artifact_scan。 */
+        flowFile: String = "flows/artifact_scan.json",
+        /** ★ A9：flow JSON 变换（干跑注入 pageSkip 等；不改 assets 原文件）。 */
+        flowTransformer: ((JSONObject) -> Unit)? = null,
+        /** ★ A11：面板冻结注入格数（见 [Harness.freezeCells]）。 */
+        freezeCells: Int = 0,
+        /** ★ A10：weapon 面板名字回放表（须为 good_names 词典内武器名）。 */
+        weaponNames: List<String>? = null,
+        /** ★ P3-8：外部注入 plan（foreach over $plan 用；配合 flowTransformer 包 foreach）。 */
+        plan: List<JSONObject>? = null,
     ): RunResult {
         // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
@@ -341,7 +430,8 @@ class ScanEngineDryRunTest {
         TimingOverrides.entryIdempotent = false
         val profile = ScreenProfile(JSONObject(File(assetsDir(), "profiles.json").readText()))
         profile.calibrate(3200, 1440)
-        val flow = JSONObject(File(assetsDir(), "flows/artifact_scan.json").readText())
+        val flow = JSONObject(File(assetsDir(), flowFile).readText())
+        flowTransformer?.invoke(flow)
         // 单一名称词典（角色/武器/套装/单件/词条/部位）——与生产同路径
         val names = try {
             GoodNames.fromJson(JSONObject(File(assetsDir(), "tools/good_names.json").readText()))
@@ -349,7 +439,7 @@ class ScanEngineDryRunTest {
             null
         }
 
-        val h = Harness(pages, firstCellNameStuck, ENTER_CHAIN_CLICKS)
+        val h = Harness(pages, firstCellNameStuck, ENTER_CHAIN_CLICKS, freezeCells, weaponNames)
         numberScript.forEach { h.numberScript.addLast(it) }
         // dedupe=false：dry-run 的 21 格 mock OCR 文本相同（人工场景），全量入库便于断言；
         // 真机每件内容不同，生产默认 true。
@@ -370,6 +460,7 @@ class ScanEngineDryRunTest {
             // （去重链永不命中、计数器 1026 也达不到）⇒ 需要显式页数的用例用 maxPages 钉住。
             maxPages = maxPages,
             foregroundOk = foregroundOk,
+            plan = plan,
         )
         // ⚠️ 护栏（2026-09-11）：engine.run() 出现过「无限等待」把整个单测任务挂死 1 小时+
         //    （jstack：Test worker TIMED_WAITING 停在 BlockingCoroutine.joinBlocking → 内部某处 delay 循环不退出）。
@@ -398,6 +489,55 @@ class ScanEngineDryRunTest {
         assertEquals(CELLS_PER_PAGE, engine.results.size)
         assertEquals(2, h.swipes.size)
         assertEquals("stopWhen", h.finished)
+    }
+
+    /**
+     * ★ P3-8（语义裁决 2026-10-01）`resetScanAccumulation` 新语义：results 系列（results/
+     * resultsWeapons/resultsCharacters）与 seenArtifactKeys **同进退、都不清** ——
+     * GOOD 结果跨目标全局去重累加（不重复、不丢件）。
+     *
+     * 背景：`resetScanPerItem` 的旧实现清 results/resultsWeapons/resultsCharacters 但**不清**
+     * seenArtifactKeys ⇒ 多目标（foreach）共用一套圣遗物时，目标 2 重扫的同件全部撞 seen 键
+     * 被去重，而 results 已被清空 ⇒ 最终导出 0 件（丢件）。该"清 results 但留 seen"组合已被
+     * 2026-10-01 裁决**禁止**：`artifact_lock` 多目标共用一套圣遗物时，锁定等动作逐目标执行；
+     * 导出按物理件去重、跨目标累加。
+     *
+     * 本用例钉死新语义（双向）：
+     *   · 目标 2 重扫同件 ⇒ 撞 seenArtifactKeys 去重，**不重复入库**（results 不会变 2×21）；
+     *   · 目标 2 走查照常完整执行（止扫计数/页间游标每目标全新，回卷判据不被旧目标残留触发）；
+     *   · 最终导出 = 物理件数（CELLS_PER_PAGE，21 件不丢不重）。
+     * 旧"现状 0"断言已按裁决作废；若有人再改 reset 去**清** results 或 seenArtifactKeys，
+     * 本用例会红（0 或 2×CELLS_PER_PAGE），强制先复核 foreach 多目标语义。
+     */
+    @Test
+    fun `resetScanPerItem dedupes identical content across targets and keeps all physical pieces`() {
+        val wrapInForeach: (JSONObject) -> Unit = { flow ->
+            val steps = flow.getJSONArray("steps")
+            val inner = org.json.JSONArray()
+            for (i in 0 until steps.length()) inner.put(steps.get(i))
+            val foreach = JSONObject()
+                .put("do", "foreach")
+                .put("over", "plan")
+                .put("as", "task")
+                .put("resetScanPerItem", true)
+                .put("steps", inner)
+            flow.put("steps", org.json.JSONArray().put(foreach))
+        }
+        val (engine, h) = runEngine(
+            listOf(
+                Page(syntheticFrame(5), pageLines("Lv.90"), 1026),
+                Page(syntheticFrame(5, page = 1), pageLines("Lv.90"), 1030),
+                Page(syntheticFrame(5, page = 2), pageLines("Lv.90"), 1034),
+            ),
+            dedupe = true,
+            flowTransformer = wrapInForeach,
+            plan = listOf(JSONObject(), JSONObject()), // 两个"相同内容"目标
+        )
+        // 裁决语义（2026-10-01）：目标 1 入库 21 件；目标 2 复扫同件全部撞 seen 键被去重
+        // ⇒ results 不增长也不被清 ⇒ 最终 = 物理件数（21 件不丢不重）。
+        // 双向锁：清 seenArtifactKeys ⇒ 2×CELLS_PER_PAGE（重复）；清 results ⇒ 0（丢件）。
+        assertEquals(CELLS_PER_PAGE, engine.results.size)
+        assertTrue("foreach 两个目标都应执行完", h.finished != null)
     }
 
     @Test
@@ -651,5 +791,98 @@ class ScanEngineDryRunTest {
         assertEquals("只应入库已点过的 10 格", 10, engine.results.size)
         assertEquals(ENTER_CHAIN_CLICKS + 10, h.clicks.size)
         assertTrue("应正常收尾（非异常）", h.finished != null)
+    }
+
+    // ── A10：weapon_scan 收尾总数核对（旧代码只看 results.size ⇒ 武器轮必报假 total_mismatch）──
+
+    /**
+     * 计数器 = 一页件数 ⇒ 走「件数达标」正常收尾（completed）。旧实现 run() 收尾拿
+     * `total != results.size`（results 只装圣遗物、恒 0）对账 ⇒ 每次武器扫描正常结束都报
+     * WARN「总数不符」+ total_mismatch 进度。修法 = 对账口径与 pagedGrid 件数达标判据同源
+     * （三容器之和；单轮只有一个 flow 域的容器在增长）。
+     */
+    @Test
+    fun `weapon scan finishes without fake total mismatch`() {
+        val (engine, h) = runEngine(
+            listOf(Page(syntheticFrame(5), weaponLines(), CELLS_PER_PAGE)),
+            flowFile = "flows/weapon_scan.json",
+            weaponNames = weaponDictNames(),
+        )
+        assertEquals("武器应整页入库", CELLS_PER_PAGE, engine.resultsWeapons.size)
+        assertTrue("武器轮不得产出圣遗物", engine.results.isEmpty())
+        assertEquals(CELLS_PER_PAGE, engine.vars.total)
+        assertEquals("completed", h.finished)
+        assertTrue(
+            "weapon_scan 正常收尾不得报 total_mismatch（stages=${h.progress.map { it.first }}）",
+            h.progress.none { it.first == "total_mismatch" },
+        )
+    }
+
+    // ── A11：面板指纹闸门等到新面板后必须**换帧解析**（旧代码解析仍用 ctx 旧帧 ⇒ 冻结格丢件）──
+
+    /**
+     * 面板冻结 2 格（第 2、3 格详情面板停在上格、闸门等待期间才渲染出新面板）：
+     * 旧实现：闸门用 freshFrame 检出变化后只更新快照并 break，`parseArtifactPanel` 仍用 ctx 里
+     * 那张旧帧 ⇒ 解析出上一格内容 ⇒ contentKey 撞已入库件被去重吞掉 ⇒ 21 件只剩 20 件。
+     * 修法：闸门命中后把 ctx.frame 换成 f2 再解析 ⇒ 不丢件。
+     *
+     * ⚠️ 夹具局限见 [Harness.freezeCells]：真机的"冻结"是像素级渲染停滞，干跑用帧身份侧信道
+     * 回放旧面板内容；指纹闸门/去重/重访链全部真实驱动。
+     */
+    @Test
+    fun `frozen panel gate adopts fresh frame and does not drop the cell`() {
+        val (engine, h) = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
+            dedupe = true,
+            freezeCells = 2,
+        )
+        assertEquals("completed", h.finished)
+        assertEquals(
+            "面板冻结 2 格不得丢件（旧实现解析旧帧 ⇒ contentKey 撞已入库件被去重吞掉）",
+            CELLS_PER_PAGE,
+            engine.results.size,
+        )
+    }
+
+    // ── A9：连续整页跳过（pageSkip）必须能干净收尾（计数器/页数上限双失灵时引擎自己终止）──
+
+    /**
+     * 干跑注入 `pageSkip.expr = "pageMinLevel < 20"`（不改动 assets 原文件）：
+     * 页 0、页 1 正常扫描（页 1 全页 Lv.10 ⇒ pageMinLevel=10），之后每页整页跳过。
+     * K=3（TimingOverrides.pageSkipLimit 默认）：页 2/3/4 连续 3 页全跳 ⇒ 第 4 页页首（抢帧前）
+     * 干净收尾——已入库 42 件照常导出、正常 onFinished("stopWhen")、不再发第 5 次滑动。
+     * ⚠️ 计数器给不可达的 1026（pagesByCount=54）、maxPages=6 只作红状态护栏：
+     * 旧实现无 skip 上限 ⇒ 会翻到 maxPages 才以 "maxPages" 收尾（swipes=6），断言必红。
+     */
+    @Test
+    fun `consecutive skipped pages terminate scan cleanly within limit`() {
+        val pages = listOf(
+            Page(syntheticFrame(5), pageLines("Lv.90"), 1026),           // 页 0：正常扫描
+            Page(syntheticFrame(5, page = 1), pageLines("Lv.10"), 1026), // 页 1：正常扫描，pageMinLevel→10
+            Page(syntheticFrame(5, page = 2), pageLines("Lv.10"), 1026), // 页 2：skip #1
+            Page(syntheticFrame(5, page = 2), pageLines("Lv.10"), 1026), // 页 3：skip #2
+            Page(syntheticFrame(5, page = 2), pageLines("Lv.10"), 1026), // 页 4：skip #3 ⇒ K=3 收尾
+            Page(syntheticFrame(5, page = 2), pageLines("Lv.10"), 1026), // 页 5：红状态护栏页
+        )
+        val (engine, h) = runEngine(
+            pages,
+            maxPages = 6,
+            flowTransformer = { flow ->
+                val steps = flow.getJSONArray("steps")
+                for (i in 0 until steps.length()) {
+                    val s = steps.getJSONObject(i)
+                    if (s.optString("do") == "pagedGrid") {
+                        s.put("pageSkip", JSONObject().put("expr", "pageMinLevel < 20"))
+                    }
+                }
+            },
+        )
+        assertEquals("前两页正常入库", 2 * CELLS_PER_PAGE, engine.results.size)
+        assertEquals("应按正常止扫语义收尾（非报错/非 maxPages）", "stopWhen", h.finished)
+        assertEquals(
+            "页 0/1/2/3 各一次主滑，第 3 个连续 skip 页在页首抢帧前收尾（不再滑）",
+            4,
+            h.swipes.size,
+        )
     }
 }

@@ -127,12 +127,29 @@ object StatParser {
         return ParsedStat(key, scaled, t.contains("待激活"))
     }
 
-    /** 主词条值："4,780" → 4780.0；"46.6%" → 46.6；"Lv.90" → 90（完整数字优先，防 ".90" 被截胡）。 */
+    /**
+     * 主词条值："4,780" → 4780.0；"46.6%" → 46.6；"Lv.90" → 90（完整数字优先，防 ".90" 被截胡）。
+     *
+     * A12（2026-09-30，优化方案轨 D1）：OCR 丢整数位（"5.8%" → ".8%"）时首正则
+     * `([0-9]+\.?[0-9]*)` 会截到 "8" 返回 8.0（**十倍错**）；原第二正则 `\.([0-9]+)` 排在其后
+     * ⇒ **永不可达**（死代码，已删——首正则能匹配第二正则可匹配的任何位置）。
+     * 修法：在首正则**之前**探测「点前非数字/字母」的小数形态，命中才按 0.x 解析。
+     * ⚠️ 守卫约束（沿用原注释语义）：点前是字母/数字时**不能**按小数——`Lv.90` 的点前是
+     *    字母，否则会被解析成 0.90；完整数字优先的既有行为保持不变。
+     * 输入域核查（2026-09-30 全调用点）：StatParser.parse（词条/主词条行）、ScanEngine:7005/7009
+     * （武器 Lv.90 / 精炼N阶）、ScanEngine:7216（圣遗物 +20 / Lv.x）——均为「点前是数字或字母」
+     * 的正常形态，本分支不触发，不影响既有解析。
+     */
     fun extractValue(text: String): Double? {
         val t = fixDigits(clean(text))
+        Regex("\\.([0-9]+)").find(t)?.let { m ->
+            val prev = if (m.range.first > 0) t[m.range.first - 1] else null
+            if (prev == null || !prev.isLetterOrDigit()) {
+                // ".8" / "+.8%"：整数位被 OCR 丢掉 ⇒ 按小数还原为 0.8
+                return ("0" + m.value).toDoubleOrNull()
+            }
+        }
         Regex("([0-9]+\\.?[0-9]*)").find(t)?.let { return it.groupValues[1].toDoubleOrNull() }
-        // 缺整数部分容错（GOODScanner 同款：".7" → 0.7）
-        Regex("\\.([0-9]+)").find(t)?.let { return it.groupValues[1].toDoubleOrNull() }
         return null
     }
 

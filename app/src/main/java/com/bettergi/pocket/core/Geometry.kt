@@ -1,4 +1,4 @@
-package com.bettergi.pocket.recognition
+package com.bettergi.pocket.core
 
 data class IntSize(
     val width: Int,

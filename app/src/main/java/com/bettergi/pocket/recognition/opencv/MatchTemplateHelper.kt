@@ -9,6 +9,7 @@ import org.opencv.core.Scalar
 import org.opencv.imgproc.Imgproc
 import kotlin.math.abs
 import kotlin.math.floor
+import com.bettergi.pocket.core.image.MatOps
 
 data class TemplateMatchHit(
     val x: Int,
@@ -149,13 +150,23 @@ object MatchTemplateHelper {
         val minY = (selectedY - maxDeltaY).coerceAtLeast(0)
         val maxY = (selectedY + maxDeltaY).coerceAtMost(candidateMask.rows() - 1)
 
+        // P3：逐像素 u8/setU8（每像素一次 JNI get/put）改为整行批量读写 —— 结果逐位一致，
+        // 只是 JNI 次数从 O(区块像素) 降到 O(区块行数)。
+        val rowBuf = ByteArray(maxX - minX + 1)
         for (y in minY..maxY) {
-            for (x in minX..maxX) {
-                if (hasSuppressingOverlap(selectedX, selectedY, x, y, templateWidth, templateHeight) &&
-                    MatOps.u8(candidateMask, y, x) != 0
+            MatOps.u8Row(candidateMask, y, minX, rowBuf)
+            var changed = false
+            for (i in rowBuf.indices) {
+                val x = minX + i
+                if (rowBuf[i].toInt() != 0 &&
+                    hasSuppressingOverlap(selectedX, selectedY, x, y, templateWidth, templateHeight)
                 ) {
-                    MatOps.setU8(candidateMask, y, x, 0)
+                    rowBuf[i] = 0
+                    changed = true
                 }
+            }
+            if (changed) {
+                MatOps.setU8Row(candidateMask, y, minX, rowBuf)
             }
         }
     }

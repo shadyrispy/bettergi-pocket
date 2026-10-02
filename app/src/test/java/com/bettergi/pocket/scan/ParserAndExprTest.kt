@@ -74,6 +74,27 @@ class ParserAndExprTest {
         assertNull(StatParser.extractValue("无数字"))
     }
 
+    // ---- A12（2026-09-30）：OCR 丢整数位（"5.8%"→".8%"）——点前非数字/字母才按 0.x 解析 ----
+    // 事故：原实现首正则会把 ".7" 截成 "7" 返回 7.0（十倍错），兜底正则永不可达（死代码）。
+    @Test
+    fun `extract leading decimal when integer part dropped by ocr`() {
+        assertEquals(0.8, StatParser.extractValue(".8")!!, 1e-9)
+        assertEquals(0.7, StatParser.extractValue(".7")!!, 1e-9)
+        // 词条行的典型丢失形态：'+' 后紧跟小数
+        assertEquals(0.8, StatParser.extractValue("+.8%")!!, 1e-9)
+        // 守卫：点前是字母/数字不得按小数（防 Lv.90 → 0.90），完整数字优先语义保持
+        assertEquals(90.0, StatParser.extractValue("Lv.90")!!, 1e-9)
+        assertEquals(5.8, StatParser.extractValue("5.8%")!!, 1e-9)
+        assertEquals(2.1, StatParser.extractValue("2.1")!!, 1e-9)
+    }
+
+    @Test
+    fun `parse end-to-end with dropped integer part`() {
+        val st = StatParser.parse("暴击率+.8%")
+        assertEquals("critRate_", st!!.key)
+        assertEquals(0.8, st.value, 1e-9)
+    }
+
     // ---- Expr：stopWhen 谓词（flow2 真实用例）----
     @Test
     fun `expr stopWhen artifact case`() {
@@ -83,9 +104,19 @@ class ParserAndExprTest {
         assertEquals(false, Expr.eval(expr, mapOf("rarity" to 3, "level" to 20)))
     }
 
+    // ★ A16：缺失变量不再静默按 0（原 `expr missing vars default to zero` 已随语义废除）
     @Test
-    fun `expr missing vars default to zero`() {
-        assertEquals(true, Expr.eval("rarity < 4", emptyMap()))
+    fun `expr missing vars throw instead of defaulting to zero`() {
+        assertThrows(Expr.EvalException::class.java) { Expr.eval("rarity < 4", emptyMap()) }
+    }
+
+    // ★ A16（2026-09-30）：未知变量名从"静默按 0"改为抛 EvalException ——
+    //   变量名拼错（如 `lvel == 0`）此前静默恒真/恒假（判据反向）。
+    @Test
+    fun `expr unknown variable throws`() {
+        assertThrows(Expr.EvalException::class.java) { Expr.eval("lvel == 0", mapOf("level" to 0)) }
+        assertThrows(Expr.EvalException::class.java) { Expr.eval("rarity < 4", emptyMap()) }
+        assertThrows(Expr.EvalException::class.java) { Expr.eval("a == 1 && typo == 2", mapOf("a" to 1)) }
     }
 
     @Test
@@ -101,6 +132,13 @@ class ParserAndExprTest {
         assertEquals(true, Expr.eval("a >= 2", mapOf("a" to 3)))
         assertEquals(true, Expr.eval("a != 2", mapOf("a" to 3)))
         assertEquals(true, Expr.eval("a > 2", mapOf("a" to 3)))
+    }
+
+    // ★ A16：已知名为"显式 0"仍是合法变量（与未知变量区分），行为不变
+    @Test
+    fun `expr explicit zero vars behave as before`() {
+        assertEquals(true, Expr.eval("rarity < 4", mapOf("rarity" to 0)))
+        assertEquals(false, Expr.eval("rarity < 4", mapOf("rarity" to 4)))
     }
 
     @Test

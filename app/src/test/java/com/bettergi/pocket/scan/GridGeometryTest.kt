@@ -363,4 +363,32 @@ class GridGeometryTest {
         assertEquals(origin.getInt(0) + 3 * pitch.getInt(0) + 8, rel.left)
         assertEquals(origin.getInt(1) + 2 * pitch.getInt(1) + 6, rel.top)
     }
+
+    // ★ P3（2026-09-30）：cardRelRect / cellCenter 行列越界由"静默钳位"改 fail-loud
+    @Test
+    fun `cardRelRect and cellCenter fail loud on out-of-range col row`() {
+        val p = profile()
+        val g = p.gridGeometryFor("artifact_backpack")!!
+        try {
+            p.cardRelRect("artifact_backpack", intArrayOf(0, 0, g.cardW, g.cardH), col = g.cols, row = 0)
+            throw AssertionError("col 越界必须抛")
+        } catch (e: IllegalStateException) {
+            assertTrue("错误须含 key 与越界值", e.message!!.contains("artifact_backpack") && e.message!!.contains("col=${g.cols}"))
+        }
+        try {
+            p.cardRelRect("artifact_backpack", intArrayOf(0, 0, g.cardW, g.cardH), col = 0, row = g.rowYs.size)
+            throw AssertionError("row 越界必须抛")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("row=${g.rowYs.size}"))
+        }
+        try {
+            p.cellCenter("artifact_backpack", index = g.cols * g.rowYs.size)
+            throw AssertionError("index 超出一页格数必须抛")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("index=${g.cols * g.rowYs.size}"))
+        }
+        // 界内值仍正常
+        assertNotNull(p.cardRelRect("artifact_backpack", intArrayOf(0, 0, g.cardW, g.cardH), col = 0, row = 0))
+        assertNotNull(p.cellCenter("artifact_backpack", 0))
+    }
 }

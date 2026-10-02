@@ -7,10 +7,11 @@ import android.os.Looper
 import android.util.Log
 import com.bettergi.pocket.genshin.GenshinLauncher
 import com.bettergi.pocket.log.RecognitionLog
-import com.bettergi.pocket.settings.BridgeSettingsRepository
-import com.bettergi.pocket.settings.SettingsBridgeProvider
+import com.bettergi.pocket.bridge.BridgeSettingsRepository
+import com.bettergi.pocket.bridge.SettingsBridgeClient
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import com.bettergi.pocket.bridge.A11yProtocol
 
 /**
  * **无障碍进程内的悬浮窗运行时**（2026-09-18 宿主迁移）。
@@ -38,12 +39,22 @@ object A11yOverlayRuntime {
     /** 日志镜像轮询间隔（仅日志窗可见时）。 */
     private const val LOG_POLL_MS = 700L
 
-    /** 主线程转交等待上限：超时即放弃该次调用（宁可漏一次穿透，也不能卡住扫描线程）。 */
-    private const val MAIN_TIMEOUT_MS = 2000L
+    /**
+     * 主线程转交等待上限：超时即放弃该次调用（宁可漏一次穿透，也不能卡住扫描线程）。
+     *
+     * ★ A26：2000ms → 500ms。实测一次主线程转交是毫秒级（见 OverlayBridge.prepareClickPassthrough
+     *   的注释），500ms 已是一个数量级以上的余量；对端主线程繁忙时等满 2s 只会把主进程的调用线程
+     *   （扫描 / 自动对话都在主线程发桥调用）拖出 ANR 面。超时后 onMain 返回 null ⇒ handle 落到
+     *   ok=false ⇒ 主进程侧按"对端忙"降级走既有重试/失败路径，不挂死。
+     */
+    private const val MAIN_TIMEOUT_MS = 500L
 
     private var controller: OverlayWindowController? = null
     private var settings: BridgeSettingsRepository? = null
     private var serviceRef: AccessibilityService? = null
+
+    /** 输入侧依赖面（attachService 时由服务注入；ensureStarted 构造控制器时传入）。 */
+    private lateinit var inputGate: AccessibilityInputGate
     private val mainHandler = Handler(Looper.getMainLooper())
     private var logPolling = false
 
@@ -58,8 +69,9 @@ object A11yOverlayRuntime {
     // ---- 生命周期 ----
 
     /** 无障碍服务连上：只登记引用，**不上窗**（等主进程的 `overlay_show`）。 */
-    fun attachService(service: AccessibilityService) {
+    fun attachService(service: AccessibilityService, gate: AccessibilityInputGate) {
         serviceRef = service
+        inputGate = gate
         Log.i(TAG, "service attached (overlay not shown yet)")
     }
 
@@ -82,6 +94,7 @@ object A11yOverlayRuntime {
             context = svc,
             settingsRepository = bridge,
             genshinLauncher = GenshinLauncher(svc),
+            inputGate = inputGate,
             onExit = { bridge.requestStop() },
             onShareGoodRequested = { bridge.requestShareGood() },
         )
@@ -109,73 +122,73 @@ object A11yOverlayRuntime {
     // ---- 桥入口（主进程 OverlayBridge → 无障碍进程）----
 
     fun handle(method: String, extras: Bundle?): Bundle = when (method) {
-        M_SHOW -> Bundle().apply {
+        A11yProtocol.M_SHOW -> Bundle().apply {
             val ok = onMain { ensureStarted() && run { controller?.show(); true } } ?: false
-            putBoolean(K_OK, ok)
+            putBoolean(A11yProtocol.K_OK, ok)
         }
-        M_HIDE -> Bundle().apply {
+        A11yProtocol.M_HIDE -> Bundle().apply {
             onMain { stop(); true }
-            putBoolean(K_OK, true)
+            putBoolean(A11yProtocol.K_OK, true)
         }
-        M_COLLAPSE -> Bundle().apply {
-            putBoolean(K_OK, onMain { controller?.collapse(); true } ?: false)
+        A11yProtocol.M_COLLAPSE -> Bundle().apply {
+            putBoolean(A11yProtocol.K_OK, onMain { controller?.collapse(); true } ?: false)
         }
-        M_PROGRESS -> {
-            val text = extras?.getString(K_TEXT).orEmpty()
-            Bundle().apply { putBoolean(K_OK, onMain { controller?.updateScanProgress(text); true } ?: false) }
+        A11yProtocol.M_PROGRESS -> {
+            val text = extras?.getString(A11yProtocol.K_TEXT).orEmpty()
+            Bundle().apply { putBoolean(A11yProtocol.K_OK, onMain { controller?.updateScanProgress(text); true } ?: false) }
         }
         // 抓包会话状态（主进程 → 面板）：会话与 VPN 只能在主进程，面板只是它的读者
-        M_CAPTURE -> {
-            val text = extras?.getString(K_TEXT).orEmpty()
-            val running = extras?.getBoolean(K_RUNNING) == true
+        A11yProtocol.M_CAPTURE -> {
+            val text = extras?.getString(A11yProtocol.K_TEXT).orEmpty()
+            val running = extras?.getBoolean(A11yProtocol.K_RUNNING) == true
             Bundle().apply {
-                putBoolean(K_OK, onMain { controller?.updateCaptureStatus(running, text); true } ?: false)
+                putBoolean(A11yProtocol.K_OK, onMain { controller?.updateCaptureStatus(running, text); true } ?: false)
             }
         }
         // 逐点击调用：命中悬浮窗矩形才需临时穿透（返回值决定调用方何时还原，语义见 OverlayBridge）
-        M_PT_PREPARE -> Bundle().apply {
+        A11yProtocol.M_PT_PREPARE -> Bundle().apply {
             val ok = onMain {
-                controller?.prepareClickPassthrough(extras?.getInt(K_X) ?: 0, extras?.getInt(K_Y) ?: 0)
+                controller?.prepareClickPassthrough(extras?.getInt(A11yProtocol.K_X) ?: 0, extras?.getInt(A11yProtocol.K_Y) ?: 0)
             }
-            putBoolean(K_OK, ok == true)
+            putBoolean(A11yProtocol.K_OK, ok == true)
         }
-        M_PT_RESTORE -> Bundle().apply {
-            putBoolean(K_OK, onMain { controller?.restoreClickPassthrough(); true } ?: false)
+        A11yProtocol.M_PT_RESTORE -> Bundle().apply {
+            putBoolean(A11yProtocol.K_OK, onMain { controller?.restoreClickPassthrough(); true } ?: false)
         }
-        M_CLICK_THROUGH -> Bundle().apply {
-            val enabled = extras?.getBoolean(K_ENABLED, false) == true
-            val hidden = extras?.getBoolean(K_HIDDEN, false) == true
-            putBoolean(K_OK, onMain { controller?.setScanClickThrough(enabled, hidden); true } ?: false)
+        A11yProtocol.M_CLICK_THROUGH -> Bundle().apply {
+            val enabled = extras?.getBoolean(A11yProtocol.K_ENABLED, false) == true
+            val hidden = extras?.getBoolean(A11yProtocol.K_HIDDEN, false) == true
+            putBoolean(A11yProtocol.K_OK, onMain { controller?.setScanClickThrough(enabled, hidden); true } ?: false)
         }
-        M_NOTICE -> {
-            val level = extras?.getString(K_LEVEL).orEmpty()
-            val text = extras?.getString(K_TEXT).orEmpty()
+        A11yProtocol.M_NOTICE -> {
+            val level = extras?.getString(A11yProtocol.K_LEVEL).orEmpty()
+            val text = extras?.getString(A11yProtocol.K_TEXT).orEmpty()
             Bundle().apply {
-                putBoolean(K_OK, onMain { controller?.showNotice(level, text); true } ?: false)
+                putBoolean(A11yProtocol.K_OK, onMain { controller?.showNotice(level, text); true } ?: false)
             }
         }
-        M_EVENT -> {
-            val kind = extras?.getString(K_KIND).orEmpty()
+        A11yProtocol.M_EVENT -> {
+            val kind = extras?.getString(A11yProtocol.K_KIND).orEmpty()
             Bundle().apply {
                 putBoolean(
-                    K_OK,
+                    A11yProtocol.K_OK,
                     onMain {
                         val c = controller
                         when {
                             c == null -> false
-                            kind == EVENT_TALK -> {
+                            kind == A11yProtocol.EVENT_TALK -> {
                                 c.onTalkHistoryMatched(); true
                             }
-                            kind == EVENT_CHAT_ICONS -> {
+                            kind == A11yProtocol.EVENT_CHAT_ICONS -> {
                                 c.onChatIconsRecognized(
-                                    extras?.getInt(K_COUNT) ?: 0,
-                                    extras?.getInt(K_X) ?: 0,
-                                    extras?.getInt(K_Y) ?: 0,
+                                    extras?.getInt(A11yProtocol.K_COUNT) ?: 0,
+                                    extras?.getInt(A11yProtocol.K_X) ?: 0,
+                                    extras?.getInt(A11yProtocol.K_Y) ?: 0,
                                 )
                                 true
                             }
-                            kind == EVENT_CHAT_CLICK -> {
-                                c.onChatIconClicked(extras?.getInt(K_X) ?: 0, extras?.getInt(K_Y) ?: 0)
+                            kind == A11yProtocol.EVENT_CHAT_CLICK -> {
+                                c.onChatIconClicked(extras?.getInt(A11yProtocol.K_X) ?: 0, extras?.getInt(A11yProtocol.K_Y) ?: 0)
                                 true
                             }
                             else -> false
@@ -184,7 +197,13 @@ object A11yOverlayRuntime {
                 )
             }
         }
-        else -> Bundle()
+        // ★ A32：未知 method 不再返回空 Bundle —— 空 Bundle 与"成功但无载荷"同形，调用方无从降级。
+        //   统一 ok=false + error=unknown_method（协议兼容：只加键，不改名）。
+        else -> Bundle().apply {
+            putBoolean(A11yProtocol.K_OK, false)
+            putString(A11yProtocol.K_ERROR, "unknown_method")
+            putString(A11yProtocol.K_METHOD, method)
+        }
     }
 
     /**
@@ -211,13 +230,8 @@ object A11yOverlayRuntime {
     private fun pollLog() {
         val svc = serviceRef ?: return
         if (onMain { controller?.isLogWindowVisible() } != true) return
-        val bundle = try {
-            svc.contentResolver.call(SettingsBridgeProvider.uri(svc), SettingsBridgeProvider.METHOD_LOG_SNAPSHOT, null, null)
-        } catch (e: Exception) {
-            Log.w(TAG, "log snapshot failed", e)
-            null
-        } ?: return
-        val raw = bundle.getStringArray(SettingsBridgeProvider.KEY_ENTRIES) ?: return
+        // 工单 D：改走 bridge/SettingsBridgeClient 门面（method/键仍是 SettingsBridgeProvider 常量，值不变）
+        val raw = SettingsBridgeClient.logSnapshot(svc) ?: return
         RecognitionLog.replaceAll(raw.mapNotNull { RecognitionLog.decode(it) })
     }
 
@@ -242,31 +256,4 @@ object A11yOverlayRuntime {
         }
     }
 
-    // ---- 桥方法名（主进程 OverlayBridge 必须用同一组常量）----
-
-    const val M_SHOW = "overlay_show"
-    const val M_HIDE = "overlay_hide"
-    const val M_COLLAPSE = "overlay_collapse"
-    const val M_PROGRESS = "overlay_progress"
-    const val M_CAPTURE = "overlay_capture_status"
-    const val M_PT_PREPARE = "overlay_pt_prepare"
-    const val M_PT_RESTORE = "overlay_pt_restore"
-    const val M_CLICK_THROUGH = "overlay_click_through"
-    const val M_EVENT = "overlay_event"
-    const val M_NOTICE = "notice_push"
-
-    const val K_OK = "ok"
-    const val K_TEXT = "text"
-    const val K_RUNNING = "running"
-    const val K_X = "x"
-    const val K_Y = "y"
-    const val K_ENABLED = "enabled"
-    const val K_HIDDEN = "hidden"
-    const val K_KIND = "kind"
-    const val K_COUNT = "count"
-    const val K_LEVEL = "level"
-
-    const val EVENT_TALK = "talk"
-    const val EVENT_CHAT_ICONS = "chat_icons"
-    const val EVENT_CHAT_CLICK = "chat_click"
 }

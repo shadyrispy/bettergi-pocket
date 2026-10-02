@@ -97,4 +97,20 @@ class GridRowCheckTest {
         assertEquals(GridRowCheck.Verdict.UNKNOWN, GridRowCheck.check(page(0), emptyList(), 21).verdict)
         assertTrue(GridRowCheck.check(page(0), page(21), 1).verdict == GridRowCheck.Verdict.UNKNOWN)
     }
+
+    // ★ P3（2026-09-30）：两锚点估计不一致（平票）⇒ 取较小估计 + UNKNOWN（原 maxByOrNull 任意取一）
+    @Test
+    fun `disagreeing anchors take smaller estimate with unknown verdict`() {
+        // 上一页 [0..20]，末两格 i19/i20；构造本页：i19 在 A=17 处、i20 在 A=10 处 ⇒ 两估计 17 与 10
+        val prev = page(0)
+        val cur = MutableList(21) { "" }
+        // i19 出现在下标 m 使 19-m = 17 ⇒ m=2
+        cur[2] = "i19"
+        // i20 出现在下标 m 使 20-m = 10 ⇒ m=10
+        cur[10] = "i20"
+        val r = GridRowCheck.check(prev, cur, 21)
+        assertEquals(GridRowCheck.Verdict.UNKNOWN, r.verdict)
+        assertEquals(10, r.advance) // 较小估计（更保守）
+        assertNull(r.skipped)
+    }
 }

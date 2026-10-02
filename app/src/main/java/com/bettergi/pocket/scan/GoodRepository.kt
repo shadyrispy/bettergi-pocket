@@ -1,7 +1,7 @@
 package com.bettergi.pocket.scan
 
 import android.content.Context
-import com.bettergi.pocket.dsl.FlowSource
+import com.bettergi.pocket.core.FlowSource
 import org.json.JSONObject
 import java.io.File
 

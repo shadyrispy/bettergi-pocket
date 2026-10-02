@@ -1,4 +1,4 @@
-package com.bettergi.pocket.dsl
+package com.bettergi.pocket.core
 
 import android.content.Context
 import android.content.res.AssetManager

@@ -1,5 +1,7 @@
 package com.bettergi.pocket.recognition
 
+import com.bettergi.pocket.core.IntRect
+
 /**
  * 对齐 BetterGI [SystemInfo]：以 1920 宽为 1080P 基准。
  *
