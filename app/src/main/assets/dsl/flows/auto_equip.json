@@ -2,9 +2,9 @@
   "flow": "auto_equip",
   "version": "1.2.1",
   "profile": "android_3200x1440",
-  "description": "流程五：角色自动配装（换装执行）。顺序依 canonical flow5 文档修正：花名册找角色(先)→详情页圣遗物菜单→替换→筛选→3列网格 snap 选件→替换/确认。1.0.0 版 enterScreen(artifact_manage) 置于 rosterFind 前系顺序错误（引擎 returnToHome 打断名册上下文，equip5-7 实证）",
+  "description": "流程五：按装配指令把圣遗物穿到指定角色。输入 = {equip:[{artifact,location}]}（GOODScanner POST /equip 契约；location 为空串 = 卸下）。",
   "vars": {
-    "plan": "list<{char, slot, target:GoodArtifact}>"
+    "equip": "list<{artifact:GoodArtifact, location:string}>"
   },
   "ui": {
     "label": "自动装备",
@@ -86,6 +86,10 @@
           "note": "2026-09-13：**确认已到「圣遗物管理界面」**（替换后）。⚠️ 该界面**左上角显示的是角色名**（实测 `豆豆`）而非界面名 ⇒ 标题条判据无效，必须用同条带右侧的 `圣遗物推荐`（实测 x[1610,1751] y[43,73]，置信 1.00）；备选 `套装筛选`（底部 x[303,428] y[970,1005]）。原写法两击连发无确认，若「圣遗物菜单」没点开就点「替换」会落到底层页面。"
         },
         {
+          "do": "clickSlotTab",
+          "note": "★ 2026-09-18（P2⑪）：点 artifact.slotKey 对应的槽位页签。GOODScanner 的装配流程必点它（\"Clicks the artifact slot matching the artifact slotKey\"）；我们此前没点 ⇒ 选择网格停在上次的槽位 ⇒ 选到错部位的件（最终 hardMatch 拒掉 ⇒ 整轮 NotFound）。坐标 screens.artifact_manage.slotTabs 机核零偏移。"
+        },
+        {
           "do": "clicks",
           "chain": [
             "sortBtn(828,1320)"
@@ -119,6 +123,14 @@
             "match": "exact"
           },
           "note": "canonical #7：药丸直达套装筛选（不经筛选面板弹窗），确认后直接退回"
+        },
+        {
+          "do": "assertScreen",
+          "title": "$screens._common.topRightHint",
+          "expect": "圣遗物推荐",
+          "retries": 3,
+          "onFail": "back",
+          "note": "★ 2026-09-18 兜底：套装筛选链走完后必须回到「圣遗物管理界面」（右上角“圣遗物推荐”）。若仍卡在套装子面板 ⇒ onFail=back 逐层退出。"
         },
         {
           "do": "pagedGrid",
@@ -165,7 +177,7 @@
             },
             {
               "do": "stopWhen",
-              "expr": "panelMatch(target, tol=0.1)",
+              "expr": "panelMatch(task, tol=0.1)",
               "matchOrder": "level→main→sub1-4→set_name"
             }
           ],
@@ -198,7 +210,9 @@
   ],
   "resultStates": 8,
   "pending": [
-    "pagedGrid snap 遍历引擎未实现（当前仅首屏 12 格）",
-    "set_filter swipe settle 真机"
+    "卸下路径未实现（location:\"\" 需去 artifact.location 记录的当前持有者处卸）—— 未做，属独立增量",
+    "「已正确跳过」未实现（GOODScanner 会先比当前槽位是否已是目标件 ⇒ AlreadyCorrect）—— 未做",
+    "装配不产出快照（GOODScanner 同款行为，非缺口）",
+    "set_filter swipe settle 真机复核"
   ]
 }

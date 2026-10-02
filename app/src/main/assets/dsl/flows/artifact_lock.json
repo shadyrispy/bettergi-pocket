@@ -2,9 +2,10 @@
   "flow": "artifact_lock",
   "version": "1.0.0",
   "profile": "android_3200x1440",
-  "description": "流程四：按外部规则批量加解锁。输入 = lock/unlock 的 GoodArtifact 列表（决策在执行器外）",
+  "description": "流程四：按外部意图清单批量加/解锁。输入 = {lock:[…], unlock:[…]} 两个 GoodArtifact 清单（GOODScanner POST /manage 契约；由 GoodPlan 归一成项内 wantLock）。",
   "vars": {
-    "targets": "list<GoodArtifact>"
+    "lock": "list<GoodArtifact>",
+    "unlock": "list<GoodArtifact>"
   },
   "ui": {
     "label": "圣遗物锁定",
@@ -50,6 +51,22 @@
       }
     },
     {
+      "do": "dualStateButton",
+      "ref": "$screens.artifact_backpack.fiveStarToggle",
+      "ensure": "off",
+      "note": "★ 2026-09-18 补：与 artifact_scan 一致 —— pill=ON 时漏斗/排序按钮被游戏**禁用**（红色🚫），于是 setFilter 的漏斗点击无效、面板根本打不开。"
+    },
+    {
+      "do": "filterReset",
+      "open": "$screens.artifact_backpack.filterRoundBtn",
+      "title": "$screens.dialogs.filterPanel.anchorTitle",
+      "titleExpect": "圣遗物筛选|圣遗物",
+      "reset": "$screens.dialogs.filterPanel.reset",
+      "ok": "$screens.dialogs.filterPanel.ok",
+      "retries": 2,
+      "note": "★ 2026-09-18 补（照 artifact_scan 抄）：**筛全量前必须先把游戏内筛选复位**。缺这一步时若用户留着「按获得时间顺序展示5星圣遗物」视图，漏斗被禁用 ⇒ 整条套装筛选链失效。本原语自带校验：OCR 确认「圣遗物筛选」面板确实打开才点重置/确认，未确认就 BACK 重试，仍不确认则放弃复位并继续（绝不盲点）。"
+    },
+    {
       "do": "setFilter",
       "entry": "BACKPACK",
       "chain": [
@@ -61,90 +78,117 @@
         "dict": "mappings.artifactSets",
         "match": "exact"
       },
-      "tailGuard": "确认后若 filterPanel 锚[179,50,419,104]仍在 → 点 ok[798,1307]（双层关闭，拍板成立；guard 为冗余防护）"
+      "tailGuard": "已废弃（2026-09-18 P0）：子面板关闭改由「判态 + 系统 BACK」收尾，见 ScanEngine.confirmFilter / leaveFilterPanels。"
     },
     {
-      "do": "foreach",
-      "over": "$plan",
-      "as": "task",
-      "note": "§15 P0-3：ifMatch 以 currentTask 为闸，必须经 foreach 注入才有值",
-      "steps": [
+      "do": "assertScreen",
+      "rect": "$screens._common.titleBar",
+      "expect": "背包",
+      "retries": 3,
+      "onFail": "back",
+      "note": "★ 2026-09-18 兜底：套装筛选链走完后**必须确认已回到背包**。「背包/圣遗物」这个锚是实测唯一稳定可读的（面板标题会被设备端 OCR 读成乱码，见 ScanEngine.filterPanelState 注释）。onFail=back ⇒ 仍卡在子面板/主面板时按 BACK 逐层退出（子面板→主面板→背包）。"
+    },
+    {
+      "do": "pagedGrid",
+      "grid": "artifact_backpack",
+      "pageSkip": {
+        "expr": "pageMinLevel > max(plan.level)",
+        "note": "末格 OCR 等级 → 全页跳过（GOODScanner 的 fast mode page-skip 同源）"
+      },
+      "visit": [
         {
-          "do": "pagedGrid",
-          "grid": "artifact_backpack",
-          "pageSkip": {
-            "expr": "pageMinLevel > max(targets.level)",
-            "note": "末格 OCR 等级 → 全页跳过"
-          },
-          "visit": [
-            {
-              "do": "stopWhen",
-              "mode": "duplicateStreak",
-              "streak": 3,
-              "dupPageConfirm": 2,
-              "action": "Stop",
-              "note": "阈值不再承担「回卷」判据：pagedGrid 内引擎按**该网格一页的卡片数**（cols×traverseRows）自动覆盖（见 ScanEngine.dupLimitEffective）；此处的 3 仅作 snap/rosterFind 等非翻页路径的兜底。"
-            },
+          "do": "stopWhen",
+          "mode": "duplicateStreak",
+          "streak": 3,
+          "dupPageConfirm": 2,
+          "action": "Stop",
+          "note": "阈值不再承担「回卷」判据：pagedGrid 内引擎按**该网格一页的卡片数**（cols×traverseRows）自动覆盖（见 ScanEngine.dupLimitEffective）；此处的 3 仅作 snap/rosterFind 等非翻页路径的兜底。"
+        },
+        {
+          "do": "stopWhen",
+          "expr": "planRemaining == 0",
+          "action": "Stop",
+          "note": "★ 单趟扫描：目标全部绑定完 ⇒ 提前收尾，不必走完剩余页。"
+        },
+        {
+          "do": "click",
+          "fast": {
+            "at": "$cell.center"
+          }
+        },
+        {
+          "do": "parsePanel",
+          "panel": "artifact_backpack",
+          "fields": [
+            "全部字段"
+          ],
+          "note_match": "★ 2026-09-18：`match` 已移除 —— 命中判定改由下一步 `planMatch` 负责（单趟扫描：每格问\"我是谁\"，而不是\"我是不是当前这个目标\"）。"
+        },
+        {
+          "do": "planMatch",
+          "tol": 0.100001,
+          "note": "★ 单趟扫描核心：在本格解析出的圣遗物与**尚未绑定**的计划项之间找匹配，命中则把 currentTask 指向它。"
+        },
+        {
+          "do": "ifMatch",
+          "then": [
             {
               "do": "vote",
-              "zone": "artifact.card.lockBadge",
-              "passes": 3,
-              "as": "gridLocked"
-            },
-            {
-              "do": "click",
-              "fast": {
-                "at": "$cell.center"
-              }
-            },
-            {
-              "do": "parsePanel",
-              "panel": "artifact_backpack",
-              "fields": [
-                "全部字段"
-              ],
-              "match": "hardMatch(副词条容差0.100001)"
+              "zone": "artifact.panel.lock",
+              "as": "curLock",
+              "ambiguous": "sleep重截×2"
             },
             {
               "do": "ifMatch",
+              "when": "curLock != wantLock",
               "then": [
                 {
-                  "do": "vote",
-                  "zone": "artifact.panel.lock",
-                  "as": "curLock",
-                  "ambiguous": "sleep重截×2"
+                  "do": "click",
+                  "fast": {
+                    "at": "$zones.artifact.panel.lock"
+                  },
+                  "note": "面板 lock 钮机读：$zones.artifact.panel.lock（2560 实测 [2286,724,2332,764] center(2309,744)）；祝圣 yShift+63"
                 },
                 {
-                  "do": "ifMatch",
-                  "when": "curLock == false",
-                  "then": [
-                    {
-                      "do": "click",
-                      "fast": {
-                        "at": "$zones.artifact.panel.lock"
-                      },
-                      "note": "面板 lock 钮机读：$zones.artifact.panel.lock（2560 实测 [2286,724,2332,764] center(2309,744)）；祝圣 yShift+63"
-                    },
-                    {
-                      "do": "verify",
-                      "zone": "artifact.panel.lock",
-                      "expect": "true"
-                    }
-                  ]
+                  "do": "verify",
+                  "zone": "artifact.panel.lock",
+                  "expect": "toggle($curLock)",
+                  "note": "★ 2026-09-18：改 toggle($curLock) —— 翻转断言天然支持加锁/解锁两个方向。"
+                },
+                {
+                  "do": "planDone",
+                  "status": "Success",
+                  "note": "★ 动作已 verify 通过 ⇒ 记 Success（此处才是\"真的改动了\"的唯一出口）。"
                 }
-              ]
+              ],
+              "note": "★ 2026-09-18（P1④）：意图来自 {lock,unlock} 清单归一出的项内 wantLock，**双向**判据（旧实现写死 curLock == false ⇒ 只能锁、不能解）。"
+            },
+            {
+              "do": "planDone",
+              "status": "AlreadyCorrect",
+              "note": "★ 走到这里说明\"命中但判据未触发点击\"（curLock 已等于 wantLock）⇒ AlreadyCorrect。若内层真的动作过，内层已先记 Success，此处因\"已绑定\"而 no-op。"
             }
           ],
-          "stopWhenPageEnd": {
-            "expr": "allMatched && stop_on_all_matched"
-          }
+          "when": "panelMatched",
+          "note": "★ 2026-09-18：外层闸改 `panelMatched`（= parsePanel.match 的求值结果）。此前这里**没有 when** ⇒ then 恒执行 ⇒ 任何读到\"未锁\"的格子都会点锁钮，包括不在计划里的 4★ 件（真机实测）。"
         }
-      ]
+      ],
+      "stopWhenPageEnd": {
+        "expr": "allMatched && stop_on_all_matched"
+      },
+      "scrollToTop": true,
+      "note_scrollToTop": "★ 2026-09-18：**每个目标起步先回顶**。逐目标循环共用同一网格位置 —— 第 1 个目标走完后列表停在低星区，第 2 个目标若从该位置起步，**稀有度止扫会立刻触发**（真机实测：目标 1 走 90s、目标 2 只走 14s 就结束 ⇒ 真件被误判 NotFound）。pagedGrid 自带 `scrollToTop`（§16.2 安全回顶实现，rosterFind/setFilter 共用）。",
+      "note_noRarityStop": "⚠️ 2026-09-18 撤掉「稀有度止扫」：背包默认按**获得时间**排序，不是按稀有度 ⇒ `rarity < min(plan.rarity)` 会在**第一个 4★** 就触发，把后面（获得时间更早）的 5★ 目标全截断。真机实测：第 2 个目标 ScarletProof/flower（真件）被判 NotFound，只因它排在第一个 4★ 之后。走到底改由 pagedGrid 自带的「整页零新增 ⇒ 回卷止扫」负责（与排序方式无关）。"
+    },
+    {
+      "do": "planSummary",
+      "note": "★ 收尾：始终没被绑定的计划项补记 NotFound，并输出 ManageSummary。"
     }
   ],
   "endConditions": [
     "全部 matched + stop_on_all_matched",
-    "遍历完"
+    "遍历完",
+    "读到稀有度 < 4（5★ 已遍历完，GOODScanner 同款）"
   ],
   "pending": [
     "swipe settle 真机"

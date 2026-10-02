@@ -45,6 +45,7 @@ import com.bettergi.pocket.trigger.TriggerEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.bettergi.pocket.scan.ClickModeOverrides
 
 class TriggerForegroundService : Service() {
     private lateinit var settingsRepository: TriggerSettingsRepository
@@ -219,6 +220,16 @@ class TriggerForegroundService : Service() {
             ACTION_DEBUG_SET_SCAN -> {
                 settingsRepository.setScanEnabled(intent.getBooleanExtra(EXTRA_ENABLED, false))
             }
+            ACTION_DEBUG_SET_CELL_CLICK -> {
+                val mode = intent.getStringExtra(EXTRA_MODE) ?: "swipe"
+                ClickModeOverrides.cellTap = mode.equals("tap", ignoreCase = true)
+                Log.i(TAG, "debug set cell click: mode=$mode ⇒ ${ClickModeOverrides.summary()}")
+            }
+            ACTION_DEBUG_SET_MAX_PAGES -> {
+                val pages = intent.getIntExtra(EXTRA_PAGES, 0)
+                settingsRepository.setScanMaxPages(pages)
+                Log.i(TAG, "debug set max pages: $pages")
+            }
             ACTION_DEBUG_SET_GOOD -> {
                 // 调试链：把设备上的 GOOD/计划文件复制成"当前输入"（用户侧入口在管理器，由 SAF 提供）
                 val src = intent.getStringExtra(EXTRA_GOOD_SRC) ?: ""
@@ -361,6 +372,28 @@ class TriggerForegroundService : Service() {
                     }
                 } else {
                     Log.w(TAG, "debug swipe: startY invalid or dist=0 without measure")
+                }
+            }
+            ACTION_DEBUG_START_FLOW -> {
+                val key = intent.getStringExtra(EXTRA_FLOW) ?: settingsRepository.get().scanFlow
+                val req = intent.getIntExtra(EXTRA_MAX_PAGES, 0)
+                if (scriptRunner.isRunning()) {
+                    Log.w(TAG, "debug start flow: 已在运行 ⇒ 忽略（先发 SCAN_STOP）")
+                    NoticeCenter.warn("已有流程在跑，先停再起")
+                } else {
+                    settingsRepository.setScanFlow(key)
+                    // ⚠️ **只落设置，不显式起跑** —— 真正的起跑由 `settingsListener` 的**唯一入口**
+                    //   （`scanEnabled && screenShare && captureRunning` ⇒ `startFlowIfReady`）负责，
+                    //   与悬浮窗 ▶ / 通知栏开关完全同一条路。
+                    //   ★ 2026-09-18 真机实测：原先"setScanEnabled(true) + 再显式 startFlowIfReady"会
+                    //   **双重启动** —— `start flow`/`foreach iter` 各出现两次、两条流程并发抢屏，
+                    //   然后 `foreach` 之后即哑火（两条互踩）。`isRunning()` 守卫挡不住这个竞态。
+                    //   若 scanEnabled 已是 true，先复位一次，保证下面的 true 是一次**跳变**（否则 listener 不触发）。
+                    if (settingsRepository.get().scanEnabled) {
+                        settingsRepository.setScanEnabled(false)
+                    }
+                    settingsRepository.setScanEnabled(true)
+                    Log.i(TAG, "debug start flow: key=$key（只落设置，起跑交给 settingsListener 唯一入口）")
                 }
             }
             ACTION_DEBUG_SCAN_FLOW -> {
@@ -566,8 +599,11 @@ class TriggerForegroundService : Service() {
         if (GoodRepository.needsInput(ctx, flowKey)) {
             val plan = GoodRepository.planFor(ctx, flowKey)
             if (plan == null) {
-                val label = GoodRepository.labelOf(ctx, flowKey)
-                NoticeCenter.warn("「$label」需要先选一份输入文件（管理器 → GOOD 数据）")
+                // 三种成因各自的文案由 GoodRepository 给（没文件 / 形态不对 / 缺 char），
+                // 避免「已经选过文件」时仍被提示「请先选文件」而误导用户。
+                NoticeCenter.warn(
+                    GoodRepository.inputProblem(ctx, flowKey) ?: "「$flowKey」缺少输入数据，已取消起跑",
+                )
                 if (settingsRepository.get().scanEnabled) {
                     settingsRepository.setScanEnabled(false)
                 }
@@ -722,6 +758,12 @@ class TriggerForegroundService : Service() {
         const val ACTION_SCAN_STOP = "com.bettergi.pocket.action.SCAN_STOP"
         const val ACTION_DEBUG_SET_SCREEN_SHARE = "com.bettergi.pocket.action.DEBUG_SET_SCREEN_SHARE"
         const val ACTION_DEBUG_SET_SCAN = "com.bettergi.pocket.action.DEBUG_SET_SCAN"
+        /** A/B：格点击形态（tap = 零位移；swipe = 2px 微滑）。 */
+        const val ACTION_DEBUG_SET_CELL_CLICK = "com.bettergi.pocket.action.DEBUG_SET_CELL_CLICK"
+        /** A/B：限制扫描页数（小样本用）。 */
+        const val ACTION_DEBUG_SET_MAX_PAGES = "com.bettergi.pocket.action.DEBUG_SET_MAX_PAGES"
+        const val EXTRA_MODE = "mode"
+        const val EXTRA_PAGES = "pages"
         const val ACTION_DEBUG_STATUS = "com.bettergi.pocket.action.DEBUG_STATUS"
 
         /**
@@ -737,6 +779,16 @@ class TriggerForegroundService : Service() {
         const val ACTION_DEBUG_SET_VERBOSE = "com.bettergi.pocket.action.DEBUG_SET_VERBOSE"
         const val ACTION_DEBUG_SWIPE_TEST = "com.bettergi.pocket.action.DEBUG_SWIPE_TEST"
         const val ACTION_DEBUG_SCAN_FLOW = "com.bettergi.pocket.action.DEBUG_SCAN_FLOW"
+
+        /**
+         * 调试：按**与悬浮窗 ▶ 完全相同的入口**起流程（★ 2026-09-18）。
+         *
+         * 与 [ACTION_DEBUG_SCAN_FLOW] 的区别：那个分支直接 `startScan(flow,maxPages,plan)`，
+         * **绕过** `startFlowIfReady` 的输入守卫与 `GoodRepository` 注入 ⇒ 测不到真实用户路径。
+         * 本动作走 `startFlowIfReady`，与悬浮窗点击同一条路，但不需要点悬浮窗
+         * （实测点悬浮窗三重不稳：球位漂移 / 行 y 随面板高度变 / ■ 态残留）。
+         */
+        const val ACTION_DEBUG_START_FLOW = "com.bettergi.pocket.action.DEBUG_START_FLOW"
         const val ACTION_DEBUG_CLICK = "com.bettergi.pocket.action.DEBUG_CLICK"
         const val ACTION_DEBUG_OCR_BENCH = "com.bettergi.pocket.action.DEBUG_OCR_BENCH"
         const val ACTION_DEBUG_OCR_DET = "com.bettergi.pocket.action.DEBUG_OCR_DET"

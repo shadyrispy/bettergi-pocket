@@ -49,7 +49,13 @@ object GoodRepository {
     /** 导入文本（SAF 选中的内容）。返回 (ok, message)。 */
     fun save(context: Context, sourceName: String, text: String): Pair<Boolean, String> {
         val json = runCatching { JSONObject(text) }.getOrNull() ?: return false to "不是合法 JSON"
-        if (!looksLikeData(json)) return false to "这份文件里既没有 artifacts 也没有 plan"
+        if (!looksLikeData(json)) {
+            return false to "形态不对：需要 {lock,unlock} / {equip} / {artifacts} 之一"
+        }
+        // ★ 2026-09-18（P2⑫）：导入期就做**载荷合法性**校验（空键 / rarity∉{4,5} / level∉[0,20]）。
+        //   对齐 GOODScanner 的 400 语义。放在这里而不是等到起跑，是因为"坏条目"在真机上
+        //   的表现是"跑完了却什么都没做"，几乎无法归因。
+        GoodPlan.validateArtifacts(json)?.let { return false to "条目不合法：$it" }
         val dir = File(context.filesDir, DIR)
         if (!dir.exists() && !dir.mkdirs()) return false to "无法创建目录：${dir.path}"
         return runCatching {
@@ -102,6 +108,25 @@ object GoodRepository {
         return GoodPlan.pick(read(context), demand)
     }
 
+    /**
+     * 不能起跑时的用户可读原因（null = 输入齐备，可以起跑）。
+     *
+     * 为什么单独抽出来：`planFor() == null` 有三种成因（没文件 / 文件形态不对 / 脚本不要输入），
+     * 三者的处置完全不同。原先只发一句「需要先选一份输入文件」，
+     * 用户在**已经选过 GOOD 导出**却跑 `auto_equip` 时会被这句误导（2026-09-18 真机实测）。
+     */
+    fun inputProblem(context: Context, flowKey: String): String? {
+        val flow = flowJson(context, flowKey) ?: return null
+        val demand = GoodPlan.demandOf(flow)
+        if (!GoodPlan.needsInput(flow)) return null
+        val label = labelOf(context, flowKey)
+        val json = read(context)
+            ?: return "「$label」需要先选一份输入文件（管理器 → GOOD 数据）"
+        val why = GoodPlan.whyNot(json, demand)
+            ?: return null
+        return "「$label」用不了这份输入：$why"
+    }
+
     /** 脚本显示名（`ui.label`），拿不到就退回 flowKey —— 给提醒文案用。 */
     fun labelOf(context: Context, flowKey: String): String =
         runCatching { org.json.JSONObject(
@@ -115,6 +140,8 @@ object GoodRepository {
         )
     }.getOrNull()
 
+    /** 至少含一个可识别的清单键（形态判断；合法性另见 `validateArtifacts`）。 */
     private fun looksLikeData(json: JSONObject): Boolean =
-        (json.optJSONArray("artifacts")?.length() ?: 0) > 0 || (json.optJSONArray("plan")?.length() ?: 0) > 0
+        listOf("artifacts", "plan", "lock", "unlock", "equip")
+            .any { (json.optJSONArray(it)?.length() ?: 0) > 0 }
 }

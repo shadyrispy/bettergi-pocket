@@ -141,8 +141,30 @@ object TimingOverrides {
      * 未知键忽略；空串 → [reset]。
      * @return 生效值摘要（回写日志用）
      */
+    /** 是否**应用**页面相位平移（真机标定开关；`phi=0` 关闭）。 */
+    var phiApply: Boolean = true
+
+    /**
+     * 入口「锚点就绪」轮询预算覆盖（ms；0 = 用引擎默认 ENTER_SETTLE+SCREEN_SETTLE=2700）。
+     * 真机（华为 2244）实测：**开背包需 2~4s**，2700ms 预算常打满 ⇒ anchor 未命中 ⇒ 整轮 abort。
+     */
+    var anchorBudgetMs: Long = 0L
+
+    /** C' 身份锚定跳过（默认开；`oskip=0` 关闭，用于 A/B）。 */
+    var overlapSkip: Boolean = true
+
+    /**
+     * 入口幂等（开链前先短轮询锚点，命中即跳过入口链）。默认 **开**；
+     * 干跑测试关掉它，因为测试夹具的合成帧会让锚点直接命中、从而不再记录入口链的点击（点击计数断言会变）。
+     */
+    var entryIdempotent: Boolean = true
+
     fun apply(spec: String?): String {
         reset()
+        phiApply = true
+        anchorBudgetMs = 0L
+        overlapSkip = true
+        entryIdempotent = true
         if (!spec.isNullOrBlank()) {
             for (kv in spec.split(',')) {
                 val i = kv.indexOf('=')
@@ -172,6 +194,9 @@ object TimingOverrides {
                     "sigconfirm" -> panelSigConfirm = v != 0L
                     "siggate" -> panelSigGateCached = v != 0L
                     "sigdebug" -> sigDebug = v != 0L
+                    "phi" -> phiApply = v != 0L
+                    "anchor" -> anchorBudgetMs = v.coerceIn(0L, 60000L)
+                    "oskip" -> overlapSkip = v != 0L
                     "advdist" -> advanceDistPx = v.toInt().coerceIn(50, 2000)
                     "advextra" -> advanceExtraPx = v.toInt().coerceIn(-500, 1000)
 
@@ -191,7 +216,8 @@ object TimingOverrides {
             "spoll=$settlePollMs,sstable=$settleStableMs," +
             "sig=${if (panelSigEnabled) 1 else 0},sigpoll=$panelSigPollMs," +
             "sigband=${if (panelSigBand) 1 else 0},sigsamples=$panelSigSamples,sigconfirm=${if (panelSigConfirm) 1 else 0}," +
-            "siggate=${if (panelSigGateCached) 1 else 0}," +
+            "siggate=${if (panelSigGateCached) 1 else 0},phi=${if (phiApply) 1 else 0}," +
+            "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0}," +
             "advdist=$advanceDistPx,advextra=$advanceExtraPx," +
 
             "sigblocks=${if (sigBlocksX > 0) "${sigBlocksX}x$sigBlocksY" else "auto"}," +

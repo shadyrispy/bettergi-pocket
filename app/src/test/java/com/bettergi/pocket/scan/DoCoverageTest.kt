@@ -27,11 +27,17 @@ class DoCoverageTest {
         "enterScreen", "clicks", "dualStateButton", "filterReset", "assertScreen", "readConstellation", "readCount", "pagedGrid",
         "dialog", "ocrWithRetry", "navigate", "foreach", "setFilter",
         "rosterFind", "exit", "verify", "emit",
+        // 2026-09-18 新增：装配的槽位页签（GOODScanner 同款步骤）
+        "clickSlotTab",
+        // 2026-09-18 新增：单趟扫描 + 绑定表（planMatch 在 visit 层，planDone 亦在 visit 层）
+        "planSummary",
     )
 
     /** visit 内（executeVisitStep）支持集。 */
     private fun visitDoes() = setOf(
         "ifMatch", "vote", "click", "parsePanel", "navigate",
+        // 2026-09-18：单趟扫描（visit 内逐格绑定计划项 / 标记已绑定）
+        "planMatch", "planDone",
         "dialog", "verify", "assertScreen", "readConstellation", "emit", "stopWhen",
     )
 

@@ -150,27 +150,24 @@
             "mainName",
             "mainValue",
             "level",
-            "subStats(动态行数)"
+            "subStats(动态行数)",
+            "equipped"
           ],
           "derive": {
             "setName": "由 name 反推（背包面板 set_name 被遮挡 OCR 不可读，用户定稿 2026-09-01）",
             "dict": "tools/good_names.json artifactPieces（276 件/56 套）"
           },
-          "raritySubRule": "5★恒4词条 / 4★初始2最高3(行数>3=解析异常) / 3★2★止扫不解析（用户定稿 2026-09-02）",
+          "raritySubRule": "5★恒4词条 / 4★初始2最高3（块读取不定条数，GT 定标 2026-09-16）/3★纳入导出（2026-09-19 用户定稿，初始2最高3；引擎判据=星带 starCount>=3，banner 误降由星带纠正）/仅 1★/2★ 止扫不解析（GT 无，纯保险）",
           "dict": {
             "name": "mappings.artifactPieces",
             "subStats": "rollTable"
-          }
+          },
+          "note_equipped": "★ 2026-09-19：补声明 `equipped` —— 装备者（GOODScanner `location`）的 ROI `panels.artifact_backpack.equipped` 一直在档，但 fields 没声明 ⇒ 引擎不读 ⇒ location 恒空（GT 262/1045 有值，我方 0/921）。",
+          "note_noRarityStop": "★ 2026-09-19 用户定稿：**撤掉 stopWhen(rarity<4 && level==0)**，圣遗物全量入导出（含 3★）。此前该止扫是「3★ 不解析」时代的必要收尾；现在 3★ 已解析、3★ 区翻页有新增，走到底由「连续整页零新增 ⇒ 回卷止扫」负责，不再依赖稀有度判据（该判据假定按稀有度排序，与实际「获得时间」排序不符）。"
         },
         {
           "do": "emit",
           "as": "GoodArtifact"
-        },
-        {
-          "do": "stopWhen",
-          "expr": "rarity < 4 && level == 0",
-          "action": "Stop",
-          "scope": "cell"
         }
       ]
     }

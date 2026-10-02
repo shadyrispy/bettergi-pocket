@@ -21,6 +21,43 @@ import java.io.File
  * 验证解释器控制流 / pagedGrid 编排 / vote 判据 / parsePanel 集成 / stopWhen / GOOD 产物。
  * 真机前把流程逻辑全部过一遍——路径与解析层之外的最后一块离线覆盖。
  */
+/**
+ * DSL 资产目录（`src/main/assets/dsl`）。**文件级**：嵌套类 [Harness] 与文件级常量都要用
+ * （Harness 是嵌套类而非 inner ⇒ 拿不到外层实例的成员函数，历史上已踩过一次）。
+ */
+private fun dslDir(): File {
+    var dir = File(System.getProperty("user.dir") ?: ".")
+    repeat(4) {
+        val candidate = File(dir, "src/main/assets/dsl")
+        if (candidate.isDirectory) return candidate
+        dir = dir.parentFile ?: return@repeat
+    }
+    error("src/main/assets/dsl not found")
+}
+
+private fun dslAsset(name: String): File = File(dslDir(), name)
+
+// ── 网格参数：**一律从被加载的 profile 推导，不许写死**（2026-09-20 用户要求）──
+//   缘由：本文件所有"每页件数 / 点击数 / 去重件数"断言都是 `cols × traverseRows` 的函数。
+//   写死 21（或 42、row*7+col）会在**换档/改网格**时静默错判，用例名与失败信息还会误导人。
+//   现状：三档（3200 / 2560 / 2244）**实测均为 7 列 × 3 遍历行 = 21 格/页、4 行可见**
+//   —— 2244 档 profile 注释记录了实测列左缘 275/445/616/787/957/1127/1297；
+//      2026-09-20 又用该机截图做像素复核：列左缘实测 275/446/616/786/957/1127/1298，逐列吻合。
+//   ⚠️ "三档同构"是**实测结论**、不是保证 ⇒ 由 `grid params are profile-derived and identical across tiers` 用例守着。
+private val PROFILE_JSON: JSONObject = JSONObject(dslAsset("profiles.json").readText())
+private val GRID_CFG: JSONObject = PROFILE_JSON.getJSONObject("grids").getJSONObject("artifact_backpack")
+private val GRID_COLS: Int = GRID_CFG.getInt("cols")
+private val GRID_TRAVERSE_ROWS: Int = GRID_CFG.getInt("traverseRows")
+private val GRID_VISIBLE_ROWS: Int = GRID_CFG.getInt("visibleRows")
+
+/** 一页**遍历（点击）**的卡格数 = 列数 × 遍历行数（可见行数多 1 行：末行只是滑动锚，不遍历）。 */
+private val CELLS_PER_PAGE: Int = GRID_COLS * GRID_TRAVERSE_ROWS
+
+private val CARD_ORIGIN: IntArray =
+    GRID_CFG.getJSONArray("cardOrigin").let { a -> IntArray(a.length()) { a.getInt(it) } }
+private val CARD_PITCH: IntArray =
+    GRID_CFG.getJSONArray("pitch").let { a -> IntArray(a.length()) { a.getInt(it) } }
+
 class ScanEngineDryRunTest {
 
     /**
@@ -57,15 +94,7 @@ class ScanEngineDryRunTest {
     }
 
     // ---- 测试资产 ----
-    private fun assetsDir(): File {
-        var dir = File(System.getProperty("user.dir") ?: ".")
-        repeat(4) {
-            val candidate = File(dir, "src/main/assets/dsl")
-            if (candidate.isDirectory) return candidate
-            dir = dir.parentFile ?: return@repeat
-        }
-        error("src/main/assets/dsl not found")
-    }
+    private fun assetsDir(): File = dslDir()
 
     // BGR 标量（profiles 色域按 RGB 描述，此处直接给 BGR 顺序）
     private val GOLD = Scalar(100.0, 180.0, 200.0)     // R200 G180 B100：金谓词命中
@@ -176,10 +205,10 @@ class ScanEngineDryRunTest {
         val actions = object : ScanEngine.ActionGateway {
             override fun back(): Boolean = true
 
-            override fun tap(x: Int, y: Int): Boolean {
-                clicks += x to y
-                return true
-            }
+            // ★ 2026-09-19：引擎的**格点击已改纯 tap**（A 实验），故 tap 必须与 click 有同样的记账
+            //   （记坐标 + lastNameCell + cellIdx）；否则夹具里"同一格跨页同名"的去重判据失效
+            //   ⇒ 三个测试误挂（42→62 等）。两者对测试语义等价，直接委托。
+            override fun tap(x: Int, y: Int): Boolean = click(x, y, 180L)
 
             override fun click(x: Int, y: Int, durationMs: Long): Boolean {
                 clicks += x to y
@@ -187,12 +216,12 @@ class ScanEngineDryRunTest {
                 //   且与遍历前的 enterScreen/setFilter 链式点击无关（曾用自增序号 → 页 1 序号被前置点击偏移，
                 //   页 2 重置后错位 → 去重漏 2 件：expected 21 but was 23）。
                 lastNameCell = "晨光的明誓#${x * 10000 + y}"
-                // 格序（row*7+col）：供 sub0 制造 21 个互不相同的"真实字段差异"（名字已不参与去重键）
-                // ⚠️ 用**真实网格几何**（profiles.json：cardOrigin [416,297]、pitch [244,292]）——
+                // 格序（row*cols+col）：供 sub0 制造"每格各不相同的真实字段差异"（名字已不参与去重键）
+                // ⚠️ 用**被加载 profile 的真实网格几何**（本档 cardOrigin/pitch/cols/traverseRows）——
                 //    早先误写 294（列距）⇒ 21 格里 3 格算出同一 (row,col) ⇒ 夹具件数 21→18 ✗。
-                val col = ((x - 416) / 244).coerceIn(0, 6)
-                val row = ((y - 297) / 292).coerceIn(0, 2)
-                cellIdx = row * 7 + col
+                val col = ((x - CARD_ORIGIN[0]) / CARD_PITCH[0]).coerceIn(0, GRID_COLS - 1)
+                val row = ((y - CARD_ORIGIN[1]) / CARD_PITCH[1]).coerceIn(0, GRID_TRAVERSE_ROWS - 1)
+                cellIdx = row * GRID_COLS + col
                 return true
             }
 
@@ -221,7 +250,7 @@ class ScanEngineDryRunTest {
                     // ★ 2026-09-16（用户定稿"名字不能作为去重依据"后）：**名字出键** ⇒ 夹具若仍只靠
                     //   名字区分 21 格，去重会把它们并成 1 件（判据失真）⇒ 这里让 **sub0 也随之变化**
                     //   （由同一点击坐标派生 ⇒ 同一格跨页取同值、不同格不同值，与真实"每件词条不同"一致）。
-                    val sub0 = "暴击率+%.1f%%".format(5.4 + cellIdx * 0.1) // 21 格 ⇒ 21 个不同值
+                    val sub0 = "暴击率+%.1f%%".format(5.4 + cellIdx * 0.1) // 每格一个不同值（$CELLS_PER_PAGE 格/页）
                     when (r) {
                         NAME_RECT -> lastNameCell
                         SUB0_RECT, SUB0_RECT_CRAFTED -> sub0
@@ -285,6 +314,9 @@ class ScanEngineDryRunTest {
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
         //    fpband/判据本身由 LandingShiftTest / LandingDecisionTest 用合成平移帧（纯函数）覆盖。
         //    此处直接调 `engine.run()`，不经过 `ScriptRunner.startScan`。
+        // ★ 2026-09-19：**关掉入口幂等**——合成帧会让锚点直接命中 ⇒ 入口链点击被跳过 ⇒
+        //   下面所有"点击数"断言（ENTER_CHAIN_CLICKS + 21 …）都会失配。夹具要的是"完整走一遍入口链"。
+        TimingOverrides.entryIdempotent = false
         val profile = ScreenProfile(JSONObject(File(assetsDir(), "profiles.json").readText()))
         profile.calibrate(3200, 1440)
         val flow = JSONObject(File(assetsDir(), "flows/artifact_scan.json").readText())
@@ -337,24 +369,45 @@ class ScanEngineDryRunTest {
         // （2026-09-12 语义变更：单次整页重复视为「滑空/半页重叠」，不再直接终止扫描
         //   —— 实测短推进会让重复计数跨页凑满阈值，导致 933 件的全量扫描在第 8 页误停；
         //   见 ScanEngine.dupRollbackConfirmed 的 KDoc 与 _audit/PIPELINE-FEASIBILITY.md §14.20）
-        assertEquals(21, engine.results.size)
+        assertEquals(CELLS_PER_PAGE, engine.results.size)
         assertEquals(2, h.swipes.size)
         assertEquals("stopWhen", h.finished)
     }
 
     @Test
-    fun `full flow produces 21 artifacts`() {
+    fun `full flow produces one page of artifacts`() {
         val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)))
-        assertEquals(21, engine.results.size)
+        assertEquals(CELLS_PER_PAGE, engine.results.size)
         assertEquals("completed", h.finished)
         // 点击数：enterScreen 链 4 击（bagpack + filterRoundBtn + filterPanel.reset + filterPanel.ok）+ 21 格 = 25
         // （2026-09-12：旧链的 artifact_tab 已失效，改为进背包后复位筛选）
-        assertEquals(ENTER_CHAIN_CLICKS + 21, h.clicks.size)
+        assertEquals(ENTER_CHAIN_CLICKS + CELLS_PER_PAGE, h.clicks.size)
         // ⚠️ 单页 + 翻页后指纹不变 ⇒ 触发「翻页未生效」重发守卫：
         //    1 次正式翻页 + 3 次确认（GRID_END_RETRIES）= 4 次滑动。
         //    为什么需要（2026-09-12 实测）：约 1/17 页的翻页滑动**完全没落地**，而「指纹不变」无法区分
         //    「没落地」与「真的到底」⇒ 先用重发排除前者，连续 3 次不动才认定到底（否则整轮被提前收掉）。
         assertEquals(4, h.swipes.size)
+    }
+
+    /**
+     * 断言依据守卫（2026-09-20 用户要求）：本文件所有"每页件数/点击数"断言都由
+     * `CELLS_PER_PAGE = cols × traverseRows` 推导 ⇒ 该值必须与**当前被加载的 profile**一致，
+     * 且三档同构（否则各档必须各写一份断言，不许拿一档的数字去断言另一档）。
+     * 这里把"三档同构"这条**实测结论**变成可执行守门：任一新档/改档，此用例先红。
+     */
+    @Test
+    fun `grid params are profile-derived and identical across tiers`() {
+        val tiers = listOf("profiles.json", "profiles_2560x1440.json", "profiles_2244x1080.json")
+        for (t in tiers) {
+            val g = JSONObject(File(assetsDir(), t).readText())
+                .getJSONObject("grids").getJSONObject("artifact_backpack")
+            assertEquals("$t: cols", GRID_COLS, g.getInt("cols"))
+            assertEquals("$t: traverseRows", GRID_TRAVERSE_ROWS, g.getInt("traverseRows"))
+            assertEquals("$t: visibleRows", GRID_VISIBLE_ROWS, g.getInt("visibleRows"))
+        }
+        // 可见行数必须 > 遍历行数（最后一行是滑动锚，只用于"翻页是否生效"的判据）
+        assertTrue("visibleRows 应大于 traverseRows", GRID_VISIBLE_ROWS > GRID_TRAVERSE_ROWS)
+        assertEquals("每页遍历格数", GRID_COLS * GRID_TRAVERSE_ROWS, CELLS_PER_PAGE)
     }
 
     @Test
@@ -391,7 +444,7 @@ class ScanEngineDryRunTest {
         assertEquals(1026, engine.vars.total)
         // 首击 = 背包锚点（2026-09-13 晚：BS@3200 实机复核后**回退为实测值** (2824,80)——交集中心 (2830,93) 只对 2244 档（双机）成立）；其后 3 击 = 筛选复位链（filterRoundBtn → filterPanel.reset → filterPanel.ok）
         assertEquals(2824 to 80, h.clicks[0])
-        assertEquals(ENTER_CHAIN_CLICKS, h.clicks.size - 21)
+        assertEquals(ENTER_CHAIN_CLICKS, h.clicks.size - CELLS_PER_PAGE)
         // 前置点击序列（profile 3200 基坐标中心）：
         //   0=背包(2824,80)（BS@3200 模板匹配 0.9970 实测） → 1=**圣遗物页签**(250,415) → 2=漏斗(399,1336) → 3=面板⟲重置(401,1337) → 4=面板确认(852,1337)
         // ⚠️ 第 1 击（页签）是 2026-09-13 新增：背包会**记住上次打开的类别**，不主动切页签就会落在「武器」页
@@ -428,25 +481,19 @@ class ScanEngineDryRunTest {
         assertTrue(h.progress.isNotEmpty())
     }
 
-    // ---- 3★ 止扫闭环：第 2 页出现 3★+未强化 → stopWhen 触发 → 不入库、翻页停止 ----
+    // ---- 3★ 纳入导出（2026-09-19 用户定稿）：3★ 正常解析入库、稀有度止扫已从流程撤掉 ----
     @Test
-    fun `three-star stop marker halts after page completes`() {
+    fun `three-star pieces are parsed and emitted`() {
         val page1 = Page(syntheticFrame(5), pageLines("Lv.90"), 1026)
         val page2 = Page(syntheticFrame(3, page = 1), pageLines("Lv.0"), 1030)
         val (engine, h) = runEngine(listOf(page1, page2))
 
-        // 页 1：21 件 5★ 入库；页 2：rarity=3 → parsePanel 止扫不解析 → results 仍 21
         println("DIAG stop=${engine.vars.stopRequested} finished=${h.finished} clicks=${h.clicks.size} swipes=${h.swipes.size} results=${engine.results.size} rarity=${engine.vars.rarity} level=${engine.vars.level} pagesSeen=${h.pageIndex + 1} rarities=${engine.results.map { it.rarity }.distinct()}")
-        assertEquals(21, engine.results.size)
-        assertEquals(true, engine.vars.stopRequested)
-        assertEquals("stopWhen", h.finished)
-        // 页 1 翻页 1 次 + 页 2 遍历完后停止（不再 swipe）= 共 1 次
-        assertEquals(1, h.swipes.size)
-        // 页 2 仍完整遍历 21 格（scope=cell 本页后停；⚠️ 回卷止扫才是立即停，见 ScanEngine 注释）
-        assertEquals(ENTER_CHAIN_CLICKS + 21 + 21, h.clicks.size)
-        // 止扫页不入库：最后入库件仍是页 1 的 5★
-        val lastArtifactProgress = h.progress.last { it.first == "artifact" }
-        assertEquals(5, lastArtifactProgress.second["rarity"])
+        // 页 1：满页 5★；页 2：3★（starCount=3）→ 正常 emit ⇒ 共 2 页
+        assertEquals(2 * CELLS_PER_PAGE, engine.results.size)
+        assertEquals(listOf(3, 5), engine.results.map { it.rarity }.distinct().sorted())
+        // 稀有度止扫已撤：3★ **不触发** stopRequested（收尾由「连续整页零新增 ⇒ 回卷止扫」负责）
+        assertEquals(false, engine.vars.stopRequested)
     }
 
     // ---- 健壮性：onZero 重进重试 / anchor 断言失败终止 ----
@@ -460,7 +507,7 @@ class ScanEngineDryRunTest {
         )
         assertEquals(1026, engine.vars.total)
         // 重进后 clicks 应多出 enterScreen 链一轮（1 击；filterReset 不重跑，见 ENTER_CHAIN_REENTRY_CLICKS）
-        assertEquals(ENTER_CHAIN_CLICKS + ENTER_CHAIN_REENTRY_CLICKS + 21, h.clicks.size)
+        assertEquals(ENTER_CHAIN_CLICKS + ENTER_CHAIN_REENTRY_CLICKS + CELLS_PER_PAGE, h.clicks.size)
     }
 
     /** anchor 断言 3 次重试仍失败 → ScanAbortedException 终止（不继续扫描）。 */

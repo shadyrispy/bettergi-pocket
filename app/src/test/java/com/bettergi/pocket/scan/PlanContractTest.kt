@@ -11,7 +11,8 @@ import org.junit.Test
 /**
  * P4 plan 契约回归测试（2026-09-10，实跑定谳后固化）。
  *
- * 契约来源：flow `vars.plan = list<{char, slot, target:GoodArtifact}>`；
+ * 契约来源（2026-09-18 起）：GOODScanner —— 锁定 `{lock,unlock}`、装配 `{equip:[{artifact,location}]}`，
+ * 由 [GoodPlan] 归一成扁平计划项；
  * auto_equip 的 `setFilter.selectByOcr` 用 [TaskMatch.targets] 选套装，
  * `stopWhen expr="panelMatch(target, tol=0.1)"` 用 [TaskMatch.hardMatch] 判命中。
  *
@@ -47,7 +48,9 @@ class PlanContractTest {
     fun `full target matches the parsed artifact`() {
         val task = JSONObject(
             """{"char":"希诺宁","setKey":"ScrollOfTheHeroOfCinderCity","slot":"flower","level":20,
-               "mainStatKey":"hp","substats":[{"key":"critRate_","value":5.8}]}""",
+               "mainStatKey":"hp","substats":[
+                 {"key":"critRate_","value":5.8},{"key":"hp","value":717},
+                 {"key":"enerRech_","value":12.4},{"key":"eleMas","value":23}]}""",
         )
         val why = StringBuilder()
         assertTrue(TaskMatch.hardMatch(task, flower, 0.1, why))
@@ -85,23 +88,70 @@ class PlanContractTest {
         ))
     }
 
+    /**
+     * ★ 2026-09-18（P1⑥）副词条改**严格**：对齐 GOODScanner `matching::substats_match`
+     * （数量相等 + 目标每个 key 都在实际里 + 值差 ≤ tol·|目标值|）。
+     * 旧语义是宽松子集 ⇒ 目标只列 1 条也能命中 4 条的件（过匹配，可能锁错件）。
+     */
     @Test
-    fun `substat relative tolerance boundary`() {
+    fun `substats are strict - all listed, count equal, tolerance on values`() {
+        val ok = JSONObject(
+            """{"substats":[{"key":"critRate_","value":5.8},{"key":"hp","value":717},
+               {"key":"enerRech_","value":12.4},{"key":"eleMas","value":23}]}""",
+        )
         // critRate_ 实测 5.8；tol=0.1 → 相对容差 0.58 → [5.22, 6.38] 内通过，外拒绝
-        val inTol = JSONObject("""{"substats":[{"key":"critRate_","value":6.3}]}""")
-        val outTol = JSONObject("""{"substats":[{"key":"critRate_","value":7.0}]}""")
-        val missing = JSONObject("""{"substats":[{"key":"critDMG_","value":10.0}]}""")
+        val inTol = JSONObject(
+            """{"substats":[{"key":"critRate_","value":6.3},{"key":"hp","value":717},
+               {"key":"enerRech_","value":12.4},{"key":"eleMas","value":23}]}""",
+        )
+        val outTol = JSONObject(
+            """{"substats":[{"key":"critRate_","value":7.0},{"key":"hp","value":717},
+               {"key":"enerRech_","value":12.4},{"key":"eleMas","value":23}]}""",
+        )
+        val short = JSONObject("""{"substats":[{"key":"critRate_","value":5.8}]}""")
+        val missing = JSONObject(
+            """{"substats":[{"key":"critRate_","value":5.8},{"key":"hp","value":717},
+               {"key":"enerRech_","value":12.4},{"key":"critDMG_","value":23}]}""",
+        )
+        assertTrue(TaskMatch.hardMatch(ok, flower, 0.1))
         assertTrue(TaskMatch.hardMatch(inTol, flower, 0.1))
         assertFalse(TaskMatch.hardMatch(outTol, flower, 0.1))
-        val why = StringBuilder()
-        assertFalse(TaskMatch.hardMatch(missing, flower, 0.1, why))
-        assertTrue("缺词条需报出：$why", why.toString().contains("缺副词条 critDMG_"))
+        val whyShort = StringBuilder()
+        assertFalse(TaskMatch.hardMatch(short, flower, 0.1, whyShort))
+        assertTrue("数量不符需报出：$whyShort", whyShort.toString().contains("数量"))
+        val whyMiss = StringBuilder()
+        assertFalse(TaskMatch.hardMatch(missing, flower, 0.1, whyMiss))
+        assertTrue("缺词条需报出：$whyMiss", whyMiss.toString().contains("critDMG_"))
     }
 
     @Test
-    fun `substat without value only checks presence`() {
-        assertTrue(TaskMatch.hardMatch(JSONObject("""{"substats":[{"key":"eleMas"}]}"""), flower, 0.1))
-        assertFalse(TaskMatch.hardMatch(JSONObject("""{"substats":[{"key":"critDMG_"}]}"""), flower, 0.1))
+    fun `rarity and elixirCrafted are hard fields`() {
+        assertTrue(TaskMatch.hardMatch(JSONObject("""{"rarity":5}"""), flower, 0.1))
+        assertFalse(TaskMatch.hardMatch(JSONObject("""{"rarity":4}"""), flower, 0.1))
+        // 未给 rarity ⇒ 不比对（手写的最小计划仍可用）
+        assertTrue(TaskMatch.hardMatch(JSONObject("""{"level":20}"""), flower, 0.1))
+        // 祝圣：显式给出时才比对
+        assertTrue(TaskMatch.hardMatch(JSONObject("""{"elixirCrafted":false}"""), flower, 0.1))
+        assertFalse(TaskMatch.hardMatch(JSONObject("""{"elixirCrafted":true}"""), flower, 0.1))
+    }
+
+    @Test
+    fun `identityKeyOf groups identical pieces and separates different ones`() {
+        val a = JSONObject(
+            """{"setKey":"X","slotKey":"flower","rarity":5,"level":20,"mainStatKey":"hp",
+               "substats":[{"key":"critRate_","value":5.8},{"key":"hp","value":717}]}""",
+        )
+        // 副词条顺序不同、值有 0.04 的舍入差 ⇒ 仍是同一件
+        val same = JSONObject(
+            """{"setKey":"X","slotKey":"flower","rarity":5,"level":20,"mainStatKey":"hp",
+               "substats":[{"key":"hp","value":717.04},{"key":"critRate_","value":5.8}]}""",
+        )
+        val other = JSONObject(
+            """{"setKey":"X","slotKey":"flower","rarity":5,"level":20,"mainStatKey":"hp",
+               "substats":[{"key":"critRate_","value":5.8},{"key":"hp","value":717},{"key":"eleMas","value":1}]}""",
+        )
+        assertEquals(TaskMatch.identityKeyOf(a), TaskMatch.identityKeyOf(same))
+        assertFalse(TaskMatch.identityKeyOf(a) == TaskMatch.identityKeyOf(other))
     }
 
     // ---- targets：筛选目标集合 ----
@@ -139,6 +189,35 @@ class PlanContractTest {
         assertTrue(TaskMatch.targets(JSONObject("{}"), emptyList()).isEmpty())
         // 空 plan 项不应产生空串（否则会污染 setFilter 的 pending 集合）
         assertTrue(TaskMatch.targets(null, listOf(JSONObject("""{"char":"X"}"""))).isEmpty())
+    }
+
+    /**
+     * 2026-09-18 真机缺陷回归：GOOD 导出的圣遗物项只有 `setKey`（= 词典 `artifactSets[].id`），
+     * **没有** `setName`。只读 `setName` 时，管理器导入的 GOOD 文件（`artifact_lock` 的输入形态）
+     * 恒得到空目标集 ⇒ `setFilter: 无筛选目标（P4 未注入 setName/targets）` ⇒ 流程空跑。
+     */
+    @Test
+    fun `targets reads setKey so GOOD exports can drive setFilter`() {
+        val plan = listOf(JSONObject("""{"setKey":"GladiatorsFinale","slotKey":"flower","level":0}"""))
+        assertEquals(listOf("GladiatorsFinale"), TaskMatch.targets(null, plan).toList())
+
+        assertEquals(
+            setOf("AubadeOfMorningstarAndMoon"),
+            TaskMatch.targets(JSONObject("""{"setKey":"AubadeOfMorningstarAndMoon"}"""), null),
+        )
+        // targets[] 里的对象元素同样要读 setKey
+        assertEquals(
+            setOf("EmblemOfSeveredFate"),
+            TaskMatch.targets(JSONObject("""{"targets":[{"setKey":"EmblemOfSeveredFate"}]}"""), null),
+        )
+        // setName 与 setKey 并存时都进集合（归一在词典层，去重交给 LinkedHashSet）
+        assertEquals(
+            listOf("烬城勇者绘卷", "ScrollOfTheHeroOfCinderCity"),
+            TaskMatch.targets(
+                JSONObject("""{"setName":"烬城勇者绘卷","setKey":"ScrollOfTheHeroOfCinderCity"}"""),
+                null,
+            ).toList(),
+        )
     }
 
     @Test
