@@ -1,0 +1,12 @@
+{
+  "flow": "char_calibrate",
+  "version": "1.0.0",
+  "profile": "android_3200x1440",
+  "description": "临时标定 char_popup settle：当前已在角色属性页时直接翻页，不测导航",
+  "returnHome": false,
+  "vars": { "roster": "list" },
+  "steps": [
+    { "do": "pagedGrid", "grid": "char_popup", "loopVar": "char",
+      "visit": [ { "do": "emit", "as": "noop" } ] }
+  ]
+}

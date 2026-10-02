@@ -1,0 +1,8 @@
+# bettergi-pocket 构建工具链（mise 统一管理，确保环境可复现）
+# gradle/gradle-daemon-jvm.properties 固定 toolchainVersion=21，Gradle 9.2.1 launcher 同用 21
+[tools]
+java = "21.0.2"
+
+# 用法：mise exec -- ./gradlew assembleDebug
+# 沙箱/CI 下 mise PATH 注入可能被宿主覆盖时，显式：
+#   JAVA_HOME=$(mise where java) ./gradlew assembleDebug

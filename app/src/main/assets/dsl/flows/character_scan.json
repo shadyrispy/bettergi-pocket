@@ -1,0 +1,154 @@
+{
+  "flow": "character_scan",
+  "version": "1.2.0",
+  "profile": "android_3200x1440",
+  "description": "流程三：角色两阶段扫描（快扫 + 可疑重扫）。Android 已免除逐项天赋/命座点击（概览页判据直读）",
+  "vars": {
+    "roster": "list",
+    "suspects": "list"
+  },
+  "steps": [
+    {
+      "do": "enterScreen",
+      "target": "char_interface",
+      "chain": [
+        "game_home→character(2925,36)"
+      ],
+      "anchor": {
+        "kind": "ocr",
+        "rect": "$panels.char_profile.header",
+        "retries": 3,
+        "expect": "元素",
+        "note": "★ 2026-09-11 修(③): 原锚点 rect=$panels.char_profile.name 且无 expect → assertAnchor 直接『跳过文本断言』→ returnToHome 8 次失败后仍盲跑(实测从任务界面起跑: 全格 name/lv 空/added=0)。expect 用『元素』: char_profile.header 在所有 tab 恒显示 <元素>元素/角色名, 而世界等其它界面该 ROI 无『元素』二字 → 可靠区分是否到达。"
+      }
+    },
+    {
+      "do": "pagedGrid",
+      "grid": "char_strip",
+      "scrollToTop": true,
+      "scrollToTopNote": "★ 2026-09-11 真机2244 修：头像条滚动位置**跨 run 残留**（列表跨会话保留）→ 不回顶则首页可能是末段、且 pagedGrid 会立刻判 reached end 漏扫角色。artifact_scan/weapon_scan 早有此步，character_scan 漏了。引擎 swipeGridToTop 支持 1 列网格（advanceStart 需 colXs≥2 故自动走 profile from/to）。",
+      "loopVar": "char",
+      "note": "★ 用户 2026-09-10 定：**角色遍历走左侧头像条的 1 列网格**（原生常驻列，不遮挡左侧菜单 → 可单趟交错读属性/命座/天赋）。char_popup 只留给 auto_equip（找单个角色用，密度高）。⚠️ 该列**自由滚动无吸附**，引擎需每轮重检槽位。",
+      "visit": [
+        {
+          "do": "click",
+          "fast": {
+            "at": "$cell.center"
+          },
+          "fallback": [
+            {
+              "kind": "ocrAnchor",
+              "region": "$panels.char_profile.popupName"
+            }
+          ]
+        },
+        {
+          "do": "navigate",
+          "leftMenu": [
+            "属性"
+          ],
+          "note": "★ 2026-09-10 修：上一格的 navigate 把页面留在「天赋」→ 本格 parsePanel 的 name ROI（y208-288）会读到天赋名（实测乱码形如「西风剑术.」「外域剑术.」）→ 必须先复位到属性页再解析。"
+        },
+        {
+          "do": "assertScreen",
+          "rect": "$panels.char_profile.bottomBar",
+          "expect": "提升指南",
+          "retries": 3,
+          "onFail": "continue",
+          "note": "2026-09-13：**页签级确认**。三个页签（属性/命座/天赋）**左上标题完全相同**（都是 `<元素>/<角色名>`）⇒ 界面级判据区分不了页签，必须用**页内独有文本**。实测（三张 curated 截图全帧 OCR 取差集）：属性页独有 `提升指南`（底部按钮 x[359,485] y[970,1005]，置信 1.00）。"
+        },
+        {
+          "do": "assertScreen",
+          "expect": "元素",
+          "retries": 2,
+          "onFail": "continue",
+          "note": "2026-09-13：页签切换后确认**仍在角色界面**（标题条 `<元素>/<角色名>` 含「元素」，实测 5 张角色相关图全部命中）。⚠️ 已知局限：**页签级（属性/命座/天赋）不改变该标题** ⇒ 这里只能确认「没被弹窗或别的界面顶掉」；页签级判据（左栏选中项高亮/页内独有文本）待补 —— 见 dsl/docs/screen-confirm.md §6。"
+        },
+        {
+          "do": "parsePanel",
+          "panel": "char_profile",
+          "fields": [
+            "name",
+            "level",
+            "header",
+            "favor"
+          ],
+          "dict": {
+            "name": "mappings.characters",
+            "fuzzy": 1
+          },
+          "note": "弹窗态角色名 ROI 与详情页一致（±2px 实测）"
+        },
+        {
+          "do": "navigate",
+          "leftMenu": [
+            "命之座"
+          ],
+          "note_tabfix20260913": "2026-09-13 拆步：原为一次性 [命之座, 天赋]。拆开是为了**在两击之间插命座页确认**（readConstellation）—— 三页签左上标题相同、命座页底部为空（无文本正判据），只能靠节点环判据。★2026-09-17 职责划清：本步（do=readConstellation）**仅做页确认 + 记日志**；命座**读数**改由 panels.char_constellation（节点中心区平均饱和度 + 逐节点阈值 [16,19,31,16,14,19] + 稳定轮询）产出，已与 GT 对齐 100%（见 verify/_audit/CHAR-SCAN-ALIGN-20260917.md）。",
+          "read": [
+            {
+              "page": "char_constellation",
+              "fields": [
+                "6 节点读数 —— 实现在 ScanEngine.readConstellation()（无参版）：panels.char_constellation 中心区平均饱和度 + 逐节点阈值 [16,19,31,16,14,19] + 稳定轮询；本 do 步骤只做页确认"
+              ]
+            },
+            {
+              "page": "char_talent",
+              "fields": [
+                "3 个战斗天赋 Lv —— 实现在 ScanEngine.readTalent()：panels.char_talent.lvRois（2026-09-17 x 放宽到 2595 防裁首位）+ 至少 2 次读逐项 max（最多 6 次）+ 第 3 行读到**行名**时下移 153px 补读"
+              ]
+            }
+          ]
+        },
+        {
+          "do": "readConstellation",
+          "verifyPage": true,
+          "onFail": "continue",
+          "note": "2026-09-13：**命座页确认**（补上三页签里唯一缺的正判据）。判据 = GOODScanner 移植的**节点环亮度**：6 个节点各取环带 ring 与中心 center，锁定态 ring−center 大、激活态小；lockedCount ≥ screens.char_constellation.pageMinLocked(=3) ⇒ 在命座页。实测（2244 / 5 角色）命座页命中 4~6 个，属性页/天赋页同坐标 0 个。⚠️ onFail=continue（先观察、不阻塞）；⚠️ 本步**只读不写 vars** —— 等级（激活数）目前**仍差 1**（阿罗夏 C4 读成 C1-C3，节点中心待逐节点精修），**先不要接进 emit/GOOD**（★2026-09-17 职责划清：本步只做页确认；命座数由 panels 判据产出，GT 已 100%）。详见 topics/09-reference-goodscanner.md 与 dsl/docs/screen-confirm.md §11（该节已标注「职责=仅页确认」）。"
+        },
+        {
+          "do": "navigate",
+          "leftMenu": [
+            "天赋"
+          ],
+          "note": "2026-09-13 拆步的第二击：从命座页点到天赋页（原来与命之座同一 navigate 里连点）。"
+        },
+        {
+          "do": "assertScreen",
+          "rect": "$panels.char_talent.bottomBar",
+          "expect": "天赋演示|战斗天赋",
+          "alts": [
+            {
+              "rect": "$panels.char_talent.lvArea",
+              "expect": "Lv\\."
+            }
+          ],
+          "retries": 3,
+          "onFail": "continue",
+          "note": "2026-09-13：`navigate(命之座→天赋)` 的落点确认。实测天赋页有两态：常态底部 = `天赋演示`；**有可升级天赋时**底部变成 `选中战斗天赋以升级`（此时「天赋演示」按钮不可见、右侧等级区也读空，实测 3/3 未命中）⇒ 判据取 **`天赋演示|战斗天赋`** 覆盖两态（底部按钮 x[1792,1919] y[970,1006]，置信 1.00）。⚠️ **命之座页没有可用的稳定文本**（独有文本只有随角色变化的命座名），左菜单高亮也不可用（实测亮度受背景立绘影响：属性页最亮的竟是「资料」169 vs 属性 159）⇒ 命之座页**无「独有文本」**，只能用**排除法**（「无 `提升指南`、无 `天赋演示|战斗天赋`」⇒ 判定在命座页）。★2026-09-17：该排除法**已落地**为 `ScanEngine.charPanelLooksWrongPage()`（命中属性/天赋页文本 ⇒ 重击左菜单「命之座」+ 等 1.3s，最多 2 次）。"
+        },
+        {
+          "do": "stopWhen",
+          "mode": "duplicateStreak",
+          "streak": 3,
+          "dupPageConfirm": 2,
+          "action": "Stop",
+          "note": "阈值不再承担「回卷」判据：pagedGrid 内引擎按**该网格一页的卡片数**（cols×traverseRows）自动覆盖（见 ScanEngine.dupLimitEffective）；此处的 3 仅作 snap/rosterFind 等非翻页路径的兜底。"
+        },
+        {
+          "do": "emit",
+          "as": "GoodCharacter",
+          "suspectIf": "level in [91..94,96..99,2..9] || (level>=40 && talents==1)"
+        }
+      ]
+    }
+  ],
+  "endConditions": [
+    "连续 3 个重复角色（主力，抗列表回卷/滑动失效）",
+    "pagedGrid reachedEnd 指纹到底（非回卷列表的自然收尾）"
+  ],
+  "pending": [
+    "char_strip 自由滚动 → 引擎每轮重检槽位（GridAlign 相位检测对 cols=1 待实跑验证）",
+    "char_strip settle 真机实测"
+  ]
+}

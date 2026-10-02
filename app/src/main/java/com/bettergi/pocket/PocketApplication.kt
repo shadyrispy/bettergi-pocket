@@ -7,6 +7,7 @@ import android.os.Process
 import android.util.Log
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.recognition.ocr.OcrFactory
+import com.bettergi.pocket.dsl.FlowSource
 import com.bettergi.pocket.recognition.opencv.OpenCvRuntime
 import java.io.File
 
@@ -14,7 +15,9 @@ class PocketApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         InputAccessibilityService.attach(this)
+        FlowSource.install(this)
         if (currentProcessName() != packageName) return
+        AppForeground.install(this)
         if (!OpenCvRuntime.ensureLoaded()) {
             Log.e(TAG, "OpenCV initialization failed")
         }
