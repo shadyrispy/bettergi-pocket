@@ -225,6 +225,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 (if (panelShotSeq > 0 || panelShotDropped > 0 || panelShotWriteFailures > 0) {
                     "| 取证图 落=${panelShotSeq}张 闸门丢弃=${panelShotDropped}张 写失败=${panelShotWriteFailures}张 "
                 } else "") +
+                // ★ 批2-A：帧新鲜性计数，同样只在非 0 时打。`旧帧顶替>0` 就意味着那一格
+                //   识别的是**动作之前**的画面 —— 与"画面真的没变"在下游同形，是静默错读的口。
+                (if (freshFrameTimeouts > 0) {
+                    "| 帧新鲜性 超时=${freshFrameTimeouts}次 旧帧顶替=${staleFramesUsed}次 无帧可退=${frameRefusedTotal}次 "
+                } else "") +
                 "perCell=${perCell}ms perPage=${perPage}ms | waits nav=${tmNavMs} panel=${tmPanelMs} settle=${tmSettleMs}",
         )
         // 只读性能探针：click/swipe 真实注入耗时 + OCR 网关耗时（分量实测，供
@@ -622,9 +627,40 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      * 由 [freshFrame] 打点 —— 覆盖"每格抓帧 + settle 轮询"两条主路径 ⇒
      * **真的卡死（JNI/a11y/MediaProjection 阻塞）时它不会前进**，而只是在慢（如长 settle）时会前进 ✓。
      * 监视方在 `ScriptRunner`（独立 daemon 线程）⇒ 专治**visit 内部挂死**（页级看门狗只在格与格之间检查，抓不到）。
+     *
+     * ⚠️ 上面那句"MediaProjection 阻塞时不会前进"**与代码相反**（2026-10-03 核对）：
+     * [freshFrame] 把这一行打在真正取帧**之前**，所以投影彻底停摆、每轮都超时回退时它照样前进，
+     * 会话看门狗永远不触发。修法在批 2-B（连同删回退一起做），本批只把计数补上。
      */
     @Volatile
     var lastProgressAtMs: Long = 0L
+        internal set
+
+    /**
+     * ★ 批2-A（2026-10-03，**只观测不判决**）：[freshFrame] 等不到"动作后新帧"的次数。
+     *
+     * 为什么要单独数：`freshFrame` 超时后会**回退拿缓存里的最后一帧**继续识别
+     * （`ScanGridDomain.kt:1404-1419`），而那条回退按构造拿到的就是被新鲜性判据拒掉的那一帧
+     * （`FrameSource.grabFresh` 的循环条件就是 `ts > threshold`，回退读的又是同一个
+     * `publishedBgr` 槽，`frameGeneration()` 与它同源同锁）。于是
+     * **"取不到新帧"和"画面真的没变"在下游完全同形** —— #147/#154/#148 那一族症状没法判别，
+     * 很可能就是因为缺这个数。
+     *
+     * ⚠️ 本批**不改任何判决**：`lastProgressAtMs` 仍打在取帧之前（下面那条注释说的正是这件事），
+     * 会话看门狗因此看不见"无帧"。等这一轮拿到分布，再在批 2-B 同时改"打点位置 + 删回退 + 配额判决"。
+     */
+    @Volatile
+    var freshFrameTimeouts: Int = 0
+        internal set
+
+    /** [freshFrameTimeouts] 里**真的**用旧帧顶上去了的次数（>0 就意味着那一格识别的是过期画面）。 */
+    @Volatile
+    var staleFramesUsed: Int = 0
+        internal set
+
+    /** 超时且连旧帧也没有、最终抛给上层次数（这是唯一会走到"本轮失败"的那一档）。 */
+    @Volatile
+    var frameRefusedTotal: Int = 0
         internal set
 
     /**

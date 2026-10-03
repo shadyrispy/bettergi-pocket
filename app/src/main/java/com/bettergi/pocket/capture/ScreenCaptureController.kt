@@ -890,6 +890,9 @@ class ScreenCaptureController(
         // 持锁 join 同样会把主线程钉死 1s。
         joinRetiredPoller(retired)
         if (notify) {
+            // 与 `stopScreenShare()`（我们自己关的）区分开：小米 15 实测转竖屏会让系统直接
+            // 拆掉虚拟屏，之后每次起扫都要重走一遍授权 —— 没有这条日志就分不出是谁关的。
+            Log.i(TAG, "projection onStop：系统/用户吊销投影（非本进程 stop）")
             onStoppedExternally()
         }
     }

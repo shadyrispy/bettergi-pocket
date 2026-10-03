@@ -414,6 +414,14 @@ class OverlayWindowController(
         if (scanClickThrough) return false
         var needed = false
         if (windowContains(params, rootView, x, y)) {
+            // ★ 批4（D4，2026-10-03）：点击落点在**展开态面板**里 ⇒ 除了临时穿透，还要把面板收起来。
+            //   面板像素会进投影帧（MediaProjection 抓的是整屏），它停在背包详情区上时，
+            //   后续每一格都在识别被盖住的画面。`ACTION_OUTSIDE` 那条自动收起对这种点击**不生效**
+            //   （落点在窗口内就不算 outside）⇒ 只能在这里主动收。
+            if (expanded) {
+                Log.i(TAG_OVERLAY, "扫描点击 ($x,$y) 落在展开态面板内 ⇒ 收起面板（停止遮挡识别区）")
+                collapse()
+            }
             applyTouchPassthrough(params, rootView, passthrough = true)
             needed = true
         }

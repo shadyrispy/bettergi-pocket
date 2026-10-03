@@ -117,6 +117,15 @@ class TriggerForegroundService : Service() {
             if (!scriptRunner.isRunning()) {
                 startFlowIfReady(settings.scanFlow, maxPagesOrDefault(settings.scanMaxPages))
             }
+        } else if (settings.scanEnabled && !settings.screenShareEnabled && scriptRunner.isRunning()) {
+            // ★ 批2-A（D3，2026-10-03）：原来只有下面那一条 `!scanEnabled && running` ⇒
+            //   用户**扫描途中关掉「共享屏幕」**时 scanEnabled 仍是 true，两条都不成立，
+            //   于是扫描在没有画面的状态下继续跑（取帧侧还会退回最后一帧旧图，看着像还在推进）。
+            //   关投影就是"别再动了"：这里只落开关 + 说明，**stop 交给下面那条 !scanEnabled 分支做**，
+            //   避免同一轮被停两次。
+            NoticeCenter.warn("已停止扫描：共享屏幕被关，没有画面可识别")
+            overlayController.updateScanProgress("共享屏幕已关")
+            settingsRepository.setScanEnabled(false)
         } else if (!settings.scanEnabled && scriptRunner.isRunning()) {
             scriptRunner.stop()
             overlayController.updateScanProgress("已手动停止")
@@ -761,6 +770,7 @@ class TriggerForegroundService : Service() {
     }
 
     private fun stopScreenShare() {
+        Log.i(TAG, "stopScreenShare：本进程主动收投影（开关落回 / 授权失败 / 退出）")
         requestingCapturePermission = false
         engine.stop()
         captureController.stop()
