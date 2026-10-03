@@ -145,16 +145,21 @@ class TriggerForegroundService : Service() {
         )
         val recognitionAssets = RecognitionAssets(applicationContext.assets)
         frameSource = ProjectionFrameSource(captureController)
+        // ★ 批0：自动对话/自动拾取与扫描**共用过同一本新鲜度账**（一个 thresholdFrameNs）。
+        //   engine 常驻（投影起来就 start，只有 shutdown 才 stop），所以开着「自动对话」跑扫描时，
+        //   自动跳过的那次点击会把扫描的阈值往后推 ⇒ 扫描 grabFresh 更容易超时、退回旧帧。
+        //   各拿一本：TriggerEngine 用视图，扫描仍用 frameSource 本体。
+        val triggerFrameSource = frameSource.newFreshnessScope()
         engine = TriggerEngine(
             settingsRepository = settingsRepository,
-            frameSource = frameSource,
+            frameSource = triggerFrameSource,
             features = listOf(
                 AutoPickFeature(),
                 AutoSkipFeature(recognitionAssets, overlayController),
             ),
             actionController = AccessibilityAutomationController(overlayController) {
-                // 动作受理后标记帧源时间戳：扫描链路 grabFresh 只取动作后新帧
-                frameSource.markActionAt(SystemClock.elapsedRealtime())
+                // 动作受理后标记帧源时间戳：**只推自己那本账**（批0），不再动扫描的阈值
+                triggerFrameSource.markActionAt(SystemClock.elapsedRealtime())
             },
         )
         scriptRunner = ScriptRunner(

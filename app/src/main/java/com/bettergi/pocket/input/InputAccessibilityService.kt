@@ -54,8 +54,13 @@ class InputAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = event.packageName?.toString() ?: return
-        if (pkg == packageName || pkg in TRANSIENT_PACKAGES) return
+        if (pkg == packageName) return
+        if (pkg in TRANSIENT_PACKAGES) {
+            overlayHeldBy = pkg          // 压在上面的弹层：改写它，但不动 lastAppPackage
+            return
+        }
         lastAppPackage = pkg
+        overlayHeldBy = null             // 真应用重新拿到前台 ⇒ 弹层已消失
     }
 
     override fun onInterrupt() = Unit
@@ -66,6 +71,7 @@ class InputAccessibilityService : AccessibilityService() {
         if (instance === this) {
             instance = null
             lastAppPackage = null
+            overlayHeldBy = null
             notifyStateChanged()
         }
     }
@@ -85,6 +91,8 @@ class InputAccessibilityService : AccessibilityService() {
         private const val KEY_TEXT = "text"
         private const val KEY_CONNECTED = "connected"
         private const val KEY_LAST_PACKAGE = "last_package"
+        /** 压在上面的 transient 窗包名（只读观测用，不参与放行判定）。 */
+        private const val KEY_OVERLAY_PKG = "overlay_pkg"
         private const val KEY_X = "x"
         private const val KEY_Y = "y"
         private const val KEY_FROM_X = "from_x"
@@ -124,6 +132,17 @@ class InputAccessibilityService : AccessibilityService() {
 
         @Volatile
         private var lastAppPackage: String? = null
+
+        /**
+         * ★ 批0 后半（2026-10-03）：现在**压在上面的 transient 窗**（通知栏 / 权限页 / 设置）。
+         *
+         * `TRANSIENT_PACKAGES` 刻意不让这些窗改写 [lastAppPackage]，理由是"系统弹层不该把闸门误关掉"
+         * —— 这个取舍保留。但它带来一个副作用：通知栏拉下来时闸门照放行，手势被系统层吞掉，
+         * 而引擎**完全无从得知**（日志里只有一串 accepted=true）。
+         * 所以这里单独记一笔：只用于**观测**（页首打一条警告 + 计数），不参与放行判定。
+         */
+        @Volatile
+        private var overlayHeldBy: String? = null
 
         @Volatile
         private var appContext: Context? = null
@@ -165,6 +184,15 @@ class InputAccessibilityService : AccessibilityService() {
 
         fun attach(context: Context) {
             appContext = context.applicationContext
+        }
+
+        /**
+         * 当前压在上面的 transient 窗（通知栏 / 权限页 / 设置），没有则 null。
+         * 主进程经桥读；**只用于日志与观测**，不改注入放行结论。
+         */
+        fun overlayHeldPkg(): String? {
+            if (instance != null) return overlayHeldBy
+            return remoteStatus()?.getString(KEY_OVERLAY_PKG)
         }
 
         fun isConnected(): Boolean {
@@ -381,6 +409,7 @@ class InputAccessibilityService : AccessibilityService() {
                 A11yProtocol.M_STATUS -> Bundle().apply {
                     putBoolean(KEY_CONNECTED, instance != null)
                     putString(KEY_LAST_PACKAGE, lastAppPackage)
+                    putString(KEY_OVERLAY_PKG, overlayHeldBy)
                 }
                 A11yProtocol.M_SCAN_PROGRESS -> Bundle().apply {
                     putBoolean(KEY_OK, pushScanProgressLocal(extras?.getString(KEY_TEXT) ?: ""))
@@ -424,8 +453,26 @@ class InputAccessibilityService : AccessibilityService() {
 
         private fun currentStatus(): Pair<Boolean, String?> {
             if (instance != null) return true to lastAppPackage
-            val status = remoteStatus() ?: return false to null
-            return status.getBoolean(KEY_CONNECTED, false) to status.getString(KEY_LAST_PACKAGE)
+            // ★ #181（2026-10-03）：主进程这条路有三种"拿不到"，成因完全不同但过去长得一样：
+            //   ① appContext 还没 attach（remoteCall 直接返回 null，**一条日志都不打**）；
+            //   ② contentResolver.call 抛异常（remoteCall 里已有 remoteCall failed 日志）；
+            //   ③ 桥通了但无障碍侧还没观察到任何窗口（connected=true / pkg=null，或 connected=false）。
+            //   adb 起扫时恒 null、悬浮窗起扫时恒 true，就是在这三种里没分清 ⇒ 这里逐因打一条。
+            val status = remoteStatus()
+                ?: run {
+                    Log.w(
+                        TAG,
+                        "currentStatus 取不到：appContext=${if (appContext == null) "null(未 attach)" else "有"}" +
+                            "（异常成因请看同时间的 remoteCall failed 行）",
+                    )
+                    return false to null
+                }
+            val connected = status.getBoolean(KEY_CONNECTED, false)
+            val pkg = status.getString(KEY_LAST_PACKAGE)
+            if (pkg == null) {
+                Log.w(TAG, "currentStatus 桥已通但无障碍尚未观察到窗口：connected=$connected")
+            }
+            return connected to pkg
         }
 
         private fun clickLocal(x: Int, y: Int, durationMs: Long): Boolean {

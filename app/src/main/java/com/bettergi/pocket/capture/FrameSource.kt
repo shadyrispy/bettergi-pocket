@@ -32,6 +32,19 @@ interface FrameSource {
     fun markActionAt(timestampMs: Long)
 
     /**
+     * ★ 批0（2026-10-03）：要一个**独立的新鲜度账本**，与调用方之前的所有消费者互不干扰。
+     *
+     * 为什么需要：`ProjectionFrameSource` 在 `TriggerForegroundService` 里是**一个实例喂两个消费者**
+     * （TriggerEngine 的自动跳过/拾取 + ScriptRunner 的扫描），而 `FrameFreshnessBook` 只有
+     * 一个 `thresholdFrameNs`。`engine.start()` 在投影起来时常驻（只有 shutdown 才 stop），
+     * 于是开着「自动对话」跑扫描时，自动跳过那次点击会把**扫描**的阈值往后推 ⇒
+     * 扫描的 `grabFresh` 更容易超时 ⇒ 落进"回退拿旧帧"那条路。
+     *
+     * 默认实现返回 `this`（共享账本）⇒ 单测 mock 与不需要隔离的调用方零变化。
+     */
+    fun newFreshnessScope(): FrameSource = this
+
+    /**
      * ★ 就绪信号直采（2026-09-12）：采样 [rect] 的**分块 RGB 均值签名**，写入 [out]
      * （长度 ≥ `blocksX*blocksY*3`；格式与 `VoteJudges.thumbChangedFraction` 对齐）。
      * **零 Mat、零分配**，成本约 1µs，用来取代「抓帧 + OCR」的就绪轮询。
@@ -115,11 +128,15 @@ internal class FrameFreshnessBook {
  *   ★ A5：取帧前先比 `frameGeneration()` 代数，代数没变（缓存还是动作阈值前那帧）就跳过
  *   「取帧 + 全帧 RGBA→BGR」，只推进簿记——deadline 与"等动作后新帧"的语义完全不变。
  */
-class ProjectionFrameSource(
+class ProjectionFrameSource private constructor(
     private val controller: ScreenCaptureController,
+    /** 每个实例一本账 ⇒ [newFreshnessScope] 出来的视图与宿主互不推阈值。 */
+    private val book: FrameFreshnessBook,
 ) : FrameSource {
+
+    constructor(controller: ScreenCaptureController) : this(controller, FrameFreshnessBook())
+
     private val bookLock = Any()
-    private val book = FrameFreshnessBook()
 
     override suspend fun grabFresh(afterTimestampMs: Long, timeoutMs: Long): Mat {
         val deadline = System.currentTimeMillis() + timeoutMs
@@ -181,6 +198,9 @@ class ProjectionFrameSource(
     override fun release() {
         // 投影启停由 TriggerForegroundService 直接管理 ScreenCaptureController，此处无资源需释放
     }
+
+    /** 见 [FrameSource.newFreshnessScope]：同一个控制器，另起一本新鲜度账。 */
+    override fun newFreshnessScope(): FrameSource = ProjectionFrameSource(controller)
 
     private companion object {
         const val POLL_INTERVAL_MS = 25L

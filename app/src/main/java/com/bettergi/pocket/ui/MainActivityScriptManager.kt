@@ -59,6 +59,7 @@ internal fun MainActivity.showScriptManager() {
     bindGoodSection()
     bindSwipeRow()
     bindSwipeTest()
+    bindCaptureTest()
     renderAll()
     renderCaptureSection()
     renderNameSection()
