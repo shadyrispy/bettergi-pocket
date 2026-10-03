@@ -30,6 +30,11 @@ import com.bettergi.pocket.scan.GoodRepository
 import com.bettergi.pocket.input.SwipeMethod
 import com.bettergi.pocket.input.SwipeTestRunner
 import com.bettergi.pocket.service.TriggerForegroundService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 
 /**
  * 启动壳 + service 中转（fix53）：
@@ -118,10 +123,26 @@ class MainActivity : AppCompatActivity() {
             NoticeCenter.error("读取失败")
             return@registerForActivityResult
         }
-        val name = uri.lastPathSegment?.substringAfterLast('/') ?: "input.json"
+        // ★ 2026-10-03：不能用 `uri.lastPathSegment` 当显示名 —— SAF 经 MediaStore 选中的文件，
+        //   它的最后一段是 `msf:1000000475` 这种内部 id（实测「执行输入」就显示成它），
+        //   用户看不出自己选了哪份。要查 OpenableColumns.DISPLAY_NAME，查不到才回退。
+        val name = displayOf(uri) ?: (uri.lastPathSegment?.substringAfterLast('/') ?: "input.json")
         val (ok, msg) = com.bettergi.pocket.scan.GoodRepository.save(this, name, text)
         NoticeCenter.post(if (ok) NoticeCenter.Level.INFO else NoticeCenter.Level.ERROR, msg)
+        // ★ 2026-10-03（D7）：写成功必须立刻重绘。上面那条 Notice 只进横幅，
+        //   「执行输入」那格读的是 GoodRepository.state() —— 不重绘就还显示导入前那份，
+        //   实测用户视角是"导入没生效"（要退出页面再进来才看到新名字）。
+        //   与脚本导入 [importLauncher] 的 `if (ok) renderAll()` 同口径。
+        if (ok) renderGoodSection()
     }
+
+    /** 从 SAF URI 问出真实文件名（`content:` 与 `file:` 都走这一条）。 */
+    private fun displayOf(uri: android.net.Uri): String? = runCatching {
+        contentResolver.query(uri, null, null, null, null)?.use { c ->
+            val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+        }
+    }.getOrNull()
 
     /** 引导屏已展示（onResume 用它区分两屏的刷新路径）。 */
     internal var onboardingShown = false
@@ -134,6 +155,15 @@ class MainActivity : AppCompatActivity() {
     private var pendingCaptureRequest = false
     private var pendingVpnRequest = false
     private var pendingShareFile: String? = null
+
+    /**
+     * 管理器页订阅主进程运行时状态用的作用域（抓包开关读 `CaptureSession.ui`）。
+     * 本页与 CaptureSession 同进程，直读即可；随 Activity 销毁收掉，不留收集协程。
+     */
+    internal val pageScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /** 抓包开关的订阅任务：管理器页可被反复打开，重绑前先收掉上一个，避免多个收集协程并存。 */
+    internal var captureTestJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -200,6 +230,12 @@ class MainActivity : AppCompatActivity() {
         if (isFinishing) return
         // 管理器在前台 ⇒ 提醒显示在本页横幅（而不是再弹一份到悬浮窗）
         com.bettergi.pocket.notice.NoticeRouter.attachManager(noticeSink)
+        // ★ 分享命令必须在**两个界面分支之前**消费（2026-10-03 实测修 D1）。
+        //   它和下面两个中转分支不一样：投影/VPN 授权是"起跑顺带要办的兜底"，被界面顶掉只是延后；
+        //   而分享**就是用户点出来的那件事** —— 放在界面分支之后 ⇒ 悬浮窗点「导出」只把本页顶到前台，
+        //   chooser 永远不起，pendingShareFile 永久留在字段里，用户看到的正是"点了没反应"。
+        //   实测：引导没走完时点导出弹出来的是**引导页**；停在管理器页点导出焦点仍停在 MainActivity。
+        if (consumeShareCommand()) return
         // 引导页：从系统设置返回时刷新（开了无障碍就该立刻打勾），不参与下面的中转分支
         if (onboardingShown) {
             renderOnboarding()
@@ -209,6 +245,15 @@ class MainActivity : AppCompatActivity() {
         if (managerShown) {
             // 从系统设置页回来 ⇒ 抓包权限小节要重新判一遍（其余界面不重绘，避免打断操作）
             renderCaptureSection()
+            // 「扫描结果」也要刷：停在页面上时刚跑完一轮，不刷就还显示上一份（2026-10-03 实测显示 35h 前那份）
+            renderGoodSection()
+            // 授权中转被界面优先延后 —— 留着标志，但必须留痕，否则"点了没反应"又无从归因（同 D1 的教训）
+            if (pendingCaptureRequest || pendingVpnRequest) {
+                android.util.Log.i(
+                    "BetterGI.Main",
+                    "授权中转被管理器界面延后（capture=$pendingCaptureRequest vpn=$pendingVpnRequest）",
+                )
+            }
             return
         }
         // ⚠️ 2026-09-18：这里原先还有一个「显示在上层」授权分支 —— 悬浮窗搬到无障碍进程后
@@ -241,6 +286,23 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * 消费"分享 GOOD"这条一次性命令。
+     * @return true 表示本次 onResume 已由分享接管，调用方必须**直接 return**
+     *   —— 再往下走到 [launchOverlayAndExit] 会 finish 本页，把刚起的 chooser 一起带走。
+     */
+    private fun consumeShareCommand(): Boolean {
+        val file = pendingShareFile ?: return false
+        pendingShareFile = null
+        shareGood(file)
+        return true
+    }
+
+    override fun onDestroy() {
+        pageScope.cancel()
+        super.onDestroy()
     }
 
     /** GOOD 导出文件名的白名单：本页经 FileProvider 分享的**只有**扫描导出产物。 */
@@ -286,6 +348,17 @@ class MainActivity : AppCompatActivity() {
             type = "application/json"
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        // ★ 2026-10-03（D7②）：没有可接收 application/json 的目标时**不要**起 chooser ——
+        //   BlueStacks 实测面板内容是「没有应用可执行此操作。」，用户对着一个空面板什么也拿不到，
+        //   而文件其实已经在设备上。改成直接告诉他文件在哪（零权限路径，不动 MediaStore）。
+        val targets = runCatching {
+            packageManager.queryIntentActivities(share, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+        }.getOrDefault(emptyList())
+        if (targets.isEmpty()) {
+            NoticeCenter.info("没有可接收 JSON 的应用；导出文件在 $packageName 的 files/${snapshot.name}")
+            launchOverlayAndExit()
+            return
         }
         startActivity(Intent.createChooser(share, "分享 GOOD 导出"))
         // 分享面板退出后交棒悬浮窗（onResume pending 已清 → launchOverlayAndExit）

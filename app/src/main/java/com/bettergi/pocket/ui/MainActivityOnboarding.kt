@@ -32,6 +32,7 @@ import com.bettergi.pocket.ui.MainActivity.Companion.KEY_SHARE_ACK
 
 internal fun MainActivity.showOnboarding() {
     onboardingShown = true
+    managerShown = false          // 与 showScriptManager 对称：两屏互斥，见那边的注释
     setContentView(R.layout.activity_onboarding)
 
     findViewById<TextView>(R.id.step1_action).setOnClickListener { openA11yIfNeeded() }

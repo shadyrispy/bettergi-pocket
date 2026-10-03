@@ -230,6 +230,19 @@ class ScriptRunner(
             listener.onFinished("no_projection")
             return
         }
+        // 起扫前台闸（2026-10-03 小米 15 实测）：游戏不在前台时，注入闸门会拒掉每一次点击，
+        // 整轮要烧 20 秒才以 `enterScreen anchor not reached` 收场，而面板当时已收起 ⇒
+        // 用户看到的只是"点了开始扫描没反应"。放在这里而不是各入口，是因为起跑入口有 5 处
+        // （悬浮窗 / 通知栏 / settingsListener / 授权回调 / adb DEBUG_SCAN_FLOW），
+        // 只堵一条等于没堵（adb 那条正是当初没被拦住的入口）。
+        // 判不了（无障碍未连 / 还没观察到窗口）时照旧放行，与下面 foregroundOk 的 `?: true` 同口径；
+        // 但恒打一行决策值 —— null / true / false 三种行为完全不同，不打印就只能靠猜。
+        val foreground = InputAccessibilityService.isGenshinInForeground()
+        Log.i(TAG, "起扫前台闸: isGenshinInForeground=$foreground flow=$flowName")
+        if (foreground == false) {
+            listener.onFinished("not_in_genshin")
+            return
+        }
         val size = captureController.capturedSize()
         if (size == null) {
             listener.onFinished("no_frame_size")

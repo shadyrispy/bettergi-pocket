@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import com.bettergi.pocket.log.RecognitionLog
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -83,11 +84,11 @@ object NoticeCenter {
         }
 
         // 单一日志源：走识别日志（已有跨进程镜像 ⇒ 无障碍进程日志窗可回溯）
-        RecognitionLog.log(
-            RecognitionLog.Tag.APP,
-            if (level == Level.INFO) RecognitionLog.Level.I else RecognitionLog.Level.W,
-            body,
-        )
+        val lvl = if (level == Level.INFO) RecognitionLog.Level.I else RecognitionLog.Level.W
+        RecognitionLog.log(RecognitionLog.Tag.APP, lvl, body)
+        // 同一句话再落一份 logcat：悬浮窗跑在 :a11y 且是 TYPE_ACCESSIBILITY_OVERLAY，
+        // uiautomator dump 拿不到它的视图树 ⇒ adb 侧（和 UI 回归脚本）只能靠这条读提醒。
+        if (level == Level.INFO) Log.i("BetterGI.Notice", body) else Log.w("BetterGI.Notice", body)
 
         val notice = Notice(level, body, now)
         mainHandler.post { sinks.forEach { runCatching { it.show(notice) } } }

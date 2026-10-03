@@ -675,9 +675,22 @@ class TriggerForegroundService : Service() {
 
         override fun onFinished(reason: String) {
             mainHandler.post {
-                val doneText = if (reason.startsWith("error")) "失败：$reason" else "已结束（$reason）"
+                val failed = reason.startsWith("error")
+                val detail = reason.removePrefix("error:").removePrefix(" ").trim()
+                val doneText = if (failed) "失败：$detail" else "已结束（$reason）"
                 overlayController.updateScanProgress(doneText)
                 updateForegroundNotification("扫描$doneText")
+                // 进度文本落在**已收起**的面板上（自动化起跑前 collapse() 过）⇒ 凡是"本轮其实什么
+                // 都没发生"的收尾都必须同时走 NoticeCenter，否则用户只看得到"点了没反应"。
+                // returnHomeStuck 不在此列：#139 的刹车自己已经喊过一句，别重复。
+                if (failed) {
+                    NoticeCenter.error("扫描失败：$detail")
+                } else when (reason) {
+                    "already_running" -> NoticeCenter.warn("上一轮还在跑，本次起跑请求已忽略")
+                    "not_in_genshin" -> NoticeCenter.warn("原神不在前台，已取消起跑：请先切回游戏主界面")
+                    "no_projection" -> NoticeCenter.warn("屏幕共享没开，已取消起跑：请先在悬浮窗开启共享屏幕")
+                    "no_frame_size" -> NoticeCenter.warn("拿不到投影帧尺寸，已取消起跑")
+                }
                 if (settingsRepository.get().scanEnabled) {
                     settingsRepository.setScanEnabled(false)
                 }
@@ -773,6 +786,7 @@ class TriggerForegroundService : Service() {
      */
     private fun startFlowIfReady(flowKey: String, maxPages: Int) {
         val ctx = applicationContext
+        // 起扫前台闸在 ScriptRunner.startScan（5 个起跑入口的共同汇聚点），这里不重复判。
         if (GoodRepository.needsInput(ctx, flowKey)) {
             val plan = GoodRepository.planFor(ctx, flowKey)
             if (plan == null) {

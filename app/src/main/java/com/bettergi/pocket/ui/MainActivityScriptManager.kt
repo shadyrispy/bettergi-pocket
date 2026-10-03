@@ -34,7 +34,17 @@ import com.bettergi.pocket.ui.MainActivity.Companion.SWIPE_TEST_BACK_DELAY_MS
 
 internal fun MainActivity.showScriptManager() {
     managerShown = true
+    // ⚠️ 两屏共用一个 Activity 实例，而 onResume 按 `onboardingShown` 优先重绘引导页。
+    //    不在这儿放下引导标志 ⇒ 进过管理器再回前台，renderOnboarding() 会在管理器布局里
+    //    找引导页的 id，findViewById 返回 null 直接 NPE（2026-10-03 _dev/ui_check_bs.sh 实测崩）。
+    onboardingShown = false
     setContentView(R.layout.activity_scripts)
+    // ★ 2026-10-03（D2）：进管理器页先把悬浮面板收起。展开态面板占屏右 ~408px
+    //   （3200 档实测帧 2792,441 起 396x909），而本页右列的控件正好铺到右缘 ——
+    //   「抓包采集（测试）」开关实测中心 (3113,1307) 落在面板帧内，点它会打到面板的「退出」行。
+    //   面板靠 ACTION_OUTSIDE 自动收起，但**落在面板内的第一下不会**（那不是 outside），
+    //   所以必须在这里主动收，不能等用户点第二下。
+    runCatching { com.bettergi.pocket.bridge.OverlayBridge(this).collapse() }
     findViewById<TextView>(R.id.btn_import).setOnClickListener {
         runCatching { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }
             .onFailure { NoticeCenter.error("无文件选择器：${it.message}") }
