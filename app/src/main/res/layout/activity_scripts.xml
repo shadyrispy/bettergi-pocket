@@ -470,6 +470,52 @@
                 </LinearLayout>
             </LinearLayout>
 
+            <!-- 抓包采集（2026-10-03 由悬浮窗迁入，与滑动测试同属**测试功能**）：
+                 一行的开关 = 一次会话，不持久化（会话自己会结束：四段数据齐 → 入库 → 收隧道）。
+                 状态直接读主进程的 CaptureSession.ui —— 管理器与它同进程，不需要过桥。 -->
+            <LinearLayout
+                android:id="@+id/capture_test_row"
+                android:contentDescription="开始或停止抓包采集"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:background="@drawable/bg_pocket_card_outline"
+                android:gravity="center_vertical"
+                android:minHeight="52dp"
+                android:orientation="horizontal"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="抓包采集（测试）"
+                        android:textColor="@color/pocket_text"
+                        android:textSize="14sp" />
+
+                    <TextView
+                        android:id="@+id/capture_test_status"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="1dp"
+                        android:text="登录经过隧道时解出库存"
+                        android:textColor="@color/pocket_text_muted"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <androidx.appcompat.widget.SwitchCompat
+                    android:id="@+id/capture_test_switch"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:showText="false" />
+            </LinearLayout>
+
             <TextView
                 android:id="@+id/scripts_hint"
                 android:layout_width="match_parent"

@@ -137,14 +137,6 @@ object A11yOverlayRuntime {
             val text = extras?.getString(A11yProtocol.K_TEXT).orEmpty()
             Bundle().apply { putBoolean(A11yProtocol.K_OK, onMain { controller?.updateScanProgress(text); true } ?: false) }
         }
-        // 抓包会话状态（主进程 → 面板）：会话与 VPN 只能在主进程，面板只是它的读者
-        A11yProtocol.M_CAPTURE -> {
-            val text = extras?.getString(A11yProtocol.K_TEXT).orEmpty()
-            val running = extras?.getBoolean(A11yProtocol.K_RUNNING) == true
-            Bundle().apply {
-                putBoolean(A11yProtocol.K_OK, onMain { controller?.updateCaptureStatus(running, text); true } ?: false)
-            }
-        }
         // 逐点击调用：命中悬浮窗矩形才需临时穿透（返回值决定调用方何时还原，语义见 OverlayBridge）
         A11yProtocol.M_PT_PREPARE -> Bundle().apply {
             val ok = onMain {

@@ -157,7 +157,6 @@ internal fun OverlayWindowController.showLogWindow() {
     logText = body.findViewById(R.id.overlay_log_text)
     // §13：开窗即订阅全局日志并回放历史（历史保留在 RecognitionLog，不随关窗清除）
     bindRecognitionLog()
-    bindCaptureState()
     logScroll = body.findViewById(R.id.overlay_log_scroll)
 
     val width = dp(LOG_WIDTH_DP)

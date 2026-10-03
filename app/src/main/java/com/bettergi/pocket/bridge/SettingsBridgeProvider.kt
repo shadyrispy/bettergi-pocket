@@ -70,20 +70,8 @@ class SettingsBridgeProvider : ContentProvider() {
                 ),
             )
         }
-        // 抓包：会话与隧道只能在主进程（VPN + 进程静态队列交接），面板在 :a11y
-        // ⇒ 开和停都是"过桥发指令"，发起授权那一步也在主进程做（与投影同一条路子）。
-        METHOD_CAPTURE_START -> Bundle().apply {
-            putBoolean(KEY_OK, forward(TriggerForegroundService.ACTION_CAPTURE_START))
-        }
-        METHOD_CAPTURE_STOP -> Bundle().apply {
-            putBoolean(KEY_OK, forward(TriggerForegroundService.ACTION_CAPTURE_STOP))
-        }
-        // 开面板时拉一次当前会话状态；之后的变化由主进程经桥推进来
-        METHOD_CAPTURE_SNAPSHOT -> Bundle().apply {
-            val s = com.bettergi.pocket.pcdata.CaptureSession.ui.value
-            putString(KEY_TEXT, s.brief())
-            putBoolean(KEY_RUNNING, s.running)
-        }
+        // 抓包开关 2026-10-03 迁到管理器页（与主进程同进程，直接起服务 + 订阅 CaptureSession.ui）
+        // ⇒ 这里不再有 capture_start / capture_stop / capture_snapshot 三条 method。
         // 识别日志镜像：日志缓冲在主进程，无障碍进程的日志窗按需拉一份
         METHOD_LOG_SNAPSHOT -> Bundle().apply {
             putStringArray(
@@ -173,11 +161,6 @@ class SettingsBridgeProvider : ContentProvider() {
         const val METHOD_STOP = "overlay_stop"
         const val METHOD_LOG_APPEND = "log_append"
         const val METHOD_LOG_SNAPSHOT = "log_snapshot"
-        const val METHOD_CAPTURE_START = "capture_start"
-        const val METHOD_CAPTURE_STOP = "capture_stop"
-        const val METHOD_CAPTURE_SNAPSHOT = "capture_snapshot"
-        const val KEY_TEXT = "text"
-        const val KEY_RUNNING = "running"
 
         /** 供 `:a11y` 侧直接构建 URI（避免两侧各写一遍字符串）。 */
         fun uri(context: Context): Uri = TriggerSettingsRepository.settingsUri(context)

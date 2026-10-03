@@ -175,13 +175,6 @@ class TriggerForegroundService : Service() {
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         genshinLaunchMonitor.start()
-        // 抓包会话状态 → 面板：会话在本进程、面板在 :a11y，所以变化要经桥推过去
-        //（面板**打开时**另拉一次快照，见 OverlayWindowController.bindCaptureState）。
-        scriptRunner.scope.launch {
-            com.bettergi.pocket.pcdata.CaptureSession.ui.collect { state ->
-                overlayController.updateCaptureStatus(state.brief(), state.running)
-            }
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -222,9 +215,9 @@ class TriggerForegroundService : Service() {
                 if (intent.getBooleanExtra(EXTRA_VPN_OK, false)) {
                     CaptureSession.start(applicationContext)?.let { NoticeCenter.error(it) }
                 } else {
-                    // 被拒：开关落回 + 一句话提醒（不跳系统设置页，用户拍板"落回就够"）。
+                    // 被拒：一句话提醒（不跳系统设置页，用户拍板"落回就够"）。
+                    // 抓包开关现在只在管理器页，它直接订阅 CaptureSession.ui ⇒ 无需推给面板。
                     NoticeCenter.warn("没同意 VPN 授权，抓包没启动")
-                    overlayController.updateCaptureStatus("没同意 VPN 授权", running = false)
                 }
             }
             ACTION_CAPTURE_STOP -> {

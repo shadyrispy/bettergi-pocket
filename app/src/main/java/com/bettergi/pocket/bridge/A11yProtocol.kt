@@ -9,7 +9,6 @@ object A11yProtocol {
     const val M_HIDE = "overlay_hide"
     const val M_COLLAPSE = "overlay_collapse"
     const val M_PROGRESS = "overlay_progress"
-    const val M_CAPTURE = "overlay_capture_status"
     const val M_PT_PREPARE = "overlay_pt_prepare"
     const val M_PT_RESTORE = "overlay_pt_restore"
     const val M_CLICK_THROUGH = "overlay_click_through"

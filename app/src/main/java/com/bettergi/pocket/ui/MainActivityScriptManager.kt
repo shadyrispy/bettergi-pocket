@@ -20,7 +20,11 @@ import com.bettergi.pocket.input.SwipeMethod
 import com.bettergi.pocket.input.SwipeTestRunner
 import com.bettergi.pocket.scan.GoodRepository
 import com.bettergi.pocket.scan.NameOverrides
+import com.bettergi.pocket.pcdata.CaptureSession
 import com.bettergi.pocket.service.TriggerForegroundService
+import androidx.appcompat.widget.SwitchCompat
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import com.esc.irminsul.capture.CaptureResult
 import com.esc.irminsul.capture.IrminsulCapture
 import com.esc.irminsul.capture.PermissionKind
@@ -147,7 +151,7 @@ internal fun MainActivity.renderCaptureSection() {
         )
     }
     val tail = if (p.romHint.isBlank()) "" else "\n${p.romHint}"
-    hint?.text = "抓包开关在悬浮窗「抓包采集」：解齐四段数据后自动入库并收回隧道，" +
+    hint?.text = "抓包开关在本页下方「抓包采集（测试）」：解齐四段数据后自动入库并收回隧道，" +
         "不持久化、重启不会自己开$tail"
 }
 
@@ -422,5 +426,42 @@ internal fun MainActivity.bindSwipeTest() {
             { SwipeTestRunner.run(this, params) },
             SWIPE_TEST_BACK_DELAY_MS,
         )
+    }
+}
+
+// ---- 抓包采集（2026-10-03 由悬浮窗迁入，与滑动测试同列**测试功能**）----
+
+/**
+ * 绑定「抓包采集（测试）」开关。
+ *
+ * 与旧悬浮窗版的根本差别：面板跑在 `:a11y`，而会话与隧道只能在主进程 ⇒ 那边要"过桥发指令 +
+ * 主进程把状态推回来"。管理器与 [CaptureSession] **同进程**，所以这里直接起服务、直接订阅
+ * `ui`，旧的三条桥 method 与整条推送通道一并删掉。
+ *
+ * 开关位置以**会话真实状态**为准，不以玩家点了什么为准：VPN 被拒时 `ui` 停在未抓包 ⇒ 开关自己落回。
+ */
+internal fun MainActivity.bindCaptureTest() {
+    val sw = findViewById<SwitchCompat?>(R.id.capture_test_switch) ?: return
+    val status = findViewById<TextView?>(R.id.capture_test_status)
+    var applyingState = false
+    sw.setOnCheckedChangeListener { _, checked ->
+        if (applyingState) return@setOnCheckedChangeListener
+        val intent = Intent(this, TriggerForegroundService::class.java).apply {
+            action = if (checked) {
+                TriggerForegroundService.ACTION_CAPTURE_START
+            } else {
+                TriggerForegroundService.ACTION_CAPTURE_STOP
+            }
+        }
+        ContextCompat.startForegroundService(this, intent)
+    }
+    captureTestJob?.cancel()
+    captureTestJob = pageScope.launch {
+        CaptureSession.ui.collect { state ->
+            applyingState = true
+            sw.isChecked = state.running
+            applyingState = false
+            status?.text = state.brief()
+        }
     }
 }
