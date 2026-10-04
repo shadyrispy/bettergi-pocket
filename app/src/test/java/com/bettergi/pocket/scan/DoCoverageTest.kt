@@ -31,6 +31,9 @@ class DoCoverageTest {
         "clickSlotTab",
         // 2026-09-18 新增：单趟扫描 + 绑定表（planMatch 在 visit 层，planDone 亦在 visit 层）
         "planSummary",
+        // 2026-10-04 审计补：`notify` 在 ScanEngine.kt:279 有分发，但两个清单都没登记它
+        //   ⇒ 谁把这条分支删掉，守门测试不会红（正是本测试要防的事被绕开）。
+        "notify",
     )
 
     /** visit 内（executeVisitStep）支持集。 */
@@ -39,6 +42,8 @@ class DoCoverageTest {
         // 2026-09-18：单趟扫描（visit 内逐格绑定计划项 / 标记已绑定）
         "planMatch", "planDone",
         "dialog", "verify", "assertScreen", "readConstellation", "emit", "stopWhen",
+        // 2026-10-03 #206：角色判重命中 ⇒ 跳过 visit 尾部（命之座/天赋两跳），stopWhen/emit 照跑
+        "dedupeSkip",
     )
 
     private fun implementedDoes() = topLevelDoes() + visitDoes()

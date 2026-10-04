@@ -256,6 +256,12 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
         //      卡面像素几乎全同 ⇒ 会并成 1 张）。圣遗物那侧的重叠由**内容**判据 [anchoredD] 负责。
         //   ⚠️ 必须"跳过的同时复制身份/键"而非留空：留空 ⇒ pageKeys 该格为空 ⇒ 页末「空读格回读」
         //      会把这些格重新点一遍，跳过等于白跳（同一坑此前只在锚定路径修过，见 [prevAllCellKeys]）。
+        //   ⚠️ #201 曾把角色侧栏接进来，2026-10-03 华为真机实测**判据不成立**后已回退：
+        //      char_strip 打 `跨页重叠: page=1 判定跳过 0/6 格 idx=[]`，而同一页确实又读到了
+        //      Alyosha/Iansan（`char 重复（连续 1/3）`）⇒ **重叠存在、指纹却说"不同"**。
+        //      最像的成因是 char_strip 没有 landingBand/clickBand ⇒ 相位 φ 量不到（#51 那条
+        //      "未标定网格不平移并显式告警"），指纹框按名义行位取，实机每次落点还带半行残差。
+        //      要接这条判据，先给 char_strip 标定 band；在那之前接进来只是每页白采 6 张图。
         if (gridKey == "weapon_backpack" && pageNo > 0 && prevAllCellFps != null && pageCellFrame != null) {
             val prev = prevAllCellFps!!
             for (r in 0 until traverseRows) {

@@ -116,8 +116,8 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
     //   `good_vs_gt.py::cha_key` 现在对未解析记录退回显示名当临时键，N 条不再并成 1 条，
     //   同显示名重复出现仍然报 🔁。这里只补一个**摘要计数**，让"本轮有 N 位没解析出身份"
     //   一眼可见，不用去翻逐条 Log.w。
-    val seenKeys = resultsCharacters.mapNotNull { it.key }
-    val dup = c.key != null && seenKeys.contains(c.key)
+    val seenKeys = seenCharKeys()
+    val dup = characterAlreadySeen(c.key)
     lastCharName = c.name
     noteDupAndMaybeStop(c.key, seenKeys)
     if (dup) {
@@ -813,6 +813,9 @@ internal suspend fun ScanEngine.ocrWithRetry(step: JSONObject) {
     Log.w(TAG, "ocrWithRetry failed after $maxRetries attempts: $rect")
 }
 
+/** #206 判重命中后 visit 尾部仍要跑的步：止扫登记（stopWhen）与入库/重复记账（emit）。 */
+private val TAIL_RUN_ALWAYS = setOf("stopWhen", "emit")
+
 /** P3 exit：via 返回按钮（文本 "return[2913,41]"）→ 点击后终止流程。链名优先走 CHAIN_ANCHOR_PATHS 机读，字面点只是回落。 */
 internal suspend fun ScanEngine.runVisit(
     visit: JSONArray,
@@ -827,8 +830,14 @@ internal suspend fun ScanEngine.runVisit(
     val ctx = ScanEngine.CellFrameContext()
     try {
         // ⚠️ 不在格子级响应 stopRequested：止扫语义是「本页后停」（pagedGrid 在页完成后检查）。
+        visitSkipTail = false
         for (i in 0 until visit.length()) {
-            executeVisitStep(visit.getJSONObject(i), gridKey, col, row, index, ctx, prof, snapMode)
+            val s = visit.getJSONObject(i)
+            if (visitSkipTail && s.optString("do") !in TAIL_RUN_ALWAYS) {
+                Log.i(TAG, "visit cell($col,$row) idx=$index 已判重 ⇒ 跳过 ${s.optString("do")}")
+                continue
+            }
+            executeVisitStep(s, gridKey, col, row, index, ctx, prof, snapMode)
         }
     } finally {
         ctx.release()
@@ -1232,6 +1241,22 @@ internal suspend fun ScanEngine.executeVisitStepInner(
                     parsePanel(step, ctx)
                 }
             }
+            "dedupeSkip" -> {
+                // #206：属性页点头像 + 读名是必经（用户 2026-10-03 定），本步只裁命之座/天赋两跳。
+                // 判重口径与 emitCharacter 完全同源：按词典 key，key==null（未解析出身份）不介入
+                // （宁可多扫，CharDupJudge 的误杀教训）。跳过仍放行 stopWhen/emit ⇒
+                // 回卷止扫记账与「重复不入库」语义不变。
+                val key = charKey
+                when {
+                    key == null ->
+                        Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：身份未解析 ⇒ 不跳过")
+                    characterAlreadySeen(key) -> {
+                        visitSkipTail = true
+                        Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：$key 已入库 ⇒ 跳过命之座/天赋")
+                    }
+                    else -> Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：$key 新角色 ⇒ 全程照跑")
+                }
+            }
             "navigate" -> {
                 navigate(step)
                 // §15 P0-1：有 leftMenu 时已在 navigate 内逐页读；无 leftMenu 才走 read 数组兜底
@@ -1262,5 +1287,18 @@ internal suspend fun ScanEngine.executeVisitStepInner(
             }
         }
     }
+
+/**
+ * 角色判重的**唯一口径**：本轮已入库的词典 key。
+ * `emitCharacter` 的「重复不入库」与 `dedupeSkip` 的「跳过命之座/天赋」必须走同一处 ——
+ * 两边各写一遍 `any { it.key == key }` 时，任何一侧改判据都会让另一侧静默失配
+ * （#206 落地时就是这个形状）。
+ * ⚠️ 只按词典 key 判，不按显示名：见 `emitCharacter` 里「连续重复角色判据」那段 CharDupJudge 的误杀教训。
+ */
+internal fun ScanEngine.seenCharKeys(): List<String> = resultsCharacters.mapNotNull { it.key }
+
+/** `key == null`（未解析出身份）⇒ 恒 false，即"不介入"，宁可多扫一件。 */
+internal fun ScanEngine.characterAlreadySeen(key: String?): Boolean =
+    key != null && seenCharKeys().contains(key)
 
 // ---- #4 vote：像素投票判据 ----

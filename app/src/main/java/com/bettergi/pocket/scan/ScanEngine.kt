@@ -372,6 +372,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     /** 连续「已入库过的角色」个数（回卷/遍历完判据）；由 stopWhen mode=duplicateStreak 启用。 */
     internal var charDupStreak = 0
     internal var charDupStreakLimit = 0
+    /**
+     * #206：本格 visit 已判重命中（该角色本轮已入库）⇒ 命之座/天赋两跳可省。
+     * `runVisit` 每格清零；置位后后续 visit 步只放行 `stopWhen`/`emit`（止扫记账与"重复不入库"都靠它们）。
+     */
+    internal var visitSkipTail = false
 
     /**
      * **回卷止扫的有效阈值**（`pagedGrid` 内 = 该网格**一页 + 一行** `cols × (traverseRows + 1)`）。
