@@ -79,8 +79,17 @@ data class DeviceCapabilities(
             return normalizeVendor(hw) to mdl.ifEmpty { hw }
         }
 
-        private fun normalizeVendor(s: String): String = when {
-            s.contains("qcom") || s.contains("qualcomm") || s.contains("snapdragon") -> "qualcomm"
+        /**
+         * SoC 厂商归一。`internal` 是为了能被 JVM 单测钉住（2026-10-03：小米 15 上这条判错，
+         * 而判错的后果是 QNN 永远进不了候选序 —— 见 [normalizeVendor] 下方注）。
+         */
+        internal fun normalizeVendor(s: String): String = when {
+            // `qti` = Qualcomm Technologies Inc.。**实测**：小米 15（2410DPN6CC / SM8750）的
+            // `ro.soc.manufacturer` 是 `QTI` 而不是 `Qualcomm`，只认后者的话这里会返回 unknown
+            // ⇒ `EpTierPicker` 的双闸（厂商 + 库可加载）第一闸就把 QNN 挡死，且 `probeQnnLibs()`
+            // 在厂商不符时**提前返回 false**，连"库到底能不能加载"都没去试 ⇒ 日志里的 `qnn=false`
+            // 分不清"机型没暴露库"和"厂商没认出来"两种成因。
+            s.contains("qcom") || s.contains("qualcomm") || s.contains("snapdragon") || s == "qti" -> "qualcomm"
             s.contains("hisilicon") || s.contains("kirin") || s.contains("hi3") || s.contains("hi6") -> "hisilicon"
             s.contains("mediatek") || s.contains("mt6") || s.contains("mt8") || s.contains("helio") -> "mediatek"
             s.contains("samsung") || s.contains("exynos") || s.contains("s5p") || s.contains("gs") -> "samsung"

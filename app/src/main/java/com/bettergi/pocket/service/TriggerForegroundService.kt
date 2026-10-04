@@ -602,6 +602,20 @@ class TriggerForegroundService : Service() {
                     Log.i(TAG, "ocr bench: ${OcrFactory.bench()}")
                 }
             }
+            ACTION_DEBUG_OCR_EP -> {
+                // 「这台机器的风险档 EP（NNAPI 的 USE_FP16 / XNNPACK）到底能不能启用」——
+                // 一次性另建引擎实测，不碰生产档位。见 [OcrFactory.epProbe] 的动机说明。
+                // 与扫描互斥：探测会再起一份 det+rec 会话，而 NNAPI 那条路的失败方式是**原生崩溃**
+                // （抓不住，进程直接没了）⇒ 扫描在跑时不发。
+                val risky = intent.getBooleanExtra(EXTRA_RISKY_EP, false)
+                if (scriptRunner.isRunning()) {
+                    Log.w(TAG, "DEBUG_OCR_EP 忽略：扫描在跑，不做 EP 探测")
+                } else {
+                    scriptRunner.scope.launch(Dispatchers.IO) {
+                        Log.i(TAG, OcrFactory.epProbe(applicationContext, risky))
+                    }
+                }
+            }
             ACTION_DEBUG_OCR_DET -> {
                 // ONNX det 全管线真机探针（任意界面可跑，为移除 ML Kit 做验收）
                 scriptRunner.scope.launch(Dispatchers.IO) {
@@ -1085,6 +1099,13 @@ class TriggerForegroundService : Service() {
         const val ACTION_DEBUG_START_FLOW = "com.bettergi.pocket.action.DEBUG_START_FLOW"
         const val ACTION_DEBUG_CLICK = "com.bettergi.pocket.action.DEBUG_CLICK"
         const val ACTION_DEBUG_OCR_BENCH = "com.bettergi.pocket.action.DEBUG_OCR_BENCH"
+        /**
+         * 风险档 EP 探测（`--ez risky true|false`）：一次性另建引擎，按 `candidatesFor(caps, risky)`
+         * 定档并跑 det/rec 基准 ⇒ 用来回答"这台机器的 NNAPI/FP16 能不能启用、快不快"。
+         * 生产档位不受影响（探测完即 close），扫描在跑时直接忽略。
+         */
+        const val ACTION_DEBUG_OCR_EP = "com.bettergi.pocket.action.DEBUG_OCR_EP"
+        const val EXTRA_RISKY_EP = "risky"
         const val ACTION_DEBUG_OCR_DET = "com.bettergi.pocket.action.DEBUG_OCR_DET"
         /** 抓包数据源 C1：离线回放一个 pcap 到 GOOD（`EXTRA_PCAP_PATH` 指路径）。 */
         const val ACTION_DEBUG_REPLAY_PCAP = "com.bettergi.pocket.action.DEBUG_REPLAY_PCAP"
