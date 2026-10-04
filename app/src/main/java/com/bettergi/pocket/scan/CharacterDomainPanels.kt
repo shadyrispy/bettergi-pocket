@@ -966,7 +966,7 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
         while ((key == null || level <= 0 || level < CHAR_LEVEL_MIN_PLAUSIBLE) && nTry < CHAR_NAME_MAX_TRIES) {
             nTry++
             delay(CHAR_NAME_REREAD_MS)
-            val f2 = runCatchingCancellable { freshFrame() }.getOrNull() ?: break
+            val f2 = runCatchingCancellable { settleFrame() }.getOrNull() ?: break
             // ★ A7/G：OCR 引擎不可用 ≠ 读失败。「重读失败 ⇒ break 放弃该格」只该作用于
             //   真读失败，引擎没就绪必须 loud（放行见下方 catch 链），否则静默出脏数据。
             val t2 = try {
@@ -1093,7 +1093,7 @@ internal suspend fun ScanEngine.readConstellation() {
         var polls = 0
         for (poll in 0 until CONSTELLATION_POLL_MAX) {
             if (poll > 0) delay(CONSTELLATION_POLL_GAP_MS)
-            val f = if (poll == 0) frame else runCatchingCancellable { freshFrame() }.getOrNull() ?: break
+            val f = if (poll == 0) frame else runCatchingCancellable { settleFrame() }.getOrNull() ?: break
             try {
                 val s = sampleOnce(f)
                 polls++
@@ -1171,7 +1171,7 @@ internal suspend fun ScanEngine.readConstellation() {
  */
 internal suspend fun ScanEngine.charPanelLooksWrongPage(): Boolean {
     val g = ocr ?: return false
-    val f = runCatchingCancellable { freshFrame() }.getOrNull() ?: return false
+    val f = runCatchingCancellable { settleFrame() }.getOrNull() ?: return false
     return try {
         val rects = listOf(
             profile.rect("panels.char_profile.bottomBar"),
@@ -1257,7 +1257,7 @@ internal suspend fun ScanEngine.readTalent() {
         if (attempts > 0 && charTalents.none { it <= 0 } && !talentSamplesTied(samples)) break
         attempts++
         delay(TALENT_REREAD_DELAY_MS)
-        val f2 = runCatchingCancellable { freshFrame() }.getOrNull() ?: break
+        val f2 = runCatchingCancellable { settleFrame() }.getOrNull() ?: break
         // ★ A7/G：重读循环的「读失败 ⇒ continue」只该作用于真读失败；引擎不可用必须 loud。
         val t2 = try {
             gateway.readRois(f2, rects)
@@ -1339,7 +1339,7 @@ internal suspend fun ScanEngine.readTalent() {
                 r3.right,
                 r3.bottom + pitch,
             )
-            val f3 = runCatchingCancellable { freshFrame() }.getOrNull()
+            val f3 = runCatchingCancellable { settleFrame() }.getOrNull()
             if (f3 != null) {
                 val t3 = runCatchingCancellable { gateway.readRois(f3, listOf(shifted)) }.getOrNull()?.firstOrNull()
                 f3.release()

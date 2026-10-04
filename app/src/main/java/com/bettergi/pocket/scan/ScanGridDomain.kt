@@ -231,7 +231,7 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                 "pagedGrid[$gridKey]: page=$pageNo 前台压着 $held（通知栏/权限页）⇒ 本局注入可能被吞，闸门按设计仍放行",
             )
         }
-        val pageCellFrame = runCatchingCancellable { freshFrame() }.getOrNull()
+        val pageCellFrame = runCatchingCancellable { settleFrame() }.getOrNull()
         // ★ 页级看门狗起点（挂死时中止并保留已入库结果）
         val pageWall0 = clock()
         // ★ 翻页后**清空面板指纹快照**（GOODScanner `reset_panel_fingerprint`）★
@@ -683,7 +683,11 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
         //   不是跳行（前进仅 14 件/21，结构性跳不了）。重访代价 ~250ms/格，只在失败时付。
         //   失败格也解释了行级闭环的 SKIP 误报（锚点那格恰好空读）⇒ **顺序必须是先回读、再判定**。
         //   守卫：整页产出过少（< 5 件）时不重试（可能是 pageSkip / 列表尾的空格）。
-        if (pageKeys.count { it.isEmpty() } > 0 && pageKeys.count { it.isNotEmpty() } >= 5) {
+        //   ⚠️ #216 追加 `!vars.stopRequested`：本页若已命中**素材停止标识**，那些空格是
+        //     "本来就不是装备"而不是"没读到"，回读它们等于白点白跑一整轮 OCR。
+        if (pageKeys.count { it.isEmpty() } > 0 && pageKeys.count { it.isNotEmpty() } >= 5 &&
+            !vars.stopRequested
+        ) {
             val emptyIdx = pageKeys.indices.filter { pageKeys[it].isEmpty() }
             var recovered = 0
             Log.i(TAG, "pagedGrid[$gridKey] 空读格回读: page=$scannedPage ${emptyIdx.size} 格 idx=$emptyIdx")
@@ -1369,7 +1373,7 @@ internal suspend fun ScanEngine.awaitCrossPageSettle(gridKey: String) {
     try {
         while (clock() - start < ANCHOR_SETTLE_MAX_MS && stablePairs < ANCHOR_SETTLE_STABLE_PAIRS) {
             delay(ANCHOR_SETTLE_POLL_MS); tmSettleMs += ANCHOR_SETTLE_POLL_MS
-            val f = runCatchingCancellable { freshFrame(SETTLE_FRAME_TIMEOUT_MS) }.getOrNull() ?: break
+            val f = runCatchingCancellable { settleFrame(SETTLE_FRAME_TIMEOUT_MS) }.getOrNull() ?: break
             val g = grayOf(f)
             f.release()
             if (g == null) continue
@@ -1426,8 +1430,40 @@ internal suspend fun ScanEngine.awaitCrossPageSettle(gridKey: String) {
     }
 }
 
-internal suspend fun ScanEngine.freshFrame(timeoutMs: Long = 2500L): Mat {
-    // 只读探针：freshFrame **包含「等一个新帧」的等待**（投影 ~30fps ⇒ 平均 ~33ms），
+/**
+ * #196 拆分（2026-10-04，**第一版：只分名字与计数，不改行为**）。
+ *
+ * 这两件事以前挤在一个函数里，所以既不能说"回退是 bug"、也不能说"回退在骗人"：
+ *  · **识别**用帧 —— 要的是"动作**之后**那一帧"。拿不到新帧却改用旧帧 = 拿动作之前的画面
+ *    去 OCR，与"画面真的没变"在下游**完全同形** ⇒ 静默错读的口。
+ *  · **判稳/重读**用帧 —— 要的是"画面还在动吗"。这里"拿不到新帧"**本身就是答案**
+ *    （BlueStacks 虚拟屏静止不推帧 ⇒ 等不到新帧在静止画面上是常态，不是故障）。
+ * 第一份真实样本就是反例：11-A 那轮摘要 `帧新鲜性 超时=1 旧帧顶替=1`，
+ * 发生在**静止的管理器页**上 —— 当初设计回退正是让 settle 循环把"没新帧"当"没再动"的证据用。
+ *
+ * ⚠️ 这一版**故意没有**删 [grabFrameOrNull] 里的旧帧回退。删它才是行为变更，而且不是
+ *    一处而是两类站点各要不同处理（逐站点分类见 `notes/20261003_faulttol-fix-plan.md` §11-B）；
+ *    更要紧的是：那些 `runCatchingCancellable { freshFrame() }.getOrNull() ?: break` 的站点
+ *    今天**实际拿到的是回退的旧帧、不是 null**，所以"顺手改成返回 null"会静默改掉 8 处的控制流。
+ *    ⇒ 判决那一版单独走，配一次同机同档的 A/B 才许合。
+ */
+internal suspend fun ScanEngine.freshFrame(timeoutMs: Long = 2500L): Mat =
+    grabFrameOrNull(timeoutMs, use = FrameUse.RECOGNITION)
+        ?: throw FrameTimeoutException(0L, timeoutMs) // 识别路径无帧可退 ⇒ 交给格/页处置层
+
+/** 判稳/重读用帧（见 [freshFrame] 的 KDoc）。允许"没新帧"，但**单独计数**，不再与识别混账。 */
+internal suspend fun ScanEngine.settleFrame(timeoutMs: Long = 2500L): Mat =
+    grabFrameOrNull(timeoutMs, use = FrameUse.SETTLE)
+        ?: throw FrameTimeoutException(0L, timeoutMs)
+
+internal enum class FrameUse { RECOGNITION, SETTLE }
+
+/**
+ * 两条路径共用的取帧实现。行为与拆分前**逐字一致**，唯一区别是把计数与日志级别
+ * 按 [use] 分流：识别侧继续打 W（那是危险信号），判稳侧打 D（那是常态）。
+ */
+private suspend fun ScanEngine.grabFrameOrNull(timeoutMs: Long, use: FrameUse): Mat? {
+    // 只读探针：本函数**包含「等一个新帧」的等待**（投影 ~30fps ⇒ 平均 ~33ms），
     // 这部分不计入 nav/panel/settle ⇒ 是「其它」里最易被忽略的大块（见 IMAGE-PATH-COST.md §8）。
     //
     // ★ 批2-B（2026-10-03）：看门狗心跳挪到**确实拿到动作后新帧之后**再打。
@@ -1442,19 +1478,30 @@ internal suspend fun ScanEngine.freshFrame(timeoutMs: Long = 2500L): Mat {
             lastProgressAtMs = android.os.SystemClock.elapsedRealtime()
             fresh
         } catch (e: FrameTimeoutException) {
-            freshFrameTimeouts += 1
-            val stale = frameSource.acquireLatestBgr()
-            if (stale == null) {
+            if (use == FrameUse.RECOGNITION) freshFrameTimeouts += 1 else settleFrameTimeouts += 1
+            val cached = frameSource.acquireLatestBgr()
+            if (cached == null) {
                 frameRefusedTotal += 1
                 Log.w(TAG, "grabFresh timeout 且无缓存帧可回退 ⇒ 抛给上层")
-                throw e
+                return null
             }
             // ⚠️ 这条回退按构造拿到的就是被 isFresh 拒掉的那一帧（同一 publishedBgr 槽、
             //   同一个 threshold），所以**不**打看门狗心跳。彻底删掉它要先审 ~20 个调用点
             //   （settle 循环里把 null 当 break/continue 用，语义会变），列为后续单独一步。
-            staleFramesUsed += 1
-            Log.w(TAG, "grabFresh timeout, falling back to latest frame (staleFramesUsed=$staleFramesUsed)")
-            stale.bgr
+            if (use == FrameUse.RECOGNITION) {
+                staleFramesUsed += 1
+                Log.w(
+                    TAG,
+                    "grabFresh timeout, falling back to latest frame (staleFramesUsed=$staleFramesUsed)",
+                )
+            } else {
+                settleStaleFramesUsed += 1
+                Log.d(
+                    TAG,
+                    "settleFrame: 无新帧 ⇒ 按『画面没变』用缓存帧（settleStaleFramesUsed=$settleStaleFramesUsed）",
+                )
+            }
+            cached.bgr
         }
     } finally {
         PerfProbe.addFrame(System.nanoTime() - t0)

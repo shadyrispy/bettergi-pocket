@@ -385,7 +385,7 @@ internal suspend fun ScanEngine.enterScreen(step: JSONObject, isRetry: Boolean =
     //   "已经在背包里、切个页签"，它们本来就不在主界面（artifact_scan/weapon_scan 各有一条），
     //   一视同仁地拦会把这两条流程整条打死。
     val startsAtHome = parseChainAnchor(chain.getString(0)).startsWith("game_home")
-    runCatchingCancellable { if (startsAtHome) freshFrame() else null }.getOrNull()?.let { f ->
+    runCatchingCancellable { if (startsAtHome) settleFrame() else null }.getOrNull()?.let { f ->
         try {
             if (atHomeScreen(f) == false) {
                 Log.e(TAG, "enterScreen: 当前不在主界面 ⇒ 不点入口链（防在未知界面上盲点）")
