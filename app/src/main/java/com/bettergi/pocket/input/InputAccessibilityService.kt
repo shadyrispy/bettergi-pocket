@@ -262,13 +262,28 @@ class InputAccessibilityService : AccessibilityService() {
          * 真正的理由是现问读的是 `rootInActiveWindow`（**持输入焦点**的窗口根），而悬浮球/面板是
          * NOT_FOCUSABLE 的 TYPE_ACCESSIBILITY_OVERLAY（见 [activePackageOnMain]），成不了活动窗口。
          * "面板挡住识别区"是另一件事，归 [selfUiCover] 管。
+         *
+         * ★ #197（2026-10-04 华为 EML-AL00 实测）：这台机器上点 ▶ 的那一刻现问**恒为 null**
+         * （三轮面板起跑都是「现问=null 缓存=true」，:a11y 侧每次报 `rootInActiveWindow 为空（焦点切换中）`）
+         * —— 现问只在小米 15/HyperOS 那种"缓存被角标改写"的场景才真正起作用，在这台机器上它只是"每次都问不到"。
+         *
+         * ⚠️ **本函数固定是单次直读，不要在这里面加重试**：起跑闸的有界重试住在
+         * `scan/ScriptRunner.StartGateLiveAsk`（只在起跑那一次上重试）。本函数还被 [allowInject]
+         * 每次点击/滑动调用（热路径），重试下沉到这里等于给每次注入都加 200ms×N。
          */
         fun activeWindowPackage(): String? {
             if (instance != null) return liveActivePackage()
             return remoteCall(A11yProtocol.M_ACTIVE_WINDOW)?.getString(KEY_ACTIVE_PACKAGE)
         }
 
-        /** 起扫闸用：现问活动窗口是不是原神。`null` = 现问不出来（交给事件缓存的结论）。 */
+        /**
+         * 起扫闸用：现问活动窗口是不是原神。`null` = 现问不出来（交给事件缓存的结论）。
+         *
+         * 调用方（`ScriptRunner.startScan`）拿到 null **不是**"结论未知就不许跑"：fail-open 保持
+         * 开着（硬关会把华为 EML-AL00 上所有起跑全部拒掉，见 [activeWindowPackage] 的 #197 实测），
+         * 改为落回 [isGenshinInForeground] 的事件缓存并**计数**（`StartGateLiveAsk.cacheFallbacks`，
+         * 打在 `起扫前台闸:` 那行决策日志里），让"这台机器一直在吃缓存"变得可见。
+         */
         fun genshinActiveNow(): Boolean? {
             val live = activeWindowPackage() ?: return null
             return GenshinPackages.isGenshinPackage(live)
@@ -303,6 +318,8 @@ class InputAccessibilityService : AccessibilityService() {
             // NOT_FOCUSABLE ⇒ 焦点始终留在游戏上，不会被自己骗到。
             service.rootInActiveWindow?.packageName?.toString()?.takeIf { it.isNotEmpty() }
                 ?: run {
+                    // 焦点正在切、窗口根还没落 —— 瞬态，会自己好（#197：起跑闸为此做有界重试，
+                    // 见 scan/ScriptRunner.StartGateLiveAsk；本函数本身仍是单次直读）。
                     Log.d(TAG, "现问活动窗口：rootInActiveWindow 为空（焦点切换中）")
                     null
                 }
