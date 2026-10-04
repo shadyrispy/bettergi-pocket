@@ -415,7 +415,8 @@ internal suspend fun ScanEngine.parseWeaponPanel(frame: Mat, ocr: OcrGateway, di
         //   · level>0 —— 尾部的强化素材面板**根本没有 `Lv.N/M` 那一栏**（实测原文是
         //     「精锻用魔矿 | 武器经验表 | …」，第 2 槽是"武器经验道具"被 OCR 读进来的），
         //     而真武器恒有等级行（学徒笔记是 `Lv.1/20` ⇒ level=1）。
-        //     不加这一条，5★ 素材「精锻用魔矿」会每轮都进计数器 ⇒ 变成大家都习惯忽略的噪声。
+        //     不加这一条，「精锻用魔矿」会每轮都进计数器 —— 它的**星带读数实测是 rarity=3**，
+        //     只按 rarity>=3 挡不住（四格素材实测全为 Lv=0）。
         if (vars.rarity >= 3 && level > 0) {
             weaponDictMiss++
             weaponDictMissNames += pieceName
