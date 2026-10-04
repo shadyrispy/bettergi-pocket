@@ -12,7 +12,7 @@
 - **自动对话**：识别剧情对话后自动点击选项；可选「快速点击跳过」
 - **自动拾取**：周期点击屏幕下方拾取
 - **自动扫描**：圣遗物/武器背包全量扫描 → GOOD v3 JSON 导出（artifacts + weapons 双数组）
-  - DSL 驱动：`app/src/main/assets/dsl/profiles.json`（坐标唯一事实源）+ `flows/*.json`（**26 do 原语解释器**）
+  - DSL 驱动：`app/src/main/assets/dsl/profiles.json`（坐标唯一事实源）+ `flows/*.json`（**28 do 原语解释器**：顶层分发 22 + visit 专用 6，与 `primitives.schema.json` 的 enum 逐条对齐）
   - 像素投票判据（锁/收藏/祝圣/稀有度/星带逐格/武器金条）+ ONNX PaddleOCR（PP-OCRv6 tiny）字段槽解析（rec-only 批量 ~2ms/槽）
   - set_name 反推词典（276 件/56 套）+ 武器词典（236 件）+ 角色词典（121），**三级匹配：精确 → 包含 → 单字 Dice ≥0.55**
   - 3★/2★ 止扫标识（rarity=-1 哨兵保护）、指纹判到底、跨页去重、**详情切换等待**（防读旧件）
@@ -52,7 +52,7 @@ TriggerForegroundService（生命周期 + settingsListener + 前台通知）
 │    · grabFresh(afterTs)：动作后取新帧（markActionAt 快照动作前末帧 ns 时间戳）
 ├─ TriggerEngine（100ms 节拍，实时触发：AutoPick/AutoSkip，依赖 FrameSource 零行为变化）
 ├─ ScriptRunner（独立协程单步循环，不进节拍；startScan(flowName, maxPages)）
-│    └─ ScanEngine（DSL 解释器，26 do 原语；**已按域拆分为扩展函数**，见下）
+│    └─ ScanEngine（DSL 解释器，28 do 原语；**已按域拆分为扩展函数**，见下）
 │        顶层: enterScreen/dualStateButton/readCount/pagedGrid/dialog/ocrWithRetry/
 │              navigate/foreach/setFilter/exit/verify/emit/rosterFind/clicks/filterReset/
 │              assertScreen/readConstellation/clickSlotTab/planSummary
@@ -176,7 +176,7 @@ dsl 变更后须手动重拷并跑守门测试；同步机制 P4 订阅管理解
 
 ## 路线
 
-- ~~P0 原语层~~ / ~~P1 扫描核心~~ / ~~P3 脚本化（26 do 原语全实现 + DoCoverageTest 守门）~~
+- ~~P0 原语层~~ / ~~P1 扫描核心~~ / ~~P3 脚本化（28 do 原语全实现 + DoCoverageTest 守门）~~
 - **真机验收**（进行中）：emit 率/settle/坐标精度标定 + GOOD vs irminsul 对账 + 滑动参数回填
 - P2 悬浮窗迁移（TYPE_ACCESSIBILITY_OVERLAY 零权限；桥模式已验证，探针结论待真机 z 序确认）
 - P4 订阅管理（脚本仓库 / 一键更新 / plan 规则注入 → ifMatch/setFilter 激活）

@@ -29,4 +29,20 @@ object OverlayEntryContract {
             putExtra(EXTRA_FROM_OVERLAY, true)
             if (pickGood) putExtra(EXTRA_PICK_GOOD, true)
         }
+
+    /**
+     * 悬浮窗 `import` 动作的**首选**入口：直接拉透明中转页弹 SAF（#205）。
+     *
+     * 实测依据：同一条点击链路里 `managerIntent` 起 Activity 是成功的（用户看到的正是
+     * "点导入被强制打开管理页"）⇒ 这一击带着真实用户输入，后台启动限制不适用。
+     * `CLEAR_TASK` 是因为中转页 `taskAffinity=""` 会另起一个任务，选完 finish 后不能留空栈。
+     */
+    fun goodPickerIntent(context: Context): Intent =
+        Intent(context, com.bettergi.pocket.ui.GoodImportActivity::class.java).apply {
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TASK or
+                    Intent.FLAG_ACTIVITY_NO_ANIMATION,
+            )
+        }
 }

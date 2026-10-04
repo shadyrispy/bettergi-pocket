@@ -136,13 +136,8 @@ class MainActivity : AppCompatActivity() {
         if (ok) renderGoodSection()
     }
 
-    /** 从 SAF URI 问出真实文件名（`content:` 与 `file:` 都走这一条）。 */
-    private fun displayOf(uri: android.net.Uri): String? = runCatching {
-        contentResolver.query(uri, null, null, null, null)?.use { c ->
-            val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-            if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
-        }
-    }.getOrNull()
+    /** 从 SAF URI 问出真实文件名（#205 起与透明中转页共用 [GoodRepository.displayName] 一份实现）。 */
+    private fun displayOf(uri: android.net.Uri): String? = GoodRepository.displayName(this, uri)
 
     /** 引导屏已展示（onResume 用它区分两屏的刷新路径）。 */
     internal var onboardingShown = false
@@ -164,6 +159,9 @@ class MainActivity : AppCompatActivity() {
 
     /** 抓包开关的订阅任务：管理器页可被反复打开，重绑前先收掉上一个，避免多个收集协程并存。 */
     internal var captureTestJob: Job? = null
+
+    /** #203：管理器页订阅设置变化（扫描起止要当场改「导出 JSON」的可用性），随 Activity 注销。 */
+    internal var scanStateWatcher: ((com.bettergi.pocket.settings.TriggerSettings) -> Unit)? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -302,6 +300,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         pageScope.cancel()
+        unwatchScanState()
         super.onDestroy()
     }
 

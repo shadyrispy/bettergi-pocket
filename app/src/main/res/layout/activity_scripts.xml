@@ -296,38 +296,8 @@
                     android:visibility="gone" />
             </LinearLayout>
 
-            <!-- 抓包权限（C2 融合）：行由代码按库的 PermissionSnapshot 生成 ——
-                 哪些项该出现、每项跳哪个系统页，都由库判（含 ROM 差异），界面不写死。 -->
-            <LinearLayout
-                android:id="@+id/capture_section"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="抓包权限"
-                    android:textColor="@color/pocket_text"
-                    android:textSize="16sp" />
-
-                <LinearLayout
-                    android:id="@+id/capture_list"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:orientation="vertical" />
-
-                <TextView
-                    android:id="@+id/capture_hint"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="6dp"
-                    android:lineSpacingExtra="3dp"
-                    android:textColor="@color/pocket_text_muted"
-                    android:textSize="12sp" />
-            </LinearLayout>
+            <!-- #204（2026-10-03 用户反馈 #5）：「抓包权限」原先是页中独立小节，与页底的
+                 「抓包采集（测试）」隔着一整屏 ⇒ 已挪到它下面做成展开项（见 capture_perm_row）。 -->
 
             <!-- #105 角色昵称：旅行者/流浪者/奇偶的显示名由玩家自定义，而词典以**官方中文名**为键
                  ⇒ 结构性不可能命中。内置猜测表的方向和 GT 对不上，已删（见 NameOverrides 的 KDoc），
@@ -514,6 +484,63 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:showText="false" />
+            </LinearLayout>
+
+            <!-- #204：抓包权限 = 抓包采集的展开项（点行开合，与 swipe_row / calibrate_row 同一套做法）。
+                 行内容由代码按库的 PermissionSnapshot 生成——哪些项该出现、每项跳哪个系统页，
+                 都由库判（含 ROM 差异），界面不写死。 -->
+            <LinearLayout
+                android:id="@+id/capture_perm_row"
+                android:contentDescription="展开或收起抓包权限"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/bg_pocket_card_outline"
+                android:gravity="center_vertical"
+                android:minHeight="48dp"
+                android:orientation="horizontal"
+                android:paddingStart="14dp"
+                android:paddingEnd="14dp">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="抓包权限"
+                    android:textColor="@color/pocket_text"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/capture_perm_chevron"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="▾"
+                    android:textColor="@color/pocket_text_muted"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/capture_section"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:id="@+id/capture_list"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
+                <TextView
+                    android:id="@+id/capture_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:lineSpacingExtra="3dp"
+                    android:textColor="@color/pocket_text_muted"
+                    android:textSize="12sp" />
             </LinearLayout>
 
             <TextView

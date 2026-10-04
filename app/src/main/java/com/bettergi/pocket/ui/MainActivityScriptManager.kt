@@ -20,6 +20,8 @@ import com.bettergi.pocket.input.SwipeMethod
 import com.bettergi.pocket.input.SwipeTestRunner
 import com.bettergi.pocket.scan.GoodRepository
 import com.bettergi.pocket.scan.NameOverrides
+import com.bettergi.pocket.settings.TriggerSettings
+import com.bettergi.pocket.settings.TriggerSettingsRepository
 import com.bettergi.pocket.pcdata.CaptureSession
 import com.bettergi.pocket.service.TriggerForegroundService
 import androidx.appcompat.widget.SwitchCompat
@@ -57,9 +59,11 @@ internal fun MainActivity.showScriptManager() {
     findViewById<android.view.View>(R.id.status_card).setOnClickListener { openA11yIfNeeded() }
     bindCalibrateRow()
     bindGoodSection()
+    watchScanState()
     bindSwipeRow()
     bindSwipeTest()
     bindCaptureTest()
+    bindCapturePermRow()
     renderAll()
     renderCaptureSection()
     renderNameSection()
@@ -268,6 +272,17 @@ internal fun MainActivity.bindSwipeRow() {
     }
 }
 
+/** #204：「抓包权限」收在页底「抓包采集（测试）」下面，点行开合（与 swipe_row 同一套做法）。 */
+internal fun MainActivity.bindCapturePermRow() {
+    val body = findViewById<android.view.View>(R.id.capture_section)
+    val chevron = findViewById<TextView>(R.id.capture_perm_chevron)
+    findViewById<android.view.View>(R.id.capture_perm_row).setOnClickListener {
+        val show = body.visibility != android.view.View.VISIBLE
+        body.visibility = if (show) android.view.View.VISIBLE else android.view.View.GONE
+        chevron.text = if (show) "▴" else "▾"
+    }
+}
+
 /**
  * 脚本行：`[图标] 名称 / 动作摘要 · 来源` + 开关。长按「已导入」的行恢复内置。
  * 图标与动作摘要都来自脚本自己的声明（`ui.icon` / `ui.actions`）。
@@ -354,14 +369,41 @@ internal fun MainActivity.bindGoodSection() {
     }
 }
 
+/**
+ * 订阅设置变化，让「导出 JSON」的可用性跟着扫描起止**当场**变（#203）。
+ *
+ * 只靠 onResume 重绘不够：用户停在管理器页等这一轮跑完时页面不会 resume，
+ * 按钮就一直停在"可点"的状态。仓库的监听器统一 post 到主线程，可直接碰 View。
+ */
+internal fun MainActivity.watchScanState() {
+    if (scanStateWatcher != null) return          // 本页可被反复打开，只订阅一次
+    val w: (TriggerSettings) -> Unit = { if (managerShown) renderGoodSection() }
+    scanStateWatcher = w
+    TriggerSettingsRepository.app(this).addListener(w)
+}
+
+internal fun MainActivity.unwatchScanState() {
+    scanStateWatcher?.let { TriggerSettingsRepository.app(this).removeListener(it) }
+    scanStateWatcher = null
+}
+
 internal fun MainActivity.renderGoodSection() {
     val state = GoodRepository.state(this)
     findViewById<TextView>(R.id.good_input_name).text = state?.sourceName ?: "未选择"
     findViewById<android.widget.ImageView>(R.id.btn_good_clear).visibility =
         if (state != null) android.view.View.VISIBLE else android.view.View.GONE
 
+    // ★ #203：扫描没跑完就导出 = 导出**半份数据**，所以这里事前禁用，不再等用户点下去才弹
+    //   一句"运行中，导出请等本轮结束"（那是悬浮窗那条事后拦，见 OverlayScriptRows 的 export 分支）。
+    //   判据与悬浮窗同源：`scanEnabled`（面板 ▶ 起跑即置真，收尾复位）。
+    val scanning = TriggerSettingsRepository.app(this).get().scanEnabled
+    findViewById<android.widget.ImageView>(R.id.btn_good_export).apply {
+        isEnabled = !scanning
+        alpha = if (scanning) 0.4f else 1f
+    }
     val export = GoodRepository.lastExport(this)
-    findViewById<TextView>(R.id.good_export_name).text = export ?: "还没有导出"
+    findViewById<TextView>(R.id.good_export_name).text =
+        (export ?: "还没有导出") + if (scanning) " · 扫描中，结束后可导出" else ""
 
     // 可用性逐条列出：需要输入的脚本能不能被这份文件驱动
     val parts = ArrayList<String>()
