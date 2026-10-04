@@ -167,7 +167,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         // 帧新鲜性四个计数以前**不在这里**复位（引擎目前每轮新建 ⇒ 没暴露成 bug）。
         // 一并纳进来：它们和上面那批一样是"每轮独立"的观察量，靠构造函数默认值撑着，
         // 谁哪天改成复用引擎就会重演 2026-09-24 那次"第二轮把上一轮的数一起报"。
-        freshFrameTimeouts = 0; staleFramesUsed = 0; frameRefusedTotal = 0
+        freshFrameTimeouts = 0; frameRefusedTotal = 0
         settleFrameTimeouts = 0; settleStaleFramesUsed = 0
         PerfProbe.reset() // 只读探针：每轮扫描独立统计
         Log.i(TAG, "timing: ${TimingOverrides.summary()}")
@@ -259,7 +259,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 // ★ 批2-A：帧新鲜性计数，同样只在非 0 时打。`旧帧顶替>0` 就意味着那一格
                 //   识别的是**动作之前**的画面 —— 与"画面真的没变"在下游同形，是静默错读的口。
                 (if (freshFrameTimeouts > 0) {
-                    "| 帧新鲜性 超时=${freshFrameTimeouts}次 旧帧顶替=${staleFramesUsed}次 无帧可退=${frameRefusedTotal}次 "
+                    "| 帧新鲜性 超时=${freshFrameTimeouts}次 不回退旧帧=${frameRefusedTotal}次 "
                 } else "") +
                 // ★ #196：判稳侧单独一档。它非 0 **不算问题**（静止画面本来就不推新帧），
                 //   报出来是为了和上面那条对照 —— 以前两类共用一个名字，`旧帧顶替=1`
@@ -713,12 +713,16 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     var freshFrameTimeouts: Int = 0
         internal set
 
-    /** [freshFrameTimeouts] 里**真的**用旧帧顶上去了的次数（>0 就意味着那一格识别的是过期画面）。 */
-    @Volatile
-    var staleFramesUsed: Int = 0
-        internal set
-
-    /** 超时且连旧帧也没有、最终抛给上层次数（这是唯一会走到"本轮失败"的那一档）。 */
+    /**
+     * 超时后**按策略不回退**（识别用帧）或**无缓存帧**（判稳用帧）⇒ 最终抛给上层的次数。
+     *
+     * ★ #196 第二版（2026-10-04）改了语义：以前只有"连旧帧都没有"才计这里，
+     *   有旧帧就静默顶上去（那一栏叫 `旧帧顶替`）。现在识别侧**一律不回退** ⇒
+     *   华为那种退化轮里这个数会从 0 变成 >0，而**这正是想要的现象**：
+     *   失败变响，而不是拿动作之前的画面做 OCR 当成新格入库。
+     *   `旧帧顶替` 那一栏因此被删 —— 它已经结构性不可能 >0，留着一个永不动的计数
+     *   就是我们都反对的那种"看着有监控、其实没人读"的死判据。
+     */
     @Volatile
     var frameRefusedTotal: Int = 0
         internal set

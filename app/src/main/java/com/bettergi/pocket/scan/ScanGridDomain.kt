@@ -1441,11 +1441,11 @@ internal suspend fun ScanEngine.awaitCrossPageSettle(gridKey: String) {
  * 第一份真实样本就是反例：11-A 那轮摘要 `帧新鲜性 超时=1 旧帧顶替=1`，
  * 发生在**静止的管理器页**上 —— 当初设计回退正是让 settle 循环把"没新帧"当"没再动"的证据用。
  *
- * ⚠️ 这一版**故意没有**删 [grabFrameOrNull] 里的旧帧回退。删它才是行为变更，而且不是
- *    一处而是两类站点各要不同处理（逐站点分类见 `notes/20261003_faulttol-fix-plan.md` §11-B）；
- *    更要紧的是：那些 `runCatchingCancellable { freshFrame() }.getOrNull() ?: break` 的站点
- *    今天**实际拿到的是回退的旧帧、不是 null**，所以"顺手改成返回 null"会静默改掉 8 处的控制流。
- *    ⇒ 判决那一版单独走，配一次同机同档的 A/B 才许合。
+ * ★ 第二版（2026-10-04）已落地：**识别侧的旧帧回退删了**，处置表抽成 [frameOnNoFresh]
+ *   （含"为什么设备上量不到、只能靠单测钉住"的实测依据）。判稳侧保留回退——那里"没新帧"
+ *   本来就是答案的一部分。
+ *   两版共同的依据：第一份真实样本恰好是反例，华为退化轮 `超时=16 旧帧顶替=16 无帧可退=0`
+ *   ⇒ 每次超时都静默退了旧帧；而 BlueStacks 健康轮 46 条摘要里这两个计数全 0。
  */
 internal suspend fun ScanEngine.freshFrame(timeoutMs: Long = 2500L): Mat =
     grabFrameOrNull(timeoutMs, use = FrameUse.RECOGNITION)
@@ -1459,8 +1459,27 @@ internal suspend fun ScanEngine.settleFrame(timeoutMs: Long = 2500L): Mat =
 internal enum class FrameUse { RECOGNITION, SETTLE }
 
 /**
- * 两条路径共用的取帧实现。行为与拆分前**逐字一致**，唯一区别是把计数与日志级别
- * 按 [use] 分流：识别侧继续打 W（那是危险信号），判稳侧打 D（那是常态）。
+ * #196 第二版的**决策表**（2026-10-04）：拿不到"动作之后的新帧"时，两种用途怎么处置。
+ *
+ * 抽成纯函数是因为这就是整版的全部内容，而它**没法在设备上验**：
+ *   · BlueStacks 2026-10-04 全天 46 条摘要里 `帧新鲜性`/`判稳无新帧` 出现 **0 次**
+ *     ⇒ 健康轮根本走不到这条分支，拿它做 A/B 是恒等、是空跑。
+ *   · 唯一走过的是华为的退化轮：`超时=16次 旧帧顶替=16次 无帧可退=0次`
+ *     （`ui_scan_20261003_231618_..._weapon_scan.logcat.log`，`scan finished: watchdog cells=13`）
+ *     ⇒ **16/16 每一次超时都退了旧帧**，那 13 格识别的画面全部可能是动作之前的。
+ *     而"投影卡住"这种条件不可按需复现 ⇒ 这条只能在真实退化轮出现时靠日志事后确认
+ *     （届时应看到 `无帧可退` 从 0 变成 >0、且失败是**响**的而不是静默错读）。
+ *
+ * 选"识别侧不回退"的理由：识别用帧的后果是**拿旧画面做 OCR 并当成新格入库**，
+ * 与"画面真的没变"在下游完全同形 ⇒ 静默错读，事后对账只能看到一个"缺/错"却查不到成因
+ * （#188 那轮就是这么绕了一圈）。判稳用帧没有这个问题：它要的就是"还在不在动"。
+ */
+internal fun frameOnNoFresh(use: FrameUse, cached: Mat?): Mat? =
+    if (use == FrameUse.SETTLE) cached else null
+
+/**
+ * 两条路径共用的取帧实现。★ #196 第二版：**识别用帧不再回退旧帧**（处置表见 [frameOnNoFresh]）。
+ * 计数与日志按 [use] 分流：识别侧继续打 W，判稳侧打 D（那里"没新帧"是常态）。
  */
 private suspend fun ScanEngine.grabFrameOrNull(timeoutMs: Long, use: FrameUse): Mat? {
     // 只读探针：本函数**包含「等一个新帧」的等待**（投影 ~30fps ⇒ 平均 ~33ms），
@@ -1469,8 +1488,6 @@ private suspend fun ScanEngine.grabFrameOrNull(timeoutMs: Long, use: FrameUse): 
     // ★ 批2-B（2026-10-03）：看门狗心跳挪到**确实拿到动作后新帧之后**再打。
     //   原来打在第一行 ⇒ 投影停摆、每轮都超时回退旧帧时它照样前进，120s 会话看门狗
     //   永远不会因"取不到帧"触发（`ScanEngine.lastProgressAtMs` 的注释与此相反，已一并订正）。
-    //   基线（13:12 全量 945 格）实测这条回退**一次都没走到** ⇒ 健康轮不受影响；
-    //   只有真正拿不到帧的轮次会开始被看门狗收，而那正是以前被伪装成"画面没变"的那些。
     val t0 = System.nanoTime()
     try {
         return try {
@@ -1480,28 +1497,32 @@ private suspend fun ScanEngine.grabFrameOrNull(timeoutMs: Long, use: FrameUse): 
         } catch (e: FrameTimeoutException) {
             if (use == FrameUse.RECOGNITION) freshFrameTimeouts += 1 else settleFrameTimeouts += 1
             val cached = frameSource.acquireLatestBgr()
-            if (cached == null) {
+            val kept = frameOnNoFresh(use, cached?.bgr)
+            if (kept == null) {
+                // ⚠️ 不用的那一帧必须自己 release：以前这条分支要么返回 cached.bgr（交给调用方），
+                //    要么 cached 本来就是 null（没东西可放）。现在识别侧会**主动丢弃**拿到的缓存帧，
+                //    漏掉这一步就是每格泄漏一帧全幅 BGR。
+                cached?.bgr?.release()
                 frameRefusedTotal += 1
-                Log.w(TAG, "grabFresh timeout 且无缓存帧可回退 ⇒ 抛给上层")
-                return null
-            }
-            // ⚠️ 这条回退按构造拿到的就是被 isFresh 拒掉的那一帧（同一 publishedBgr 槽、
-            //   同一个 threshold），所以**不**打看门狗心跳。彻底删掉它要先审 ~20 个调用点
-            //   （settle 循环里把 null 当 break/continue 用，语义会变），列为后续单独一步。
-            if (use == FrameUse.RECOGNITION) {
-                staleFramesUsed += 1
                 Log.w(
                     TAG,
-                    "grabFresh timeout, falling back to latest frame (staleFramesUsed=$staleFramesUsed)",
+                    "grabFresh timeout(${timeoutMs}ms) ⇒ ${
+                        if (use == FrameUse.RECOGNITION) {
+                            "识别用帧**不回退**旧帧（退了就是拿动作之前的画面做 OCR）⇒ 抛给上层，" +
+                                "由格/页处置层决定重访或放弃"
+                        } else {
+                            "判稳侧也无缓存帧 ⇒ 抛给上层"
+                        }
+                    }（frameRefusedTotal=$frameRefusedTotal）",
                 )
-            } else {
-                settleStaleFramesUsed += 1
-                Log.d(
-                    TAG,
-                    "settleFrame: 无新帧 ⇒ 按『画面没变』用缓存帧（settleStaleFramesUsed=$settleStaleFramesUsed）",
-                )
+                return null
             }
-            cached.bgr
+            settleStaleFramesUsed += 1
+            Log.d(
+                TAG,
+                "settleFrame: 无新帧 ⇒ 按『画面没变』用缓存帧（settleStaleFramesUsed=$settleStaleFramesUsed）",
+            )
+            kept
         }
     } finally {
         PerfProbe.addFrame(System.nanoTime() - t0)
