@@ -161,6 +161,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         clickGiveups = 0; weaponStaleDropped = 0
         weaponOverlapRepeats = 0; weaponIdentityRuns.clear(); lastEmittedWeaponIdentity = null
         unknownSetPieces = 0; charUnresolved = 0
+        weaponDictMiss = 0; weaponDictMissNames.clear()
         panelShotSeq = 0; panelShotDropped = 0; panelShotWriteFailures = 0
         panelShotSpaceCheckedAt = 0; panelShotSpaceOk = true
         PerfProbe.reset() // 只读探针：每轮扫描独立统计
@@ -188,20 +189,30 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             if (vars.stopRequested && step.optString("do") != "planSummary") break
             executeStep(step)
         }
-        // endConditions：total 核对（止扫中断时允许不符——止扫即异常策略）
+        // endConditions：total 核对。
         // ★ A10：对账口径必须与 pagedGrid 的「件数达标」判据**同源**（那边就是三者之和）。
         //   单轮扫描只有一个 flow 域的容器在增长（weapon_scan 只进 resultsWeapons、artifact_scan
         //   只进 results、character_scan 只进 resultsCharacters），合计即该域实收件数；
         //   旧代码只看 results.size（只装圣遗物）⇒ weapon_scan 正常收尾时 0 != N ⇒
         //   必报假 WARN「总数不符」+ total_mismatch。
+        // ★ #188（2026-10-04）：豁免条件从「只要 stopRequested 就不查」收窄成
+        //   「**提前收工**才不查」。旧条件把「回卷止扫」也当成异常中断一并豁免了，而回卷
+        //   （连续重复件 ≥ 阈值）与「连续整页跳过」恰恰是全量扫描**正常遍历完**的收尾方式 ——
+        //   于是 10-03 那轮武器 读到 206 / 实收 204（尾页 5 格解析成空、静默丢 2 件）
+        //   一声不响。判"到底"用现成的 `gridExhausted`（只有那两处置 true），
+        //   再叠 `!matchHit` 与 foreach 那道"到底但没命中目标"的守卫同口径。
+        //   ⚠️ 仍有一个已知缺口：`pagedGrid` 以「peek 消失（指纹不变）」收尾时
+        //   `gridExhausted=false`（见 ScanJudgmentDomain:237 记的那次事故），那条路今天**照旧豁免** ——
+        //   要一并覆盖得先改那条路径的置位语义，不属本单，别把这里当成已全覆盖。
         val collected = results.size + resultsWeapons.size + resultsCharacters.size
         val total = vars.total
-        if (total != null && !vars.stopRequested && total != collected) {
-            Log.w(TAG, "total mismatch: readCount=$total scanned=$collected")
+        val sawWholeList = !vars.stopRequested || (vars.gridExhausted && !vars.matchHit)
+        if (total != null && sawWholeList && total != collected) {
+            Log.w(TAG, "total mismatch: readCount=$total scanned=$collected stopReason=${vars.stopReason}")
             RecognitionLog.log(
                 logTag,
                 RecognitionLog.Level.W,
-                "总数不符 读到=$total 实扫=$collected",
+                "总数不符 读到=$total 实扫=$collected（收尾=${vars.stopReason ?: "自然结束"}）",
             )
             listener.onProgress("total_mismatch", mapOf("total" to total, "scanned" to collected))
         }
@@ -215,6 +226,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 "| 行级闭环 判跳行=$rowCheckSkips 判滑空=$rowCheckStalls " +
                 "吞击重发=$swallowedClickRetries 点击放弃=${clickGiveups}格 定点重访=$dupRevisitRecovered/$dupRevisits " +
                 "武器陈旧丢弃=${weaponStaleDropped}件 " +
+                // ★ #188：只数 rarity>=3 的未命中（素材未命中是对的，见计数器 KDoc）。
+                //   >0 就是**词典缺一件真武器** ⇒ 这一格会静默不入库，对账侧表现为"缺 N 件"。
+                (if (weaponDictMiss > 0) {
+                    "武器词典缺=${weaponDictMiss}格(${weaponDictMissNames.joinToString("/")}) "
+                } else "") +
                 // ★ #104：只观测、已照常入库 —— 对账"多 N 件"时先看这个数，别把它算成丢件或真多出来的装备
                 (if (weaponOverlapRepeats > 0) "武器重叠重读=${weaponOverlapRepeats}件(已入库) " else "") +
                 "页级冻结放弃=${pageFreezeAbandoned}格 未知套装=${unknownSetPieces}件 " +
@@ -510,6 +526,22 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     internal var lastWeaponIdentity: String? = null
     internal var weaponSameRun: Int = 0
     internal var weaponStaleDropped: Int = 0
+
+    /**
+     * **在扫描星级区间内**读到了武器名、却查不到词典 key 的格数（#188，2026-10-04）。
+     *
+     * 为什么不能只数"未命中"：武器背包尾部混着**强化素材**（精锻用魔矿/良矿/杂矿），
+     * 它们不是武器、GT 也不收 ⇒ 查不到词典是**正确行为**，全记进这个计数器就变成
+     * 每轮都有的噪声，没人会看。
+     * ⚠️ 两个门槛都是结构性的，**不是**"素材星级低"：实测「精锻用魔矿」是 **5★**，
+     *    所以只按 `rarity>=3` 挡会漏（10-04 第一轮就把魔矿计成了缺件）。
+     *    第二条 `level>0` 才挡得住：素材面板**没有 `Lv.N/M` 那一栏**（原文第 2 槽是
+     *    "武器经验道具"），真武器恒有等级行。两处判据见 [ArtifactDomainPanels] 的 parseWeaponPanel。
+     * 剩下的"未命中"就只剩一种含义：**词典漏了一件真武器**（A' 段之后仍漏 = 新武器上线）。
+     * 名字去重后一并打出来，好让人直接去 `gen_mappings.py` 查是哪张源表缺了。
+     */
+    internal var weaponDictMiss: Int = 0
+    internal val weaponDictMissNames = LinkedHashSet<String>()
 
     /**
      * 「同一身份在**非连号**处再次入库」的次数 —— 只观测、**不丢件**（#104，2026-09-27）。

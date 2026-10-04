@@ -408,10 +408,30 @@ internal suspend fun ScanEngine.parseWeaponPanel(frame: Mat, ocr: OcrGateway, di
             names?.match(it, GoodNames.Kind.WEAPON, dictFuzzyOf(dict))?.key
         }
     }
-    if (pieceName != null && key == null) {
-        Log.w(TAG, "weapon name '$pieceName' not found in mappings.weapons")
-    }
     val level = levelText?.let { StatParser.extractValue(it)?.toInt() } ?: 0
+    if (pieceName != null && key == null) {
+        // #188 计数器：只数"**像一件武器**却查不到词典"的格。两个门槛都是结构性的，不靠名单：
+        //   · rarity>=3 —— 见 [weaponDictMiss] 的 KDoc；
+        //   · level>0 —— 尾部的强化素材面板**根本没有 `Lv.N/M` 那一栏**（实测原文是
+        //     「精锻用魔矿 | 武器经验表 | …」，第 2 槽是"武器经验道具"被 OCR 读进来的），
+        //     而真武器恒有等级行（学徒笔记是 `Lv.1/20` ⇒ level=1）。
+        //     不加这一条，5★ 素材「精锻用魔矿」会每轮都进计数器 ⇒ 变成大家都习惯忽略的噪声。
+        if (vars.rarity >= 3 && level > 0) {
+            weaponDictMiss++
+            weaponDictMissNames += pieceName
+            Log.w(
+                TAG,
+                "weapon name '$pieceName' not found in mappings.weapons" +
+                    "（rarity=${vars.rarity} Lv=$level ⇒ 计入武器词典缺件 #$weaponDictMiss）",
+            )
+        } else {
+            Log.i(
+                TAG,
+                "weapon name '$pieceName' 未命中词典" +
+                    "（rarity=${vars.rarity} Lv=$level ⇒ 按素材/未判定处理，不计缺件）",
+            )
+        }
+    }
     // ★ 2026-09-17 对齐 GT：**`refine` 读不到时视作 1**
     //   3★ 及以下武器**没有精炼机制** ⇒ 面板无「精炼N阶」⇒ OCR 读空 ⇒ null ✗
     //   而 GT 对这类写 `refinement: 1` ✓ ⇒ 否则键 `(DebateClub,1,null)` ≠ GT `(DebateClub,1,1)`
@@ -552,6 +572,18 @@ internal suspend fun ScanEngine.parseWeaponPanel(frame: Mat, ocr: OcrGateway, di
         ascension = ascension,
     )
     resultsWeapons.add(weapon)
+    // ★ 内容键必须落到 `lastCellKey`（2026-10-04 #188 复盘）：这条赋值以前**没有**，
+    //   武器路径的 `lastCellKey` 因此恒为 null ⇒ 两处后果，都不是"日志难看"这么轻：
+    //   ① 格级日志的 `key` 栏读 `pageKeys.lastOrNull()` ⇒ 实测 10-03 那轮武器全量
+    //      **231/231 格全打 `**空(未入库)**`**，而同样的 231 格里有 204 格 `added=1`。
+    //      #188 的"尾区最后 5 格解析成空 ⇒ 丢 2 件"就是拿这一栏当证据得出的，
+    //      而 GT 复核证明那 5 格里 4 格正常入库（黎明神剑 GT 8 件 = 我方 8 件，一件没丢）。
+    //      —— 与 #122（角色格用 `key` 栏下判决）是同一个坑，只是换了条路径。
+    //   ② `pageKeys` 全空 ⇒ 「空读格回读」的门槛 `count{isNotEmpty} >= 5`
+    //      （ScanGridDomain:686）在武器上**永不成立** ⇒ 那条实测救回 2.6% 失败格的路径
+    //      对武器整条失效。
+    //   键与去重/连续重复判据同构（[:423] 的 `noteDupAndMaybeStop`），不另造一套口径。
+    lastCellKey = ident
     listener.onProgress("weapon", vars.snapshot() + ("piece" to pieceName) + ("idx" to resultsWeapons.size))
 }
 

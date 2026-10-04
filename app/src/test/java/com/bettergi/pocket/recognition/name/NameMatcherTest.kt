@@ -61,6 +61,19 @@ class NameMatcherTest {
     }
 
     @Test
+    fun `银缸 still resolves to 银釭 once 银剑 joins the weapon dict`() {
+        // #188 回归（2026-10-04）：词典补进 2★「银剑」之后，OCR 读出的「银缸」到
+        // 银釭 / 银剑 的编辑距离**都是 1** ⇒ 进 tier5 并列分支；剑/缸 不同组 ⇒ 视觉分也并列
+        // ⇒ 按「歧义层宁可不命中」返回 null ⇒ 4★ 银釭(L90,R5) 整件从导出里消失。
+        // 加低星武器层**之前**同一张面板是 `name matched: '银缸' → 银釭 (编辑距离)`（真机日志）。
+        val both = mapOf("银釭" to "SilverLight", "银剑" to "SilverSword")
+        assertEquals("SilverLight", NameMatcher.match("银缸", both)?.key)
+        // 对照组：同样"距离并列、只差一个字"，但那个字**不在**视觉组里 ⇒ 必须仍然不命中。
+        // 没有这条，上面那次命中就也可能只是"matcher 变宽了"而不是"这条组起了作用"。
+        assertNull(NameMatcher.match("银钢", both)?.key)
+    }
+
+    @Test
     fun `combined ocr confusion fixes multi-char garble`() {
         // 拉→菈 与 鸟→乌 必须同时替换；单条替换都命中不了
         assertEquals("Lauma", NameMatcher.match("拉鸟玛", lauoma)?.key)
