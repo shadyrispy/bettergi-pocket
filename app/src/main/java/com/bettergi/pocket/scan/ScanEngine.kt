@@ -212,9 +212,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   （武器：学徒笔记 → 魔矿/良矿/杂矿；圣遗物：最后一件真圣遗物 global=947 → 祝圣精华 948），
         //   所以撞到素材 = 装备读完了 ⇒ 总数必须对得上。这一条同时是 #216 自己的**验收判据**：
         //   标识若误触发在装备中间，这里会立刻报"总数不符"而不是悄悄少一批。
-        //   ⚠️ 仍有一个已知缺口：`pagedGrid` 以「peek 消失（指纹不变）」收尾时
-        //   `gridExhausted=false`（见 ScanJudgmentDomain:237 记的那次事故），那条路今天**照旧豁免** ——
-        //   要一并覆盖得先改那条路径的置位语义，不属本单，别把这里当成已全覆盖。
+        //   ✅ #213（2026-10-04 同日补）：`pagedGrid`/`snapTraverse` 以「peek 消失（指纹不变）」
+        //     收尾时以前不置 `gridExhausted`（见 ScanJudgmentDomain:237 记的那次错装事故）⇒ 那条路
+        //     照旧豁免。现在那条出口会置 `gridExhausted=true`（只在 reachedEnd 那一支；
+        //     轮数兜底/stopRequested 两个"中途放弃"出口不置），所以也被这条核对覆盖了。
+        //     ⚠️ 但覆盖到不等于量到：走 snap 的只有 `select_3col`（auto_equip），而它不读背包
+        //     计数器 ⇒ `total==null`，这里今天仍然不会为它报警。真实收益在 foreach 那道守卫上。
         val collected = results.size + resultsWeapons.size + resultsCharacters.size
         val total = vars.total
         val sawWholeList = !vars.stopRequested || (vars.gridExhausted && !vars.matchHit) ||

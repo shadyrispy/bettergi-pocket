@@ -775,6 +775,18 @@ internal suspend fun ScanEngine.snapTraverse(
             frame.release()
         }
         if (reachedEnd(thumb, lastThumb)) {
+            // ★ #213（2026-10-04）：这条出口**就是**"网格到底"，必须置 gridExhausted。
+            //   以前这里不置 ⇒ `ScanControlDomain:542` 那道 foreach 守卫（要求
+            //   `gridExhausted && !matchHit`）**永不触发** —— 那正是 #141 错装事故的成因
+            //   （见本文件 237 行附近记的那次：peek 消失收尾 ⇒ 照读「替换」照点 ⇒ 把屏幕上
+            //   碰巧选中的 Lv0 角斗士死之羽装给了目标角色，回执还写 NotFound）。
+            //   #141 当时是把守卫改成"不挂 gridExhausted"来兜底的（`isEquipAction && !matchHit`），
+            //   那是对的**但不是这条数据的正确值**：到底了就该说到底。
+            //   顺带让 `ScanEngine` 的总数核对覆盖这条收尾（本流程走 auto_equip，
+            //   `vars.total` 通常没读到 ⇒ 那条今天仍不会响；真实收益在守卫侧）。
+            //   ⚠️ 只在 reachedEnd 这一处置：循环另两种出口（SNAP_MAX 轮数兜底 / stopRequested）
+            //   都是**中途放弃**，不是到底，置 true 会把守卫骗开。
+            vars.gridExhausted = true
             Log.i(TAG, "snap[$gridKey]: peek 消失（指纹不变）→ 补点遮挡槽残余卡 → 停止（已遍历 $visited）")
             // 补点：遮挡槽残余卡（peekCols 第 2 列起）
             for (i in 1 until peekCols.length()) {
