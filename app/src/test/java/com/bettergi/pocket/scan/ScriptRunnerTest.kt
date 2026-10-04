@@ -301,10 +301,15 @@ class ScriptRunnerTest {
         assertEquals(StartGateLiveAsk.ASK_ATTEMPTS_MAX, out.attempts)
         assertEquals(StartGateLiveAsk.ASK_ATTEMPTS_MAX, calls.get())
         assertEquals(before + 1, StartGateLiveAsk.cacheFallbacks) // 「落回缓存」被记了一笔
-        // 快失败路径（华为实测每次数 ms 报 null）问满 5 次、只付 4 个间隔，且没被预算截
-        assertEquals(800L, out.elapsedMs)
+        // 快失败路径（华为/BS 实测每次数 ms 就报 null）问满次数上限、只付 (n-1) 个间隔，
+        // 且没被预算截。⚠️ 这几个数**从常数推导**，别再写死 —— 上一版写死 5 次/800ms，
+        // 于是"按实测把 5 降到 2"这件正事会把测试撞红，看起来像改坏了。
+        val n = StartGateLiveAsk.ASK_ATTEMPTS_MAX
+        val expectedMs = (n - 1) * StartGateLiveAsk.ASK_INTERVAL_MS
+        assertEquals(expectedMs, out.elapsedMs)
+        assertTrue("预算必须容得下快失败路径问满", expectedMs <= StartGateLiveAsk.ASK_BUDGET_MS)
         assertFalse(out.budgetCut)
-        assertEquals("5次都没问到(800ms)⇒落回缓存", out.describe())
+        assertEquals("${n}次都没问到(${expectedMs}ms)⇒落回缓存", out.describe())
     }
 
     @Test
@@ -313,15 +318,20 @@ class ScriptRunnerTest {
         val calls = AtomicInteger(0)
         val fake = FakeClock()
         val before = StartGateLiveAsk.cacheFallbacks
+        // ⚠️ 这条测的是"预算能截断"这个**机制**，与生产选了几个次数无关 ⇒ 显式传参，
+        //    不去引用 ASK_ATTEMPTS_MAX / ASK_BUDGET_MS（否则调参就等于改测试意图）。
         val out = StartGateLiveAsk.ask(
             probe = { calls.incrementAndGet(); fake.advance(500); null },
             sleep = fake::sleep,
             clockMs = fake.clock,
+            attemptsMax = 5,
+            intervalMs = 200L,
+            budgetMs = 1_200L,
         )
-        assertTrue("budget must cut the loop: attempts=${out.attempts}", out.attempts < StartGateLiveAsk.ASK_ATTEMPTS_MAX)
+        assertTrue("budget must cut the loop: attempts=${out.attempts}", out.attempts < 5)
         assertEquals(2, out.attempts)
         assertTrue(out.budgetCut)
-        assertTrue("worst case must stay bounded: ${out.elapsedMs}ms", out.elapsedMs <= StartGateLiveAsk.ASK_BUDGET_MS)
+        assertTrue("worst case must stay bounded: ${out.elapsedMs}ms", out.elapsedMs <= 1_200L)
         assertEquals(1200L, out.elapsedMs)
         assertEquals(before + 1, StartGateLiveAsk.cacheFallbacks) // 预算截断也是"没问到⇒落回缓存"
         assertEquals("2次都没问到(1200ms/预算截断)⇒落回缓存", out.describe())
