@@ -18,8 +18,8 @@ import java.io.File
  * 极难归因。2026-10-06 真机 A/B 还证明**导出互比不能当裁片对拍判据**——翻页落点不可控
  * （同版本两轮的 swipe 推进行数不同，跨页身份锚定会合法地跳过重叠格）⇒ 裁片正确性必须离线证。
  *
- * ⚠️ 已知不含 vote 步骤在整帧上读的 zone（artifact.panel.lock/astral/zhusheng）——
- *   S1 里 vote 仍读整帧；S2 把 vote 搬进消费者时必须扩 [ScreenProfile.panelCropRect] 并在这里补断言。
+ * S2a（2026-10-06）：vote 步骤（锁/收藏/祝圣三 zone）搬进消费者读裁片 ⇒ 三 zone 已并入
+ * [ScreenProfile.panelCropRect]，并有 [voteZonesContainment] 包含性断言（独立推导互为对照）。
  */
 class PanelCropRectTest {
 
@@ -81,6 +81,37 @@ class PanelCropRectTest {
 
         fun allPanelRects(p: ScreenProfile, panelKey: String): List<FrameRect> =
             leafRects(p, panelKey) + starCells(p, panelKey)
+
+        /**
+         * S2a：独立复算 vote 三 zone 的帧坐标包围盒（与生产 panelCropRect 的并集逻辑分开写）。
+         * lock/astral 是 rect；zhusheng 是采样点表（每点 5×5，±8px 包围）。
+         */
+        fun voteZones(p: ScreenProfile): List<Pair<String, FrameRect>> {
+            val zones = p.rawObject("zones") ?: return emptyList()
+            val out = ArrayList<Pair<String, FrameRect>>()
+            fun eat(name: String, r: FrameRect) = out.add("$name" to r)
+            for (key in listOf("artifact.panel.lock", "artifact.panel.astral")) {
+                (zones.optJSONObject(key)?.optJSONArray("rect"))?.takeIf { it.length() == 4 }?.let { r ->
+                    eat(key, p.scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3)))
+                }
+            }
+            zones.optJSONObject("artifact.panel.zhusheng")?.optJSONArray("points")?.let { pts ->
+                var box: FrameRect? = null
+                for (i in 0 until pts.length()) {
+                    val pt = pts.getJSONArray(i)
+                    val cx = p.scale(pt.getInt(0), p.scaleX)
+                    val cy = p.scale(pt.getInt(1), p.scaleY)
+                    box = box?.let {
+                        FrameRect(
+                            minOf(it.left, cx - 8), minOf(it.top, cy - 8),
+                            maxOf(it.right, cx + 8), maxOf(it.bottom, cy + 8),
+                        )
+                    } ?: FrameRect(cx - 8, cy - 8, cx + 8, cy + 8)
+                }
+                box?.let { eat("artifact.panel.zhusheng", it) }
+            }
+            return out
+        }
     }
 
     private fun check(file: String, w: Int, h: Int, panelKey: String) {
@@ -120,6 +151,30 @@ class PanelCropRectTest {
         val a = p.panelCropRect("artifact_backpack")
         val b = p.panelCropRect("artifact_backpack")
         assertTrue("缓存应返回同一实例", a === b)
+    }
+
+    /**
+     * S2a 闸门：vote 三 zone（锁钮/收藏星/祝圣采样点）必须落在 artifact 面板裁片并集内。
+     * 漏任何一个 ⇒ vote 在消费者侧静默读 0（锁态/收藏态/祝圣全丢，导出字段错但不报错）。
+     */
+    @Test
+    fun `vote三zone落在artifact裁片并集内`() {
+        for ((file, w, h) in listOf(
+            Triple("profiles.json", 3200, 1440),
+            Triple("profiles_2560x1440.json", 2560, 1440),
+            Triple("profiles_2244x1080.json", 2244, 1080),
+        )) {
+            val p = profile(file, w, h)
+            val crop = p.panelCropRect("artifact_backpack")
+            assertTrue("$file 必须有裁片并集", crop != null)
+            crop!!
+            for ((name, zr) in voteZones(p)) {
+                assertTrue(
+                    "$file vote zone $name ($zr) 落在裁片并集外（crop=$crop）⇒ 消费者侧 vote 会静默读 0",
+                    zr.left >= crop.left && zr.top >= crop.top && zr.right <= crop.right && zr.bottom <= crop.bottom,
+                )
+            }
+        }
     }
 }
 

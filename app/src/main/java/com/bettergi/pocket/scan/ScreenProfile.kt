@@ -587,6 +587,39 @@ class ScreenProfile(
                 }
             }
         }
+        // ★ S2a（#69 流水线，2026-10-06）：vote 步骤（锁/收藏/祝圣三 zone）搬进消费者读裁片的前提
+        //   = 三个 zone 必须落在裁片并集内，否则 vote 静默读 0（锁态/收藏态/祝圣全丢，不报错）。
+        //   zhusheng zone 是**采样点表**（每点 5×5 紫占比）⇒ 并入每点 ±PADDING 的包围盒。
+        //   只对 artifact 系面板生效（weapon/character 面板没有这三个 zone，平铺无意义）。
+        if (panelKey.startsWith("artifact")) {
+            val zones = root.optJSONObject("zones")
+            fun zoneRect(name: String): FrameRect? {
+                val z = zones?.optJSONObject(name) ?: return null
+                z.optJSONArray("rect")?.let { r ->
+                    if (r.length() == 4) return scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3))
+                }
+                z.optJSONArray("points")?.let { pts ->
+                    var box: FrameRect? = null
+                    for (i in 0 until pts.length()) {
+                        val p = pts.getJSONArray(i)
+                        val cx = scale(p.getInt(0), scaleX)
+                        val cy = scale(p.getInt(1), scaleY)
+                        val pad = 8 // 5×5 采样点 ±2px，给缩放/圆角余量
+                        box = box?.let {
+                            FrameRect(
+                                minOf(it.left, cx - pad), minOf(it.top, cy - pad),
+                                maxOf(it.right, cx + pad), maxOf(it.bottom, cy + pad),
+                            )
+                        } ?: FrameRect(cx - pad, cy - pad, cx + pad, cy + pad)
+                    }
+                    return box
+                }
+                return null
+            }
+            for (name in listOf("artifact.panel.lock", "artifact.panel.astral", "artifact.panel.zhusheng")) {
+                zoneRect(name)?.let { eat(it) }
+            }
+        }
         acc = acc?.let { FrameRect(it.left, it.top, it.right, it.bottom + zhushengShiftPx.coerceAtLeast(0)) }
         cropCache[panelKey] = acc
         return acc
