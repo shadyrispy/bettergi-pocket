@@ -18,7 +18,6 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.GRID_SIMILAR_DIFF
 import com.bettergi.pocket.scan.ScanEngine.Companion.GRID_TOP_STABLE_ROUNDS
 import com.bettergi.pocket.scan.ScanEngine.Companion.MAX_SCROLL_TOP_ROUNDS
 import com.bettergi.pocket.scan.ScanEngine.Companion.OVERLAP_ANCHOR_COUNT
-import com.bettergi.pocket.scan.ScanEngine.Companion.PAGE_CAP_MARGIN
 import com.bettergi.pocket.scan.ScanEngine.Companion.PAGE_WATCHDOG_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_FP_GATE_ENABLED
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_CHANGE_WINDOW_MS
@@ -38,6 +37,16 @@ import com.bettergi.pocket.capture.FrameTimeoutException
 /*
  * Stage 3.3 步④：ScanGridDomain（do 原语按族拆分，扩展函数，函数体一字未改）。
  */
+
+/**
+ * 页级看门狗判据（纯函数）。量的是「距**上一次走完一格**的间隔」，不是「本页累计耗时」。
+ *
+ * 拆出来只为一条断言：一台**慢但一直在前进**的机器不许被判成挂死。
+ * 华为 EML-AL00（麒麟 970）实测 perCell=11.0s、一页 12 格 ⇒ 累计 132s > 90s，
+ * 旧的累计口径每页必触发，945 件的量跑到第 11 件就整轮中止。
+ */
+internal fun pageWatchdogFired(prevProgressAt: Long, nowAt: Long, budgetMs: Long): Boolean =
+    nowAt - prevProgressAt > budgetMs
 
 internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
     val gridKey = step.getString("grid")
@@ -117,8 +126,8 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
     var pageNo = 0
     var pageMinLevel: Int? = null
     // ★ A9：**连续整页跳过**计数。skip 页不点格 ⇒ 无该页最低等级读数来源，页级下界不可推进
-    //   （旧方案「命中页也推进页级下界」因此被否决）⇒ 若列表尾部全是低价值页，翻页永不终止：
-    //   artifact_lock 无 readCount（total=null ⇒ pagesByCount=Int.MAX_VALUE）、生产 maxPages 无上限。
+    //   （旧方案「命中页也推进页级下界」因此被否决）⇒ 若列表尾部全是低价值页，翻页没有内容侧的
+    //   终止点：artifact_lock 无 readCount（total=null ⇒ 件数主判据不启用）、生产 maxPages 无上限。
     //   收尾上限见下方 skip 分支（TimingOverrides.pageSkipLimit，默认 3）。
     var consecutiveSkipPages = 0
     // ★ 2026-09-16（审计 P0-2 修）：**跨页**主滑记账 —— 必须声明在页循环**外**，否则每页重建，
@@ -135,18 +144,22 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
     //   为什么从 `cols×traverseRows` 抬到 + 一行：单次滑动没落地只会造出一整页（=cols×rows 个）
     //   重复件，正好卡在旧阈值上 ⇒ 一次滑空就能误停整轮；抬一行之后至少要**连续两次**滑空才凑得满。
     dupLimitEffective = cols * (traverseRows + 1)
-    // 按件数推算的翻页数上限（**后备**；主判据是"已入库 ≥ 计数器"，见翻页块开头）
-    val cellsPerPage = cols * traverseRows
-    val pagesByCount = vars.total?.takeIf { it > 0 }?.let {
-        Math.ceil(it.toDouble() / cellsPerPage).toInt() + PAGE_CAP_MARGIN
-    } ?: Int.MAX_VALUE
+    // ★ 2026-10-04：**删掉「按件数推算的翻页数上限」这条判据**（原 `pagesByCount` / `pageCap`）。
+    //   立项理由（2026-09-26 注释）是"回卷链等于从没被验证过"，这条已被数据推翻：
+    //   `回卷判据：连续 2 个整页零新增 ≥ 2` 历史确认 **15 次**。而本判据自身只触发过 **1 次**，
+    //   那一次就是华为 2244 档圣遗物全量 —— 误伤 21 件尾巴。
+    //   根因是**单位错**：它数的是"翻了几页"，而欠滚是设计上允许的（回卷阈值特意抬到"一页+一行"
+    //   就是为了容忍一次滑动不满一页）。用页数当进度尺 ⇒ 滑得越少越早被截，等于**惩罚欠滚**。
+    //   它声称要防的两件事，现有链已各自覆盖：
+    //     · 计数器偏大 / 列表真到底 ⇒ 回卷（连续整页零新增）
+    //     · 列表卡住一直翻        ⇒ 下方 `maxTotalSwipes`（与设备、与档位无关的硬闸）
     dupPageStreak = 0
     dupPageDecided = false
     Log.i(
         TAG,
         "pagedGrid[$gridKey]: 回卷阈值 = 一页+一行 $cols×($traverseRows+1) = $dupLimitEffective" +
             "，页级确认（flow `stopWhen.dupPageConfirm` 在本页之后才登记，此处打印恒为默认 2）；" +
-            "收尾主判据 = 已入库 ≥ 计数器，后备 = 翻页数 > ${if (pagesByCount == Int.MAX_VALUE) "无(计数器未读到)" else pagesByCount}",
+            "收尾主判据 = 已入库 ≥ 计数器，兜底 = 回卷 / 素材标识，硬闸 = 总滑动 ${TimingOverrides.maxTotalSwipes}",
     )
 
     while (true) {
@@ -166,8 +179,8 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
         //   正常 onFinished，不是报错）。依据：背包按等级降序，连续 K 页全跳 ⇒ 余下所有页
         //   都低于目标阈值（与 GOODScanner fast-mode page-skip 的止扫同源）；K 默认 3 是为
         //   容忍滑动欠滚/排序抖动造成的 1~2 页偶发误跳（pageMinLevel 反复读到同一低值）。
-        //   ⚠️ 判据**独立于** vars.total（pagesByCount）与 maxPages：artifact_lock 无 readCount
-        //   （total=null ⇒ pagesByCount=Int.MAX_VALUE）、生产 maxPages=Int.MAX_VALUE；
+        //   ⚠️ 判据**独立于** vars.total（件数主判据）与 maxPages：artifact_lock 无 readCount
+        //   （total=null ⇒ 主判据不启用）、生产 maxPages=Int.MAX_VALUE；
         //   且必须在页首**抢帧之前**终止 —— skip 页每页的 freshFrame 打点会喂会话看门狗
         //   （ScriptRunner 侧），引擎层必须自己终止。
         if (skip) {
@@ -234,6 +247,9 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
         val pageCellFrame = runCatchingCancellable { settleFrame() }.getOrNull()
         // ★ 页级看门狗起点（挂死时中止并保留已入库结果）
         val pageWall0 = clock()
+        // ★ 2026-10-04 华为 EML-AL00：看门狗量的是「**距上一次走完一格**」，不是「本页累计耗时」。
+        //   起点与 `pageWall0` 重合（本页第一格之前没有进度可言）。
+        var lastProgressAt = pageWall0
         // ★ 翻页后**清空面板指纹快照**（GOODScanner `reset_panel_fingerprint`）★
         //   保证**新页第一格必被当作"新的"** ⇒ 必然等待面板变化 ⇒ 不会解析到上一页遗留的面板 ✓
         //   （此前只在 pageNo==0 清 ⇒ 页首格容易读到上一页遗留 ✗，实测页首格重复现象支持这一点）
@@ -392,12 +408,20 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                             lastCellFp = cf
                         }
                     }
-                    // ★ 页级看门狗：单页耗时超阈值 ⇒ 判挂死，中止扫描（已入库仍导出）
-                    if (clock() - pageWall0 > PAGE_WATCHDOG_MS) {
+                    // ★ 页级看门狗：**上一格走完到现在**超过阈值 ⇒ 判挂死，中止扫描（已入库仍导出）。
+                    //   2026-10-04 华为实测：判据原来量的是 `clock() - pageWall0`（**本页累计**），
+                    //   而注释里的"正常单页 ~6s"是 BlueStacks 的数 —— 麒麟 970 上圣遗物
+                    //   perCell=11.0s × 12 格/页 = 132s，**每一页都必然越 90s 线**：
+                    //   实测 `scan finished: watchdog cells=11 pages=1`，945 件的量跑到第 11 件就整轮中止。
+                    //   累计量把"机器慢"判成"挂死"，是设备速度依赖的写死常量；而这条链真正要防的
+                    //   「主滑派发后无任何后续日志」是**单格不前进**，与本页已花多久无关 ⇒ 改成量间隔。
+                    //   两机都留足量级：BS 单格 ~0.5s（180× 余量）、华为 11.0s（8× 余量）。
+                    val wdNow = clock()
+                    if (pageWatchdogFired(lastProgressAt, wdNow, PAGE_WATCHDOG_MS)) {
                         Log.w(
                             TAG,
-                            "pagedGrid[$gridKey]: page=$pageNo 单页已耗时 ${clock() - pageWall0}ms " +
-                                "> ${PAGE_WATCHDOG_MS}ms ⇒ 判挂死，中止扫描（已入库 " +
+                            "pagedGrid[$gridKey]: page=$pageNo 上一格走完至今已 ${wdNow - lastProgressAt}ms " +
+                                "> ${PAGE_WATCHDOG_MS}ms（本页累计 ${wdNow - pageWall0}ms）⇒ 判挂死，中止扫描（已入库 " +
                                 "${results.size + resultsWeapons.size + resultsCharacters.size} 件仍正常导出）",
                         )
                         vars.stopRequested = true
@@ -405,6 +429,7 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                         dupWrapped = true // 复用一个"跳出本页"的开关（语义：本页提前收尾）
                         break
                     }
+                    lastProgressAt = wdNow
                     val idx = row * cols + col
                     val beforeCell = results.size + resultsWeapons.size + resultsCharacters.size
                     if (col == 0 && row == 0) tmPages++
@@ -1153,24 +1178,10 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
         landingBand = null
         pagesAdvanced++
         Log.i(TAG, "pagedGrid 翻页#$pagesAdvanced（已扫 $pageNo 页, maxPages=$maxPages）")
-        // ★ 2026-09-26 方案 C 的**后备**上限：按件数推算"最多该翻几页"，超出即收尾。
-        //   为什么还要它：`整页重复第…` 与 `回卷止扫（确认…` 在 3200/2244/2560/华为四轮全量里
-        //   计数**都是 0** —— 每次都是刚被删掉的那条指纹回路先收的尾 ⇒ 回卷链等于从没被验证过。
-        //   ⇒ 三条链分工：**件数 = 主判据**（GOODScanner 同构），**回卷 = 正常兜底**，
-        //     **本上限 = 回卷也失灵时的最后一道**（计数器偏大 / 列表卡住一直翻）。
-        if (pagesAdvanced > pagesByCount) {
-            Log.w(
-                TAG,
-                "pagedGrid[$gridKey]: 翻页数 $pagesAdvanced > 按件数推算的上限 $pagesByCount" +
-                    "(计数器=${vars.total ?: "?"} ÷ 每页 $cellsPerPage + $PAGE_CAP_MARGIN) ⇒ 收尾",
-            )
-            vars.stopRequested = true
-            vars.stopReason = "pageCap"
-            break
-        }
-        // ★ A9 双保险：**总滑动次数上限**（独立于计数器）。计数器读不到时 pagesByCount=
-        //   Int.MAX_VALUE、生产 maxPages 无上限 ⇒ 这是「列表卡住一直翻」的最后一道闸。
-        //   默认 240 ≈ 2× 满背包（2400 件 ÷ 21 件/页 ≈ 115 页）翻页量，正常扫描远够用。
+        // ★ A9 硬闸：**总滑动次数上限**（与计数器、与档位、与设备速度全都无关）。
+        //   2026-10-04 起它是"列表卡住一直翻"的**唯一**硬闸 —— 原来排在前面的
+        //   「按件数推算的翻页数上限」已删除，理由见函数体开头 `dupLimitEffective` 处。
+        //   默认 240 ≈ 2× 满背包（2400 件 ÷ 每页 ~21 件 ≈ 115 页）翻页量，正常扫描远够用。
         if (pagesAdvanced >= TimingOverrides.maxTotalSwipes) {
             Log.w(
                 TAG,

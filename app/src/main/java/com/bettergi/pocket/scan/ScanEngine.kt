@@ -1176,18 +1176,15 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         const val GRID_TOP_STABLE_ROUNDS = 2
 
         /**
-         * 「按件数推算的翻页数上限」的余量（2026-09-26 方案 C）：`ceil(total / 每页格数) + 本值`。
-         *
-         * 这是 pagedGrid 收尾的**唯一兜底**（连续零新增那条链已降级成诊断，见 `noteDupAndMaybeStop`）。
-         * 取 5 的根据：一次滑动没落地只会白读一页（实测约 1/17 页），5 页余量足够吸收偶发连续滑空；
-         * 而计数器比列表实际能扫到的件数偏大时（已知计数器与抓包真值可差 ~8 件），最多多花 5 页 ≈ 半分钟。
-         */
-        const val PAGE_CAP_MARGIN = 5
-
-        /**
          * 页级看门狗（2026-09-16）：真机偶发「主滑派发后无任何后续日志」的硬挂
-         * （本轮实测卡死 >5min，整轮扫描报废）。正常单页 ~6s ⇒ 超过本阈值即判挂死，
-         * 置 stopRequested 让 pagedGrid 正常收尾（**已入库结果照常导出**，不白跑）。
+         * （本轮实测卡死 >5min，整轮扫描报废）。置 stopRequested 让 pagedGrid 正常收尾
+         * （**已入库结果照常导出**，不白跑）。
+         *
+         * ⚠️ 2026-10-04：判据已从「本页累计耗时」改成「**距上一格走完的间隔**」
+         * （见 `ScanGridDomain` 的 `lastProgressAt`）。原来的写法把"机器慢"判成"挂死"：
+         * 注释里的"正常单页 ~6s"是 BlueStacks 的数，麒麟 970 上圣遗物 perCell=11.0s、
+         * 一页 12 格 = 132s ⇒ 每页必越 90s 线，实测 945 件跑到第 11 件就整轮 `watchdog` 中止。
+         * 按间隔量之后这个值与机器速度无关：BS 单格 ~0.5s（180× 余量）、华为 11.0s（8× 余量）。
          */
         const val PAGE_WATCHDOG_MS = 90_000L
 

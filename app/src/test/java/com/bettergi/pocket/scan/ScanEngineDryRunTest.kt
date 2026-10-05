@@ -849,7 +849,7 @@ class ScanEngineDryRunTest {
      * 页 0、页 1 正常扫描（页 1 全页 Lv.10 ⇒ pageMinLevel=10），之后每页整页跳过。
      * K=3（TimingOverrides.pageSkipLimit 默认）：页 2/3/4 连续 3 页全跳 ⇒ 第 4 页页首（抢帧前）
      * 干净收尾——已入库 42 件照常导出、正常 onFinished("stopWhen")、不再发第 5 次滑动。
-     * ⚠️ 计数器给不可达的 1026（pagesByCount=54）、maxPages=6 只作红状态护栏：
+     * ⚠️ 计数器给不可达的 1026（件数主判据永不满足）、maxPages=6 只作红状态护栏：
      * 旧实现无 skip 上限 ⇒ 会翻到 maxPages 才以 "maxPages" 收尾（swipes=6），断言必红。
      */
     @Test

@@ -67,7 +67,9 @@ object TimingOverrides {
      */
     var pageSkipLimit: Int = DEFAULT_PAGE_SKIP_LIMIT
     /**
-     * pagedGrid **总滑动次数**上限（A9 双保险，独立于计数器 pagesByCount 与 maxPages）。
+     * pagedGrid **总滑动次数**上限（独立于件数主判据与 maxPages）。
+     * 2026-10-04 起它是「列表卡住一直翻」的**唯一**硬闸 —— 「按件数推算的翻页数上限」已删除
+     * （它数的是页数而非进度，欠滚越多越早误截，详见 `ScanGridDomain.pagedGrid` 开头）。
      * 默认 240 ≈ 2× 满背包翻页量（2400 件 ÷ 21 件/页 ≈ 115 页）。
      */
     var maxTotalSwipes: Int = DEFAULT_SWIPE_CAP
