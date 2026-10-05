@@ -180,8 +180,8 @@ class ScanEngineDryRunTest {
 
         // 按格递增的唯一件名（模拟真实网格每件不同）；页切换时重置（模拟跨页同件重叠 → 去重测试）
         private val NAME_RECT = FrameRect(2230, 220, 2630, 270)
-        private val SUB0_RECT = FrameRect(2230, 794, 2990, 848)
-        private val SUB0_RECT_CRAFTED = FrameRect(2230, 857, 2990, 911)
+        private val SUB0_RECT = FrameRect(2230, 794, 2660, 848)
+        private val SUB0_RECT_CRAFTED = FrameRect(2230, 857, 2660, 911)
         // ★ A10：weapon_backpack 面板的 name/level ROI（profiles.json 3200 基坐标，calibrate 后不变）
         private val WEAPON_NAME_RECT = FrameRect(2221, 214, 2728, 273)
         private val WEAPON_LEVEL_RECT = FrameRect(2210, 709, 2455, 763)
@@ -209,8 +209,10 @@ class ScanEngineDryRunTest {
              *   与"每格 OCR 文本递增"的 mock 语义**自相矛盾**：真实里每张卡的面板就是不同的）。
              *   现在在面板指纹区域内画一个随点击数变化的红块 ⇒ 面板指纹闸门（PanelFingerprint）
              *   能正确区分"不同卡"；跨页重复格由**内容键**去重兜底（本 harness 的既有断言语义不变）。
-             *   位置 (2960..2988, 900..904) 落在指纹区（subStats x2230..2990 / y794..1040）内，
+             *   位置 (2300..2328, 900..904) 落在指纹区（subStats x2230..2660 / y794..1040）内，
              *   且避开全部像素判据区（锁 2811..2845、收藏 2900..2947、星带 y599..640、祝圣点 y703）。
+             *   ⚠️ 2026-10-05 subStats ROI 收窄（2990→2660）后这里必须跟着挪：
+             *   标记落在指纹区外 ⇒ 闸门永远等不到"面板已换"⇒ 本类 9 条用例各超时 180s。
              */
             override suspend fun grabFresh(afterTimestampMs: Long, timeoutMs: Long): Mat {
                 // ★ A11：冻结服务 —— 第 k 格（k ∈ 1..freezeCells）visit 的第一次抓帧返回
@@ -234,8 +236,8 @@ class ScanEngineDryRunTest {
                 // ⚠️ harness 是**嵌套类**（非 inner）⇒ 拿不到外层测试类的 rect 辅助函数，直接调 Imgproc
                 org.opencv.imgproc.Imgproc.rectangle(
                     m,
-                    org.opencv.core.Point(2960.0, 900.0),
-                    org.opencv.core.Point((2964 + (tick % 7) * 4).toDouble(), 904.0),
+                    org.opencv.core.Point(2300.0, 900.0),
+                    org.opencv.core.Point((2304 + (tick % 7) * 4).toDouble(), 904.0),
                     org.opencv.core.Scalar(0.0, 0.0, 255.0),
                     -1,
                 )
@@ -351,14 +353,14 @@ class ScanEngineDryRunTest {
             FrameRect(2210, 490, 2510, 590) to "4,780",                // mainValue
             FrameRect(2200, 716, 2400, 766) to levelText,              // level（未祝圣位置）
             FrameRect(2200, 779, 2400, 829) to levelText,              // level（crafted yShift+63 后）
-            FrameRect(2230, 794, 2990, 848) to "暴击率+5.8%",           // sub0（原位）
-            FrameRect(2230, 858, 2990, 912) to "生命值+717",            // sub1（原位）
-            FrameRect(2230, 922, 2990, 976) to "元素充能效率+12.4%",     // sub2（原位）
-            FrameRect(2230, 986, 2990, 1040) to "元素精通+23",           // sub3（原位）
-            FrameRect(2230, 857, 2990, 911) to "暴击率+5.8%",           // sub0（crafted yShift+63）
-            FrameRect(2230, 921, 2990, 975) to "生命值+717",            // sub1
-            FrameRect(2230, 985, 2990, 1039) to "元素充能效率+12.4%",    // sub2
-            FrameRect(2230, 1049, 2990, 1103) to "元素精通+23",          // sub3
+            FrameRect(2230, 794, 2660, 848) to "暴击率+5.8%",           // sub0（原位）
+            FrameRect(2230, 858, 2660, 912) to "生命值+717",            // sub1（原位）
+            FrameRect(2230, 922, 2660, 976) to "元素充能效率+12.4%",     // sub2（原位）
+            FrameRect(2230, 986, 2660, 1040) to "元素精通+23",           // sub3（原位）
+            FrameRect(2230, 857, 2660, 911) to "暴击率+5.8%",           // sub0（crafted yShift+63）
+            FrameRect(2230, 921, 2660, 975) to "生命值+717",            // sub1
+            FrameRect(2230, 985, 2660, 1039) to "元素充能效率+12.4%",    // sub2
+            FrameRect(2230, 1049, 2660, 1103) to "元素精通+23",          // sub3
         )
         if (withCountLine) base[FrameRect(2674, 63, 2874, 95)] = "圣遗物 1026/2400"
         // filterReset 的面板开合判据：标题「圣遗物筛选」位于 profiles.json 的

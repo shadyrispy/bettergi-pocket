@@ -27,16 +27,26 @@ object CtcDecoder {
         // 绝对索引基准 = 传入缓冲的 position（旧 FloatArray 语义从 0 读；
         // ORT 输出的 position 恒 0，这里按 position 归一化以兼容任意切片视图）。
         val base0 = logits.position()
+        // ★ 2026-10-05（P0 分段实测后的 A 改）：原来每步用 `buf.get(base + ci)` **逐元素**扫 6906 个
+        //   类，而 buf 是 ORT 输出张量的 direct 缓冲视图 ⇒ 每次 get 都是「边界检查 + 一次 native 读」，
+        //   JIT 无从向量化。华为实测 `dec = 0.158ms/px`（每格 Σw≈3532px ⇒ 558ms/格，占 parsePanel 14%），
+        //   而这段的计算量本身只是"把 T×C 个数读一遍取最大"。
+        //   ⇒ 改成**整行 bulk copy 到复用的 FloatArray 再扫**：每步一次 `get(row,0,c)`（native 侧连续拷贝）
+        //   + 一次纯数组扫描。语义逐位不变：并列时仍取**第一个**最大值（`v > maxv` 严格大于）。
+        //   用 duplicate 走相对读，避免动调用方缓冲的 position（其生命周期契约是"张量 close 前读完"）。
+        val view = logits.duplicate()
+        val row = FloatArray(c)
         val sb = StringBuilder()
         var prev = -1
         var keep = 0
         var sum = 0.0
         for (ti in 0 until t) {
-            val base = base0 + ti * c
+            view.position(base0 + ti * c)
+            view.get(row, 0, c)
             var best = 0
-            var maxv = logits.get(base)
+            var maxv = row[0]
             for (ci in 1 until c) {
-                val v = logits.get(base + ci)
+                val v = row[ci]
                 if (v > maxv) { maxv = v; best = ci }
             }
             if (best == 0) { prev = 0; continue }          // blank
@@ -50,12 +60,12 @@ object CtcDecoder {
             // 换模型后应在 manifest.json 显式声明，别再靠猜。
             val prob = when (declaredOutput) {
                 "softmax" -> maxv.toDouble()
-                "logits" -> softmaxAt(logits, base, c, maxv)
+                "logits" -> softmaxAt(row, c, maxv)
                 else ->
                     if (maxv in 0f..1f) {
                         maxv.toDouble()                     // 导出已含 softmax（旧启发式）
                     } else {
-                        softmaxAt(logits, base, c, maxv)
+                        softmaxAt(row, c, maxv)
                     }
             }
             keep++
@@ -64,10 +74,11 @@ object CtcDecoder {
         return Result(sb.toString(), if (keep > 0) (sum / keep).toFloat() else 0f)
     }
 
-    /** 对第 [base] 个时间步做真 softmax（logits 场景）。 */
-    private fun softmaxAt(logits: FloatBuffer, base: Int, c: Int, maxv: Float): Double {
+    /** 对第 [row] 行做真 softmax（logits 场景）。行已在数组上，无需再回读缓冲。 */
+    private fun softmaxAt(row: FloatArray, c: Int, maxv: Float): Double {
         var denom = 0.0
-        for (ci in 0 until c) denom += exp(logits.get(base + ci).toDouble() - maxv.toDouble())
+        val m = maxv.toDouble()
+        for (ci in 0 until c) denom += exp(row[ci].toDouble() - m)
         return 1.0 / denom
     }
 }

@@ -450,6 +450,9 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     /** 每格计算出的内容键（含重复件）；页末收集成本页键序列。 */
     internal var lastCellKey: String? = null
 
+    /** S1 裁片复用缓冲（#69）：每格 copyTo 进这里，尺寸不变时零重分配；ScriptRunner 收尾 release。 */
+    internal val panelCropBuf = Mat()
+
     /** 上一页的键序列（**含读失败的空串占位**，下标 = 页内序号 —— 占位必须保留，否则前进量算错）。 */
     internal var rowCheckPrevKeys: List<String> = emptyList()
 

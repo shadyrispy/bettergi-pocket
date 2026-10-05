@@ -1335,32 +1335,6 @@ internal suspend fun ScanEngine.revisitFailedCells(
     return recovered
 }
 
-internal suspend fun ScanEngine.waitPanelNameReady(
-    nameRect: FrameRect,
-    ocr: OcrGateway,
-    cleanBefore: String?,
-): Boolean {
-    val pStep = TimingOverrides.panelPollMs
-    val needSame = (TimingOverrides.panelStableFallbackMs / pStep).coerceAtLeast(1L)
-    var waited = 0L
-    var prev: String? = null
-    var stableSame = 0
-    var sawChange = false
-    while (waited < PANEL_CHANGE_WAIT_MAX_MS) {
-        delay(pStep); waited += pStep; tmPanelMs += pStep
-        val f = freshFrame()
-        val now = try { ocr.readLines(f, listOf(nameRect)).firstOrNull() } finally { f.release() }
-        val c = now?.let { StatParser.clean(it) }?.takeIf { it.isNotEmpty() }
-        if (c != null && c != cleanBefore) sawChange = true
-        if (c != null && sawChange && c == prev) return true
-        // 名字未变但已连续稳定：可能是相邻同名件，也可能点击被吞 —— 交给调用方判（见返回值）。
-        stableSame = if (c != null && c == prev) stableSame + 1 else 0
-        if (stableSame.toLong() >= needSame) return sawChange
-        prev = c
-    }
-    return sawChange
-}
-
 internal suspend fun ScanEngine.vote(
     step: JSONObject,
     gridKey: String? = null,

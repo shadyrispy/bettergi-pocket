@@ -439,6 +439,7 @@ class ScriptRunner(
                 try {
                     engine.run()
                 } finally {
+                    engine.panelCropBuf.release()
                     wdStop.set(true)
                     wd.interrupt()
                     if (SCAN_OVERLAY_HIDDEN) {

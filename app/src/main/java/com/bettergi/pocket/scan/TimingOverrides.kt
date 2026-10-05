@@ -22,10 +22,17 @@ object TimingOverrides {
 
     /**
      * ★ 就绪信号直采（2026-09-12）：`true` = 面板就绪轮询改用 [ScanEngine.FrameSource.sampleSignature]
-     * 的分块签名（零 Mat / 零 OCR），步长 [panelSigPollMs]；`false` = **完全回退**到旧的
-     * 「`delay(panelPollMs)` + `freshFrame()` + OCR 名字」路径（用于 A/B 与回滚）。
+     * 的分块签名（零 Mat / 零 OCR），步长 [panelSigPollMs]；`false` = 回退为**固定 `delay(PANEL_REFRESH_MS)`**。
+     * （2026-10-05：原先 `false` 回退到的「`delay` + `freshFrame` + OCR 名字轮询」分支已删 ——
+     *   它在全部存档真机日志里 0 次命中，只留下误导。要 A/B 就绪判定请比 `sigpoll`/`sigsamples`。）
      */
     var panelSigEnabled: Boolean = DEFAULT_PANEL_SIG_ENABLED
+
+    /**
+     * S1（#69 流水线）：OCR/解析改读面板裁片（origin 平移），vote/指纹仍读整帧。
+     * 默认关；`--es timing "crop=1"` 开。开与关的解析结果必须逐字段相同（真机 A/B 验）。
+     */
+    var panelCrop: Boolean = DEFAULT_PANEL_CROP
 
     /** 签名轮询步长（仅 [panelSigEnabled] 时生效）。默认 40ms —— 实测面板内容 133ms 就绪（中位）。 */
     var panelSigPollMs: Long = ScanEngine.PANEL_SIG_POLL_MS
@@ -98,6 +105,7 @@ object TimingOverrides {
     private val DEFAULT_SCAN_POLL_MS = ScanEngine.SETTLE_POLL_MS
     private val DEFAULT_SCAN_STABLE_MS = ScanEngine.SETTLE_STABLE_MS
     private const val DEFAULT_PANEL_SIG_ENABLED = true
+    private const val DEFAULT_PANEL_CROP = false
     private val DEFAULT_PANEL_SIG_POLL_MS = ScanEngine.PANEL_SIG_POLL_MS
     private const val DEFAULT_PANEL_SIG_BAND = true
     /** 内容带 + 2 样本 + 免确认的 A/B 结论（见 panelSigSamples/panelSigConfirm 的 KDoc）。 */
@@ -125,6 +133,7 @@ object TimingOverrides {
         settlePollMs = DEFAULT_SCAN_POLL_MS
         settleStableMs = DEFAULT_SCAN_STABLE_MS
         panelSigEnabled = DEFAULT_PANEL_SIG_ENABLED
+        panelCrop = DEFAULT_PANEL_CROP
         panelSigPollMs = DEFAULT_PANEL_SIG_POLL_MS
         panelSigBand = DEFAULT_PANEL_SIG_BAND
         panelSigSamples = DEFAULT_PANEL_SIG_SAMPLES
@@ -149,7 +158,7 @@ object TimingOverrides {
     val isDefault: Boolean
         get() = navSettleMs == DEFAULT_NAV_SETTLE_MS && panelPollMs == DEFAULT_PANEL_POLL_MS &&
             panelStableFallbackMs == DEFAULT_PAGE_STABLE_MS && settlePollMs == DEFAULT_SCAN_POLL_MS &&
-            settleStableMs == DEFAULT_SCAN_STABLE_MS && panelSigEnabled == DEFAULT_PANEL_SIG_ENABLED &&
+            settleStableMs == DEFAULT_SCAN_STABLE_MS && panelSigEnabled == DEFAULT_PANEL_SIG_ENABLED && panelCrop == DEFAULT_PANEL_CROP &&
             panelSigPollMs == DEFAULT_PANEL_SIG_POLL_MS && panelSigBand == DEFAULT_PANEL_SIG_BAND &&
             panelSigSamples == DEFAULT_PANEL_SIG_SAMPLES && panelSigConfirm == DEFAULT_PANEL_SIG_CONFIRM &&
             panelSigGateCached == DEFAULT_PANEL_SIG_GATE && !sigDebug && sigBlocksX == DEFAULT_SIG_BLOCK_X && sigBlocksY == DEFAULT_SIG_BLOCK_Y &&
@@ -219,8 +228,10 @@ object TimingOverrides {
                     "pstable" -> panelStableFallbackMs = v
                     "spoll" -> settlePollMs = v
                     "sstable" -> settleStableMs = v
-                    // ★ 就绪信号直采 A/B 开关：sig=0 完全回退旧的「抓帧+OCR」轮询
+                    // ★ 就绪信号直采 A/B 开关：sig=0 回退为固定 delay(PANEL_REFRESH_MS)（见字段 KDoc）
                     "sig" -> panelSigEnabled = v != 0L
+                    // S1 裁片开关（#69）：crop=1 时解析读裁片
+                    "crop" -> panelCrop = v != 0L
                     "sigpoll" -> panelSigPollMs = v.coerceAtLeast(5L)
                     "sigband" -> panelSigBand = v != 0L
                     "sigsamples" -> panelSigSamples = v.toInt().coerceIn(1, 6)
@@ -251,7 +262,7 @@ object TimingOverrides {
     fun summary(): String =
         "nav=$navSettleMs,poll=$panelPollMs,pstable=$panelStableFallbackMs," +
             "spoll=$settlePollMs,sstable=$settleStableMs," +
-            "sig=${if (panelSigEnabled) 1 else 0},sigpoll=$panelSigPollMs," +
+            "sig=${if (panelSigEnabled) 1 else 0},crop=${if (panelCrop) 1 else 0},sigpoll=$panelSigPollMs," +
             "sigband=${if (panelSigBand) 1 else 0},sigsamples=$panelSigSamples,sigconfirm=${if (panelSigConfirm) 1 else 0}," +
             "siggate=${if (panelSigGateCached) 1 else 0},phi=${if (phiApply) 1 else 0}," +
             "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0},panel=$panelSettleMs," +

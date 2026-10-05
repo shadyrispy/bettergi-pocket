@@ -1037,6 +1037,14 @@ internal suspend fun ScanEngine.executeVisitStepInner(
                 var panelFrameReady = false
                 val sigUsed = sigUsable &&
                     frameSource.sampleSignature(sigRoi!!.toIntRect(), sigBefore, sigBx, sigBy)
+                // 采样失败 ⇒ 落到下面的固定等待。不静默：这条回落一旦发生就是"就绪判定退化"，
+                // 每格耗时会被 PANEL_REFRESH_MS 顶住，必须能从日志里看见。
+                if (sigUsable && !sigUsed) {
+                    Log.w(
+                        TAG,
+                        "visit cell($col,$row) idx=$index 签名采样失败 ⇒ 就绪判定回落固定等待 ${PANEL_REFRESH_MS}ms",
+                    )
+                }
                 when {
                     clickedWhileResolving -> {
                         // ★ #96 同源第二处：就绪门的兜底动作是「**同坐标重发**」（下方 5104/5142）。
@@ -1136,62 +1144,14 @@ internal suspend fun ScanEngine.executeVisitStepInner(
                         }
                         tmPanelMs += SystemClock.elapsedRealtime() - tPanel
                     }
-                    nameRect != null && beforeName != null && ocr != null -> {
-                        // ★ 2026-09-22：旧路径补上「吞击重发」。
-                        // ★ 2026-09-28（#48）：**与签名路径同形了** —— 补上原先缺的两样：
-                        //   ① 「选中框已移动」闸门 ② 「本轮首格」豁免。
-                        //   原注释断言"本分支没有签名采样上下文"**是错的**：`cardBox`/`sigCardBefore`
-                        //   在 5190-5193 是**无条件**采的（点击前、与 panelSig 无关），
-                        //   `cardFrameMoved` 也只依赖 frameSource 的签名采样 ⇒ 这条分支一直用得上。
-                        //   补之前的后果：走这条路径的设备上，每一个"同名邻居"格都白烧
-                        //   `CLICK_RETRY_MAX_ON_NOCHANGE` 次重发 + 同数量取证图，最后仍记 giveup
-                        //   （签名路径第 1 次就 break）⇒ **漏件率取决于这台设备走哪条路径**，
-                        //   而这正是补重发想消除的分叉。
-                        //   名字全程不变 = 面板还停在上一件 ⇒ 读到的就是重复件 ⇒ 被去重**静默吞掉**
-                        //   （漏件无痕）。同坐标重发是幂等的（最坏重读同一张卡），
-                        //   代价约 panelStableFallbackMs/次。
-                        val cleanBefore = StatParser.clean(beforeName)
-                        var clickRetry = 0
-                        while (true) {
-                            val sawChange = waitPanelNameReady(nameRect, ocr, cleanBefore)
-                            if (sawChange) break
-                            val selMoved = cardSigOk && cardFrameMoved(cardBox, sigCardBefore)
-                            if (clickRetry >= CLICK_RETRY_MAX_ON_NOCHANGE) {
-                                dumpStallShot(cx, cy, col, row, index, clickRetry, selMoved, clickOk, "giveup")
-                                break
-                            }
-                            // 面板没变但高亮框换了格 ⇒ 点击确实送达，只是邻居内容一样（同名同练）
-                            if (selMoved) {
-                                Log.i(
-                                    TAG,
-                                    "visit cell($col,$row) idx=$index 名字未变但**选中框已移动** ⇒ 点击已送达，不重发",
-                                )
-                                break
-                            }
-                            // 本轮首格：游戏打开背包时已自动选中第一件 ⇒ 面板与选中框都不会变，
-                            // 这是正常态而不是吞击（与签名路径同判据）。
-                            if (index == 0 && results.isEmpty() && resultsWeapons.isEmpty() &&
-                                resultsCharacters.isEmpty()
-                            ) {
-                                Log.i(TAG, "visit cell($col,$row) idx=$index 本轮首格且选中框未动 ⇒ 已是选中态，不重发")
-                                break
-                            }
-                            clickRetry++
-                            swallowedClickRetries++
-                            // 取证图先落、日志后打：manifest 里的序号要与日志顺序同轴，
-                            // 否则按日志时间轴复盘时会对不上（签名路径就是这个顺序）
-                            dumpStallShot(cx, cy, col, row, index, clickRetry, selMoved, clickOk, "retry")
-                            Log.w(
-                                TAG,
-                                "visit cell($col,$row) idx=$index 名字全程未变（clickOk=$clickOk）" +
-                                    " ⇒ 疑似点击被吞 ⇒ 同坐标重发 #$clickRetry",
-                            )
-                            if (useTapForCell) actions.tap(cx, cy) else actions.click(cx, cy)
-                        }
-                    }
                     else -> {
-                        // ⚠️ 这条分支是「拿不到面板名 ROI」时的**固定**等待，与轮询步长无关
-                        //    （曾误用 coerceAtMost(panelPollMs) → 550ms 被拖到 120ms）。
+                        // 固定等待：签名不可用（`sigRoi` 取不到 / `sig=0` / 采样失败）或该流程本来就没有
+                        // 可读的名字 ROI（character_scan 的 click 是 visit 首步，ctx.frame 为空）。
+                        // ⚠️ 与轮询步长无关（曾误用 coerceAtMost(panelPollMs) → 550ms 被拖到 120ms）。
+                        // ★ 2026-10-05：原先这里前面还有一条「抓帧 + OCR 读名字轮询」分支
+                        //   （`waitPanelNameReady`），在**全部存档真机日志里 0 次命中**（签名分支的
+                        //   「面板未变但选中框已移动」有 4956 次），留着只会误导"以为就绪判定还依赖 OCR"。
+                        //   ⇒ 已删；签名采样失败这类情形统一落到本分支，由上面的 W 日志暴露。
                         tmPanelMs += PANEL_REFRESH_MS
                         delay(PANEL_REFRESH_MS)
                     }

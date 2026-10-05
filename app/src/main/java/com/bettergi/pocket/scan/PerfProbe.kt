@@ -1,5 +1,7 @@
 package com.bettergi.pocket.scan
 
+import com.bettergi.pocket.recognition.ocr.OcrStageProbe
+
 /**
  * 只读性能探针（2026-09-12）：累计**单次扫描内**的关键调用耗时，供 `scan finished` 之后打印一行。
  *
@@ -34,6 +36,11 @@ object PerfProbe {
     private var votes = 0L
     private var voteNanos = 0L
     private var voteMax = 0L
+
+    /** S1 裁片拷贝（整帧→面板裁片）耗时；`crop=0` 时恒 0 次。 */
+    private var crops = 0L
+    private var cropNanos = 0L
+    private var cropMax = 0L
 
     /** 按 visit 步骤类型（`do`）累计：[次数, 纳秒]。用于一次跑完拿到完整分解。 */
     private val steps = LinkedHashMap<String, LongArray>()
@@ -75,6 +82,13 @@ object PerfProbe {
         if (nanos > voteMax) voteMax = nanos
     }
 
+    /** S1 裁片拷贝单次耗时（#69）。`crop=0` 时不会被调用。 */
+    fun addCrop(nanos: Long) = synchronized(lock) {
+        crops++
+        cropNanos += nanos
+        if (nanos > cropMax) cropMax = nanos
+    }
+
     /**
      * 按 visit 步骤类型累计耗时。
      * ⚠️ 嵌套步骤（`ifMatch.then`）会**重复计入**父步骤 ⇒ 读 `ifMatch` 时需注意；
@@ -92,6 +106,8 @@ object PerfProbe {
         ocrCalls = 0; ocrNanos = 0; ocrMax = 0
         frames = 0; frameNanos = 0; frameMax = 0
         votes = 0; voteNanos = 0; voteMax = 0
+        crops = 0; cropNanos = 0; cropMax = 0
+        OcrStageProbe.reset()
         steps.clear()
     }
 
@@ -106,6 +122,9 @@ object PerfProbe {
             " | ocr n=$ocrCalls avg=${avg(ocrNanos, ocrCalls)}ms max=${ms(ocrMax)}ms" +
             " | frame n=$frames avg=${avg(frameNanos, frames)}ms max=${ms(frameMax)}ms" +
             " | vote n=$votes avg=${avg(voteNanos, votes)}ms max=${ms(voteMax)}ms" +
+            " | crop n=$crops avg=${avg(cropNanos, crops)}ms max=${ms(cropMax)}ms" +
+            // rec 内部分段住在 recognition 侧（依赖方向 scan→recognition），见 OcrStageProbe
+            " | " + OcrStageProbe.summary() +
             " | total=${ms(clickNanos + swipeNanos + ocrNanos + frameNanos + voteNanos)}ms" +
             " || steps " + steps.entries.sortedByDescending { it.value[1] }
             .joinToString(" ") { "${it.key}=${it.value[0]}x/${ms(it.value[1])}ms" }
