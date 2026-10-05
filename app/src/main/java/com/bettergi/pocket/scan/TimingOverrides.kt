@@ -34,6 +34,14 @@ object TimingOverrides {
      */
     var panelCrop: Boolean = DEFAULT_PANEL_CROP
 
+    /**
+     * S2b（#69 流水线）：解析流水线深度。0=现状同步路径（新增代码零执行）；
+     * 1..8=每格 parse 步只做「指纹闸+裁片拷贝+send」，OCR/解析/emit 在单消费者协程；
+     * >0 时强制 crop=1（消费者只拿得到裁片，整帧路径与流水线路径不并存，防语义漂移）。
+     * K 只决定"藏多深"（点击/门/翻页窗口藏进消费者积压），不增加并行度。
+     */
+    var pipeDepth: Int = DEFAULT_PIPE_DEPTH
+
     /** 签名轮询步长（仅 [panelSigEnabled] 时生效）。默认 40ms —— 实测面板内容 133ms 就绪（中位）。 */
     var panelSigPollMs: Long = ScanEngine.PANEL_SIG_POLL_MS
     /**
@@ -106,6 +114,7 @@ object TimingOverrides {
     private val DEFAULT_SCAN_STABLE_MS = ScanEngine.SETTLE_STABLE_MS
     private const val DEFAULT_PANEL_SIG_ENABLED = true
     private const val DEFAULT_PANEL_CROP = false
+    private const val DEFAULT_PIPE_DEPTH = 0
     private val DEFAULT_PANEL_SIG_POLL_MS = ScanEngine.PANEL_SIG_POLL_MS
     private const val DEFAULT_PANEL_SIG_BAND = true
     /** 内容带 + 2 样本 + 免确认的 A/B 结论（见 panelSigSamples/panelSigConfirm 的 KDoc）。 */
@@ -134,6 +143,7 @@ object TimingOverrides {
         settleStableMs = DEFAULT_SCAN_STABLE_MS
         panelSigEnabled = DEFAULT_PANEL_SIG_ENABLED
         panelCrop = DEFAULT_PANEL_CROP
+        pipeDepth = DEFAULT_PIPE_DEPTH
         panelSigPollMs = DEFAULT_PANEL_SIG_POLL_MS
         panelSigBand = DEFAULT_PANEL_SIG_BAND
         panelSigSamples = DEFAULT_PANEL_SIG_SAMPLES
@@ -232,6 +242,11 @@ object TimingOverrides {
                     "sig" -> panelSigEnabled = v != 0L
                     // S1 裁片开关（#69）：crop=1 时解析读裁片
                     "crop" -> panelCrop = v != 0L
+                    // S2b 流水线深度（#69）：0=同步；1..8=消费者队列深度（>0 强制 crop=1）
+                    "pipe" -> {
+                        pipeDepth = v.toInt().coerceIn(0, 8)
+                        if (pipeDepth > 0) panelCrop = true
+                    }
                     "sigpoll" -> panelSigPollMs = v.coerceAtLeast(5L)
                     "sigband" -> panelSigBand = v != 0L
                     "sigsamples" -> panelSigSamples = v.toInt().coerceIn(1, 6)
@@ -262,7 +277,7 @@ object TimingOverrides {
     fun summary(): String =
         "nav=$navSettleMs,poll=$panelPollMs,pstable=$panelStableFallbackMs," +
             "spoll=$settlePollMs,sstable=$settleStableMs," +
-            "sig=${if (panelSigEnabled) 1 else 0},crop=${if (panelCrop) 1 else 0},sigpoll=$panelSigPollMs," +
+            "sig=${if (panelSigEnabled) 1 else 0},crop=${if (panelCrop) 1 else 0},pipe=$pipeDepth,sigpoll=$panelSigPollMs," +
             "sigband=${if (panelSigBand) 1 else 0},sigsamples=$panelSigSamples,sigconfirm=${if (panelSigConfirm) 1 else 0}," +
             "siggate=${if (panelSigGateCached) 1 else 0},phi=${if (phiApply) 1 else 0}," +
             "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0},panel=$panelSettleMs," +
