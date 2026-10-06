@@ -15,7 +15,6 @@ object TimingOverrides {
 
     // ── 引擎等待（默认值**引用 ScanEngine 常量**，单一事实源，勿在此写死数字）──
     var navSettleMs: Long = ScanEngine.NAVIGATE_PAGE_SETTLE_MS
-    var panelPollMs: Long = ScanEngine.PANEL_POLL_MS
     var panelStableFallbackMs: Long = ScanEngine.PANEL_STABLE_FALLBACK_MS
     var settlePollMs: Long = ScanEngine.SETTLE_POLL_MS
     var settleStableMs: Long = ScanEngine.SETTLE_STABLE_MS
@@ -108,7 +107,6 @@ object TimingOverrides {
     val swipeTotalMs: Long get() = swipeFastSteps * swipeFastMs + swipeSlowSteps * swipeSlowMs + swipeBackMs
 
     private val DEFAULT_NAV_SETTLE_MS = ScanEngine.NAVIGATE_PAGE_SETTLE_MS
-    private val DEFAULT_PANEL_POLL_MS = ScanEngine.PANEL_POLL_MS
     private val DEFAULT_PAGE_STABLE_MS = ScanEngine.PANEL_STABLE_FALLBACK_MS
     private val DEFAULT_SCAN_POLL_MS = ScanEngine.SETTLE_POLL_MS
     private val DEFAULT_SCAN_STABLE_MS = ScanEngine.SETTLE_STABLE_MS
@@ -137,7 +135,6 @@ object TimingOverrides {
 
     fun reset() {
         navSettleMs = DEFAULT_NAV_SETTLE_MS
-        panelPollMs = DEFAULT_PANEL_POLL_MS
         panelStableFallbackMs = DEFAULT_PAGE_STABLE_MS
         settlePollMs = DEFAULT_SCAN_POLL_MS
         settleStableMs = DEFAULT_SCAN_STABLE_MS
@@ -166,7 +163,7 @@ object TimingOverrides {
 
     /** 是否为全默认（用于日志区分"基线轮"）。 */
     val isDefault: Boolean
-        get() = navSettleMs == DEFAULT_NAV_SETTLE_MS && panelPollMs == DEFAULT_PANEL_POLL_MS &&
+        get() = navSettleMs == DEFAULT_NAV_SETTLE_MS &&
             panelStableFallbackMs == DEFAULT_PAGE_STABLE_MS && settlePollMs == DEFAULT_SCAN_POLL_MS &&
             settleStableMs == DEFAULT_SCAN_STABLE_MS && panelSigEnabled == DEFAULT_PANEL_SIG_ENABLED && panelCrop == DEFAULT_PANEL_CROP &&
             panelSigPollMs == DEFAULT_PANEL_SIG_POLL_MS && panelSigBand == DEFAULT_PANEL_SIG_BAND &&
@@ -180,8 +177,11 @@ object TimingOverrides {
             swipeSlowMs == DEFAULT_SWIPE_SLOW_MS && swipeBackMs == DEFAULT_SWIPE_BACK_MS
 
     /**
-     * 解析 `"nav=650,poll=120,pstable=400,spoll=120,sstable=150,swFast=110,swFastMs=110,swSlow=110,swSlowMs=110,swBack=60"`
+     * 解析 `"nav=650,pstable=400,spoll=120,sstable=150,swFast=110,swFastMs=110,swSlow=110,swSlowMs=110,swBack=60"`
      * 未知键忽略；空串 → [reset]。
+     * ★ 2026-10-05：`poll` 键已删 —— 它映射的 `PANEL_POLL_MS` 常量从未被任何生效路径引用
+     *   （就绪轮询早改走签名直采 `sigpoll`，签名不可用时是固定 `PANEL_REFRESH_MS` 等待），
+     *   留着只会误导"以为 A/B 过它"。传入 `poll=…` 现按未知键静默忽略。
      * @return 生效值摘要（回写日志用）
      */
     /** 是否**应用**页面相位平移（真机标定开关；`phi=0` 关闭）。 */
@@ -205,6 +205,13 @@ object TimingOverrides {
     var overlapSkip: Boolean = true
 
     /**
+     * P1（2026-10-06）：重复格（卡格指纹未变）**跳过面板指纹门等待**（对齐 GOODScanner
+     * backpack_scanner.rs:1417 的 is_duplicate ⇒ 不进面板等待）。默认**开**；
+     * `--es timing "dupskip=0"` 回退到旧的 100ms 短档（A/B 与回滚用）。
+     */
+    var duplicateCellSkipWait: Boolean = true
+
+    /**
      * 入口幂等（开链前先短轮询锚点，命中即跳过入口链）。默认 **开**；
      * 干跑测试关掉它，因为测试夹具的合成帧会让锚点直接命中、从而不再记录入口链的点击（点击计数断言会变）。
      */
@@ -215,6 +222,7 @@ object TimingOverrides {
         phiApply = true
         anchorBudgetMs = 0L
         overlapSkip = true
+        duplicateCellSkipWait = true
         entryIdempotent = true
         panelSettleMs = 0L
         if (!spec.isNullOrBlank()) {
@@ -234,7 +242,6 @@ object TimingOverrides {
                 val v = raw.toLongOrNull() ?: continue
                 when (k) {
                     "nav" -> navSettleMs = v
-                    "poll" -> panelPollMs = v
                     "pstable" -> panelStableFallbackMs = v
                     "spoll" -> settlePollMs = v
                     "sstable" -> settleStableMs = v
@@ -257,6 +264,7 @@ object TimingOverrides {
                     "anchor" -> anchorBudgetMs = v.coerceIn(0L, 60000L)
                     "panel" -> panelSettleMs = v.coerceIn(0L, 10000L)
                     "oskip" -> overlapSkip = v != 0L
+                    "dupskip" -> duplicateCellSkipWait = v != 0L
                     "advdist" -> advanceDistPx = v.toInt().coerceIn(50, 2000)
                     "advextra" -> advanceExtraPx = v.toInt().coerceIn(-500, 1000)
                     // A9 终止保护上限（见字段 KDoc）
@@ -275,7 +283,7 @@ object TimingOverrides {
     }
 
     fun summary(): String =
-        "nav=$navSettleMs,poll=$panelPollMs,pstable=$panelStableFallbackMs," +
+        "nav=$navSettleMs,pstable=$panelStableFallbackMs," +
             "spoll=$settlePollMs,sstable=$settleStableMs," +
             "sig=${if (panelSigEnabled) 1 else 0},crop=${if (panelCrop) 1 else 0},pipe=$pipeDepth,sigpoll=$panelSigPollMs," +
             "sigband=${if (panelSigBand) 1 else 0},sigsamples=$panelSigSamples,sigconfirm=${if (panelSigConfirm) 1 else 0}," +

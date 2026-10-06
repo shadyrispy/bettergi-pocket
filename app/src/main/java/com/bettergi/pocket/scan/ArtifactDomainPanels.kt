@@ -289,7 +289,18 @@ internal suspend fun ScanEngine.parsePanel(
         emptyList()
     }
     if (isWeaponPanel) delay(WEAPON_PANEL_DELAY_MS)
-    val fpWaitMs = if (gridCellChanged) PANEL_FP_WAIT_MS else PANEL_FP_DUP_WAIT_MS
+    // ★ P1（2026-10-06）：重复格（卡格指纹没变 = 同一件再点）**整段跳过等待**，
+    //   对齐 GOODScanner backpack_scanner.rs:1417（is_duplicate ⇒ 面板等待直接不走）。
+    //   语义：等的是「面板变化」，同一件点了面板本就不会变 ⇒ 等是白等。
+    //   快照更新与「可能陈旧帧」W 日志路径保留（waited=0 < 任何预算 ⇒ 走 else-if 打 W）。
+    val fpWaitMs = when {
+        !gridCellChanged && TimingOverrides.duplicateCellSkipWait -> 0L
+        gridCellChanged -> PANEL_FP_WAIT_MS
+        else -> PANEL_FP_DUP_WAIT_MS
+    }
+    if (!gridCellChanged && TimingOverrides.duplicateCellSkipWait) {
+        Log.i(TAG, "面板指纹：重复格（卡格指纹未变）⇒ 跳过等待，直接解析")
+    }
     // 每格先按"未出现"处理；检测到指纹变化/新快照即置 true（见下）
     // 三态定案（#55）：**有**闸门 ⇒ 先按"还没出现"记（等不到变化就保持 false = 真停滞信号）；
     //   **没有**闸门（武器 FixedDelay）⇒ null = "没测"，既不谎报"出现过"也不谎报"没出现"。

@@ -120,9 +120,6 @@
         {
           "do": "parsePanel",
           "panel": "artifact_backpack",
-          "fields": [
-            "全部字段"
-          ],
           "note_match": "★ 2026-09-18：`match` 已移除 —— 命中判定改由下一步 `planMatch` 负责（单趟扫描：每格问\"我是谁\"，而不是\"我是不是当前这个目标\"）。"
         },
         {
@@ -136,8 +133,7 @@
             {
               "do": "vote",
               "zone": "artifact.panel.lock",
-              "as": "curLock",
-              "ambiguous": "sleep重截×2"
+              "as": "curLock"
             },
             {
               "do": "ifMatch",

@@ -207,7 +207,7 @@ class ScriptRunner(
         /** 外部任务计划（P4 规则层注入）：artifact_lock 的 targets / auto_equip 的 plan。 */
         plan: List<JSONObject>? = null,
         /**
-         * 时序覆盖串（调试标定用，形如 `nav=700,poll=120`）。**null = 复位为默认**。
+         * 时序覆盖串（调试标定用，形如 `nav=700,sigpoll=40`）。**null = 复位为默认**。
          * ⚠️ 必须在这里统一 apply：扫描入口有 5 处，若只在 DEBUG_SCAN_FLOW 里 apply，
          *    其余入口（普通扫描/自动拾取）会**沿用上一轮的覆盖值**。
          */

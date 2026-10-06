@@ -850,6 +850,9 @@ internal suspend fun ScanEngine.runVisit(
         pipeStopStep = (0 until visit.length()).map { visit.getJSONObject(it) }
             .firstOrNull { it.optString("do") == "stopWhen" }
         pipeCellJobSent = false
+        // ★ ②safetyGuard 降频：跨格边界失效守卫缓存（格间可能发生 BACK/导航/游戏事件，
+        //   退出确认框只有这些路径能弹；格内连续 clickAt 才允许复用）
+        safetyGuardCacheValid = false
         for (i in 0 until visit.length()) {
             val s = visit.getJSONObject(i)
             if (visitSkipTail && s.optString("do") !in TAIL_RUN_ALWAYS) {
@@ -1166,7 +1169,9 @@ internal suspend fun ScanEngine.executeVisitStepInner(
                     else -> {
                         // 固定等待：签名不可用（`sigRoi` 取不到 / `sig=0` / 采样失败）或该流程本来就没有
                         // 可读的名字 ROI（character_scan 的 click 是 visit 首步，ctx.frame 为空）。
-                        // ⚠️ 与轮询步长无关（曾误用 coerceAtMost(panelPollMs) → 550ms 被拖到 120ms）。
+                        // ⚠️ 历史上这里曾误用 coerceAtMost(panelPollMs) 把 550ms 拖到 120ms ——
+                        //   panelPollMs/PANEL_POLL_MS 已于 2026-10-05 连根删除（该常量从未被任何
+                        //   生效路径引用），本分支如今就是纯固定等待，不存在可调的步长。
                         // ★ 2026-10-05：原先这里前面还有一条「抓帧 + OCR 读名字轮询」分支
                         //   （`waitPanelNameReady`），在**全部存档真机日志里 0 次命中**（签名分支的
                         //   「面板未变但选中框已移动」有 4956 次），留着只会误导"以为就绪判定还依赖 OCR"。

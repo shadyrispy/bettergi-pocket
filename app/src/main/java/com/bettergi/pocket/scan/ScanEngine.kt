@@ -877,6 +877,16 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     /** ★ S2b：本格 stopWhen 步（逐格步；生产者在下一格前非阻塞查 stopRequested）。 */
     internal var pipeStopStep: JSONObject? = null
     internal var pipeCellJobSent = false
+    /**
+     * ★ safetyGuard 降频缓存（②，2026-10-10 用户拍板）：守卫读「退出确认框」要一整帧 + 一次 OCR，
+     * auto_equip 一次导航序列里 clickAt 前要跑 ~9 次 ⇒ 光守卫就 9 帧 + 9 OCR。
+     * 退出框只可能由 **BACK 键或游戏侧事件**产生，**不可能由 clickAt 产生** ⇒ 同一次 visit 的
+     * 连续 clickAt 之间框状态不会变，结果可复用；跨 visit 边界（那里才可能发生 BACK/导航）
+     * 必查 —— 每格开头由 [com.bettergi.pocket.scan.ScanControlDomain] 的 runVisit 失效。
+     * 一旦某次检查读到「退出」⇒ stopRequested ⇒ 整轮不再点击，缓存无所谓。
+     */
+    internal var safetyGuardCacheValid = false
+    internal var safetyGuardCacheOk = false
     private val pipeSentEpoch = HashMap<String, Int>()
     private val pipeJobPool = ArrayDeque<ParseJob>()
     private val pipeDoneResults = ArrayList<ParseJob>()
@@ -1142,13 +1152,10 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         const val PANEL_REFRESH_MS = 550L
         /** 面板名「未变但已稳定」的兜底等待：相邻同名时不至于打满 6s 上限（实测省 ~54s/100s）。 */
         const val PANEL_STABLE_FALLBACK_MS = 400L
-        /**
-         * 点格后面板名轮询**步长**。**2026-09-12 由 200 → 120**（全量武器实测 −29%）。
-         * ⚠️ 不要再调到 80：面板真刷新前就会走完「未变但稳定」兜底 → 读到上一格的名字
-         * → 会被 character_scan 的「连续重复」止扫判据误判成遍历完（实测只出 1 个角色）。
-         */
-        const val PANEL_POLL_MS = 120L        // §15 P1-1：点格后面板变化轮询上限（武器详情 3D 加载慢，实测切换可 >2s）
-        const val PANEL_CHANGE_WAIT_MAX_MS = 6000L
+        // ★ P1（2026-10-06）：6000→400。对齐 GOODScanner Fingerprint{timeout 200, initial 20}
+        //   （game_controller.rs:666）；BS 实测就绪门+settle 占每格 68%（508ms 里 345ms）。
+        //   语义不变：超时仍是「按原样解析」，只是不再先白等 6 秒。
+        const val PANEL_CHANGE_WAIT_MAX_MS = 400L
 
         // ── ★ 就绪信号直采（2026-09-12，取代上面的「抓帧 + OCR」轮询）──
         /**
@@ -1457,6 +1464,8 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          * 提到 **300ms**（与我方 artifact 的 clickDelay 同量级），给面板渲染留足时间。
          */
         const val WEAPON_PANEL_DELAY_MS = 300L
+        // ★ 对齐方案 P1 曾考虑降到 GOODScanner 的 50ms —— **被上面这条事故否决**：
+        //   它 50ms 能活靠「每格单帧 + 无指纹门」，我方就绪逻辑不同，抄数值不抄条件必复现漏件。
 
         /** 天赋读数为 0 时（时序性读失败 / 切页淡入）**最多重读次数**与间隔（ms）。 */
         const val TALENT_RETRY_MAX = 6
