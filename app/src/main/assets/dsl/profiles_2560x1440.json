@@ -34,11 +34,12 @@
   "screens": {
     "_common": {
       "titleBar": [
-        125,
+        30,
         21,
         867,
         136
       ],
+      "titleBarNote": "★2026-10-06 左沿 125→**30**（PP-OCRv6 det 框实测，两张已入库帧）。旧值 125 = 3200 的 157×0.8 推导，但**左锚弹窗的标题不按 0.8 走**：「排序方式」文字框 x0=**41**（uploaded/sort_popup_2560x1440.png）、「圣遗物筛选」x0=**57**（uploaded/artifact_filter_panel_2560x1440.png）⇒ 旧左沿各切掉 83px / 52px。后果两条：① `auto_equip` 的 screenConfirm（expect=排序方式，走默认 titleBar）在本档**恒不命中**；② `walk_screens` 的 filter_panel 只剩 `setPlus` 的「+」兜底在撑（比标题直读弱）。取 30 = 观测最小 41 留 11px 余量，与 2244 档同形（该档 x0=110、标题实测起 121、余量 +11；3200 档余量只有 **+3px**，同样薄，另立一条量）。y 向 21..136 未动：本档副标题会挤掉标题（`filterPanelState` 的 2026-09-18 返工注释），故运行期仍与紧 ROI `grids.set_filter_popup.titleLine` 取并集，本键只当宽容的一路。离线回放：`walk_screens --profile json/profiles_2560x1440.json --shots uploaded` 由 16/17+1 不中 → **17/17**（sort_popup 直读「排序方式」、filter_panel 升回标题直读，其余 15 节点无回归）。",
       "topRightHint": [
         1814,
         47,
@@ -52,7 +53,7 @@
         124
       ],
       "returnBtnNote": "★ 2026-09-29 #132 实测：右上角圆形返回/关闭钮。圣遗物管理页的 ↩ 与角色详情页的 ✕ 同址。中心 (2448,82) 实测有效（管理页→详情页、详情页→大世界各验一次）。flow 里 `exit via \"return[2913,41]\"` 的字面是 3200 占位，在 2560 档 x=2913 落在屏外（宽 2560）⇒ 点了没反应、跑完人还困在角色页。框按该帧圈定，未逐像素复核边缘。",
-      "note": "2560x1440：由 2244 实测值换算（x×1.1408 / y×1.3333）⇒ 待实测复核"
+      "note": "2560x1440：由 2244 实测值换算（x×1.1408 / y×1.3333）⇒ 待实测复核。〔2026-10-06 部分转实测：`titleBar` 左沿已按 det 框改 125→30（见 titleBarNote）；`topRightHint`/`returnBtn` 有实测旁证（#132 与 slot_plume 帧）；其余仍待实测〕"
     },
     "game_home": {
       "anchors": {
