@@ -375,9 +375,20 @@ class OverlayWindowController(
             if (updatingUi) return@setOnCheckedChangeListener
             settingsRepository.setAutoLaunchGenshinEnabled(isChecked)
         }
+        // ★ #224：`rootView`/`params` 必须在 addView **成功之后**才登记。
+        //   原先是先赋值再 addView ⇒ 一旦 addView 抛（无障碍进程里窗口类型/权限被拒是真实分支，
+        //   见本函数开头那条注释），`rootView` 非空而视图从未挂上：
+        //   ① `show()` 开头的 `if (rootView != null) return` 从此**永久早退** ⇒ 悬浮窗再也起不来，
+        //      只能 force-stop 整个进程；② 之后所有按 rootView 走的 remove/update 也全部落空。
+        //   失败时保持未登记 ⇒ 下一次 show() 仍会重试。
+        try {
+            windowManager.addView(root, layoutParams)
+        } catch (e: Exception) {
+            Log.e(TAG_OVERLAY, "悬浮窗 addView 失败 ⇒ 不登记 rootView（下次 show 可重试）: ${e.message}")
+            return
+        }
         rootView = root
         params = layoutParams
-        windowManager.addView(root, layoutParams)
         // ★ 2026-09-14：wrap_content 宽度 layout 后才有 ⇒ 首帧后立刻规范化（右缘 + 按钮带下方，避免左缘闪位）
         root.post {
             clampOverlayPosition(layoutParams)

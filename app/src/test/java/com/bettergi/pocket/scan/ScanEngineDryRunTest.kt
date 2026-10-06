@@ -169,6 +169,14 @@ class ScanEngineDryRunTest {
         val freezeCells: Int = 0,
         /** A10 夹具：weapon_backpack 面板的名字 OCR 回放（须为 mappings 词典内的武器名）。 */
         val weaponNames: List<String>? = null,
+        /**
+         * ★ S1/S2b 夹具：**面板裁片原点** (x0,y0)。
+         * 开启 `panelCrop` 后，生产侧把每条 ROI 平移到**裁片坐标**（`sh()`），而本夹具的
+         * [NAME_RECT] / [SUB0_RECT] / [pageLines] 键都是**帧坐标** ⇒ 裁片帧进来的 rect 要先加回
+         * 原点才能查表。像素侧不用管：裁片是真 `copyTo` 出来的子图，星级/卡格读到的仍是同一片像素。
+         * 传 (0,0) = 不裁（同步路径现状）。
+         */
+        val cropOrigin: Pair<Int, Int> = 0 to 0,
     ) {
         var pageIndex = 0
             private set
@@ -185,6 +193,8 @@ class ScanEngineDryRunTest {
         // ★ A10：weapon_backpack 面板的 name/level ROI（profiles.json 3200 基坐标，calibrate 后不变）
         private val WEAPON_NAME_RECT = FrameRect(2221, 214, 2728, 273)
         private val WEAPON_LEVEL_RECT = FrameRect(2210, 709, 2455, 763)
+        /** 标定后的整帧宽度（与 [frameSource] 的 capturedSize 同源）；窄于此 ⇒ 收到的是裁片。 */
+        private val fullFrameW = 3200
         /** 当前「面板名」= 由**最后一次点击坐标**决定：同一格跨页同名（去重可判），
          *  且不受遍历前链式点击影响。初始值供首次点击前读取。 */
         private var lastNameCell = "晨光的明誓#0"
@@ -321,12 +331,22 @@ class ScanEngineDryRunTest {
                     val stateCell = st?.first ?: cellIdx
                     val stateName = st?.second ?: lastNameCell
                     val sub0 = "暴击率+%.1f%%".format(5.4 + stateCell * 0.1) // 每格一个不同值（$CELLS_PER_PAGE 格/页）
-                    when (r) {
+                    // ★ S1/S2b：裁片帧（宽 < 整帧）里的 rect 是**裁片坐标** ⇒ 平移回帧坐标再查表，
+                    //   否则下面每一条具名 ROI 都匹配不上 ⇒ 全部读空（实测 pipe 轮 21 格 key 全 null）。
+                    val rr = if (frame.cols() < fullFrameW) {
+                        FrameRect(
+                            r.left + cropOrigin.first, r.top + cropOrigin.second,
+                            r.right + cropOrigin.first, r.bottom + cropOrigin.second,
+                        )
+                    } else {
+                        r
+                    }
+                    when (rr) {
                         NAME_RECT -> stateName
                         WEAPON_NAME_RECT -> weaponNames?.getOrNull(stateCell % weaponNames.size)
                         WEAPON_LEVEL_RECT -> "Lv.90"
                         SUB0_RECT, SUB0_RECT_CRAFTED -> sub0
-                        else -> pages[pageIndex].ocrLines[r]
+                        else -> pages[pageIndex].ocrLines[rr]
                     }
                 }
 
@@ -422,6 +442,14 @@ class ScanEngineDryRunTest {
         weaponNames: List<String>? = null,
         /** ★ P3-8：外部注入 plan（foreach over $plan 用；配合 flowTransformer 包 foreach）。 */
         plan: List<JSONObject>? = null,
+        /** ★ S2b：流水线队列深度（0=现状同步；>0 走生产者/消费者，强制 crop=1）。 */
+        pipeDepth: Int = 0,
+        /**
+         * #69 口径修正：让**同步基线也开裁片**。不开的话 `pipeDepth>0` 一侧被强制 `crop=1`、
+         * 另一侧 `crop=0` ⇒ "同序同值"同时在比「同步 vs 管道」和「不裁 vs 裁」两件事，
+         * 失败无法归因（实际就误读过一次，见 design-docs/scan-pipeline-20261006.md §13.2）。
+         */
+        forceCrop: Boolean = false,
     ): RunResult {
         // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
@@ -439,7 +467,16 @@ class ScanEngineDryRunTest {
         // （NameMatcher 全灭但断言照样绿），而随包词典就在那里、坏了一定是改坏了。
         val names = GoodNames.fromJson(JSONObject(File(assetsDir(), "tools/mappings.json").readText()))
 
-        val h = Harness(pages, firstCellNameStuck, ENTER_CHAIN_CLICKS, freezeCells, weaponNames)
+        val h = Harness(
+            pages, firstCellNameStuck, ENTER_CHAIN_CLICKS, freezeCells, weaponNames,
+            // ★ 裁片原点与生产**同源**（profile.panelCropRect）：parsePanel 的裁片分支就是以
+            //   cropRect 的 left/top 作 origin 平移 ROI，夹具另算一份就会和实现对不上。
+            cropOrigin = run {
+                if (pipeDepth == 0 && !forceCrop) return@run 0 to 0
+                val panelKey = if (flowFile.contains("weapon")) "weapon_backpack" else "artifact_backpack"
+                profile.panelCropRect(panelKey)?.let { it.left to it.top } ?: (0 to 0)
+            },
+        )
         numberScript.forEach { h.numberScript.addLast(it) }
         // dedupe=false：dry-run 的 21 格 mock OCR 文本相同（人工场景），全量入库便于断言；
         // 真机每件内容不同，生产默认 true。
@@ -465,9 +502,108 @@ class ScanEngineDryRunTest {
         // ⚠️ 护栏（2026-09-11）：engine.run() 出现过「无限等待」把整个单测任务挂死 1 小时+
         //    （jstack：Test worker TIMED_WAITING 停在 BlockingCoroutine.joinBlocking → 内部某处 delay 循环不退出）。
         //    加 withTimeout：卡死从「永久挂起」变成「失败 + 协程栈」，既防呆又能直接定位卡点。
-        runBlocking { withTimeout(ENGINE_RUN_TIMEOUT_MS) { engine.run() } }
+        val prevPipe = TimingOverrides.pipeDepth
+        val prevCrop = TimingOverrides.panelCrop
+        TimingOverrides.pipeDepth = pipeDepth
+        if (pipeDepth > 0 || forceCrop) TimingOverrides.panelCrop = true
+        try {
+            runBlocking { withTimeout(ENGINE_RUN_TIMEOUT_MS) { engine.run() } }
+        } finally {
+            TimingOverrides.pipeDepth = prevPipe
+            TimingOverrides.panelCrop = prevCrop
+        }
         return RunResult(engine, h)
 
+    }
+
+    // ---- S2b 流水线（#69）：pipe>0 与 pipe=0 必须同序同值 ----
+
+    /**
+     * 管道化**不得改变任何解析结果**：同一批夹具帧，pipe=0（同步）与 pipe=2（生产者/消费者）
+     * 各跑一轮，断言 results 逐件相等、finished 相同、页数相同。
+     * ★ 两臂都开 `crop=1`（`forceCrop`）：`pipeDepth>0` 会强制开裁片，基线若不开，这条就在
+     *   同时比「同步 vs 管道」和「不裁 vs 裁」两件事 —— #69 那次因此把夹具 bug 误读成
+     *   "页末排水时机"问题，白跑两轮（design-docs/scan-pipeline-20261006.md §13.2）。
+     *   判据①（epoch 丢弃负对照 / 消费失败）由下面那条盯。
+     */
+    @Test
+    fun `S2b 管道化与同步路径同序同值`() {
+        fun run(pipe: Int) = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
+            pipeDepth = pipe,
+            forceCrop = true,
+        )
+        val sync = run(0)
+        val piped = run(2)
+        val a = sync.engine.results.map { it.setKey to it.slotKey to it.substats.map { s -> s.key to s.value } }
+        val b = piped.engine.results.map { it.setKey to it.slotKey to it.substats.map { s -> s.key to s.value } }
+        assertEquals("同步 ${a.size} 件 vs 管道 ${b.size} 件", a.size, b.size)
+        assertEquals("逐件内容（含顺序）必须一致", a, b)
+        assertEquals(sync.harness.finished, piped.harness.finished)
+    }
+
+    /**
+     * S2b 判据①「epoch 丢弃负对照」（design-docs §10）：正常一轮里**不得有任何 job 被
+     * 判过期/取消丢弃**，也不得有被 catch 吞掉的消费异常。
+     *
+     * 为什么需要它：#69 的根因一（纪元打了自增前的值 ⇒ `job.epoch < pipeSentEpoch[key]`
+     * 对最新那件也恒成立 ⇒ 292 件全走 stale 分支）在"同序同值"那条上只表现为"件数不等"，
+     * 归因不到丢弃；而干跑 `isReturnDefaultValues` 把 Android Log 全吞，`pipeProcess` 的
+     * catch 与"读到空"原理上不可分 —— 这两点各由下面一条断言盯住。
+     *
+     * 两条断言的**可达性都做过故障注入实测**（不是"看着会红"）：
+     * - 丢 1 件（`stale ||= job.id==3`）⇒ 红在第一条，且实测 results 变成 **41 而非 20**
+     *   —— 漏一格会把页记账带偏成**重复入库**，比丢件更糟；
+     * - 只加计数、job 照常处理（`addPipeDiscard()` 单注）⇒ 红在第二条
+     *   （`expected:<0> but was:<1>`），证明第二条不是排在第一条后面就跑不到的死断言。
+     */
+    @Test
+    fun `S2b 正常一轮不得丢弃 job 也不得消费失败`() {
+        val r = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
+            pipeDepth = 2,
+        )
+        assertEquals("整页必须先全量入库，否则下面两条 0 是空跑出来的", CELLS_PER_PAGE, r.engine.results.size)
+        assertEquals(
+            "有 job 被判过期/取消丢弃 ⇒ 纪元打标或重访语义错",
+            0L, PerfProbe.pipeDiscardCount(),
+        )
+        assertEquals(
+            "消费者抛异常被 catch 吞掉 ⇒ 干跑里只有这条看得见",
+            0L, PerfProbe.pipeFailCount(),
+        )
+    }
+
+    /**
+     * S2b 判据①「取消无泄漏」的**行为半边**（§6.1）：中途止扫（#83 逐格前台闸门）时管道里
+     * 还有在途 job ⇒ 取消必须做到"只释放裁片、不 emit、不记账"。泄漏的表现就是
+     * `results` 多于已点过的 10 格，所以这条盯的是**件数不被虚增**，不是"件数变少"。
+     *
+     * ⚠️ 别把这条当成"取消无泄漏全过了"：native Mat 是否真归还**不在本条观测面里**
+     *   （JVM 干跑没有 Mat 泄漏哨兵），那一半只能靠真机 RSS / `pipeJobPool` 水位去量。
+     *   两臂都开 `forceCrop` ⇒ 差异只剩 pipe 本身（见"同序同值"那条的口径说明）。
+     */
+    @Test
+    fun `S2b 中途止扫不得把在途 job 记成入库件`() {
+        val allowed = 1 + 10
+        for (pipe in listOf(0, 2)) {
+            var probes = 0
+            val (engine, h) = runEngine(
+                listOf(
+                    Page(syntheticFrame(5), pageLines("Lv.90"), 1026),
+                    Page(syntheticFrame(6), pageLines("Lv.90"), 1026),
+                ),
+                foregroundOk = {
+                    probes += 1
+                    probes <= allowed
+                },
+                pipeDepth = pipe,
+                forceCrop = true,
+            )
+            assertEquals("pipe=$pipe：只应入库已点过的 10 格", 10, engine.results.size)
+            assertEquals("pipe=$pipe", ENTER_CHAIN_CLICKS + 10, h.clicks.size)
+            assertTrue("pipe=$pipe 应正常收尾（非异常）", h.finished != null)
+        }
     }
 
     // ---- 入库去重（Q2 决策）：两页同件 → 第二次出现跳过 ----
@@ -699,7 +835,6 @@ class ScanEngineDryRunTest {
         val page2 = Page(syntheticFrame(3, page = 1), pageLines("Lv.0"), 2 * CELLS_PER_PAGE)
         val (engine, h) = runEngine(listOf(page1, page2))
 
-        println("DIAG stop=${engine.vars.stopRequested} finished=${h.finished} clicks=${h.clicks.size} swipes=${h.swipes.size} results=${engine.results.size} rarity=${engine.vars.rarity} level=${engine.vars.level} pagesSeen=${h.pageIndex + 1} rarities=${engine.results.map { it.rarity }.distinct()}")
         // 页 1：满页 5★；页 2：3★（starCount=3）→ 正常 emit ⇒ 共 2 页
         assertEquals(2 * CELLS_PER_PAGE, engine.results.size)
         assertEquals(listOf(3, 5), engine.results.map { it.rarity }.distinct().sorted())

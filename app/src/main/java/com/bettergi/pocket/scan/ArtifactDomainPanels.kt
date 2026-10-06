@@ -234,7 +234,13 @@ internal suspend fun ScanEngine.dumpStallShot(
     }.onFailure { Log.w(TAG, "stall shot 落盘失败", it) }
 }
 
-internal suspend fun ScanEngine.parsePanel(step: JSONObject, ctx: ScanEngine.CellFrameContext? = null) {
+internal suspend fun ScanEngine.parsePanel(
+    step: JSONObject,
+    ctx: ScanEngine.CellFrameContext? = null,
+    /** S2b（#69）：非 null ⇒ 管道路径——头部（指纹闸/取证）在本函数完成后，把整帧交回调用方
+     *  做「裁片拷贝+send」，解析/判据/emit 在单消费者协程；null = 同步路径（pipe=0，回滚杠杆）。 */
+    pipeOut: (suspend (Mat) -> Unit)? = null,
+) {
     // 每格先置 false：任何提前 return 都不会留下上一格的陈旧命中值（宁可不动作）
     vars.panelMatched = false
     // ★ 全局弹框清场：加锁确认框可能**迟到 >60s**（服务端回包慢），会盖住整个界面把后续点击全吃掉。
@@ -315,8 +321,10 @@ internal suspend fun ScanEngine.parsePanel(step: JSONObject, ctx: ScanEngine.Cel
                     f2.release()
                 }
             }
-            if (!PanelFingerprint.same(PanelFingerprint.capture(frame, fpRects), panelFpSnapshot)) {
-                panelFpSnapshot = PanelFingerprint.capture(frame, fpRects)
+            // ★ 同一帧同一 regions 采一次即可（原先连按两次 capture；E3 去重，行为逐位不变）
+            val fpCur = PanelFingerprint.capture(frame, fpRects)
+            if (!PanelFingerprint.same(fpCur, panelFpSnapshot)) {
+                panelFpSnapshot = fpCur
             } else if (waited >= fpWaitMs) {
                 Log.w(TAG, "面板指纹：${fpWaitMs}ms 内面板未变化（按原样解析，可能陈旧帧）")
                 panelFpSnapshot = fp0
@@ -332,6 +340,14 @@ internal suspend fun ScanEngine.parsePanel(step: JSONObject, ctx: ScanEngine.Cel
     //   （2026-09-24 首版误放在取帧处，早于 5072 行的赋值 ⇒ 清单里 1003/1004 格恒报
     //    `appeared:false`，与 `格级` 日志的上千次 `appeared=true` 直接矛盾。埋点埋早了。）
     dumpPanelShot(frame, panelKey, fpWaitMs)
+    // ★ S2b（#69）管道路径：头部段（指纹闸/取证）已在生产者完成；这里把整帧交回调用方的
+    //   pipeOut = 「裁片拷进 job 私有 Mat + send（背压）」，随后池帧早还（§4 池帧早还——
+    //   vote(rarity) 已在交回前完成）。解析/判据/emit 由单消费者协程按 FIFO 序执行。
+    if (pipeOut != null) {
+        pipeOut(frame)
+        if (owned) frame.release() else ctx?.release()
+        return
+    }
     // ★ S1（#69 流水线第一步，timing key `crop=1` 开，默认关）：OCR/解析改读**面板裁片**，
     //   rect 经 origin 平移到裁片坐标；指纹闸门/vote/祝圣判据仍读整帧（S2 才搬）。
     //   裁片拷进引擎级复用 Mat：copyTo 在尺寸类型不变时**零重分配**，每格只多一次 memcpy

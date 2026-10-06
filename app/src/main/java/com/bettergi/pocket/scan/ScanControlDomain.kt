@@ -86,6 +86,18 @@ internal fun ScanEngine.noteDupAndMaybeStop(identity: String?, seen: Collection<
     return false
 }
 
+/**
+ * S2b：emit 步分发 —— pipe 消费者（job 携带 emitStep）与生产者跳过路径（visitSkipTail 的
+ * 重复记账）共用；判据语义见 [emitCharacter]（止扫判据在 emit 求值）。
+ */
+internal suspend fun ScanEngine.emitByStep(step: JSONObject) {
+    if (step.optString("as") == "GoodCharacter") {
+        emitCharacter(step)
+    } else {
+        listener.onProgress("emit", vars.snapshot())
+    }
+}
+
 /** emit as=GoodCharacter：草稿入库 + 上报进度。 */
 internal fun ScanEngine.emitCharacter(step: JSONObject) {
     if (charName.isEmpty()) {
@@ -831,6 +843,13 @@ internal suspend fun ScanEngine.runVisit(
     try {
         // ⚠️ 不在格子级响应 stopRequested：止扫语义是「本页后停」（pagedGrid 在页完成后检查）。
         visitSkipTail = false
+        // ★ S2b：预扫本 visit 的 emit 步（pipe 模式 job 携带，emit 判据在消费者求值）；
+        //   每格复位「本格已 send job」标记（emit 步据此决定生产者/消费者执行）。
+        pipeEmitStep = (0 until visit.length()).map { visit.getJSONObject(it) }
+            .firstOrNull { it.optString("do") == "emit" }
+        pipeStopStep = (0 until visit.length()).map { visit.getJSONObject(it) }
+            .firstOrNull { it.optString("do") == "stopWhen" }
+        pipeCellJobSent = false
         for (i in 0 until visit.length()) {
             val s = visit.getJSONObject(i)
             if (visitSkipTail && s.optString("do") !in TAIL_RUN_ALWAYS) {
@@ -1197,6 +1216,19 @@ internal suspend fun ScanEngine.executeVisitStepInner(
                     // 而 ctx 缓存的是 **navigate 之前**的帧 → 复用会读到旧页（天赋页 → name ROI 读到天赋名）。
                     // 故角色面板一律取新帧（每次多 1 次抓帧，代价可忽略）。
                     parseCharacterPanel(step, null)
+                } else if (TimingOverrides.pipeDepth > 0) {
+                    // ★ S2b（#69）管道路径：parsePanel 的**头部段**（指纹闸/取证）在生产者完成，
+                    //   整帧交 pipeOut = 「裁片拷进 job 私有 Mat + send（背压）」，
+                    //   解析/判据/emit 交单消费者协程（job 携带 emit 步）。
+                    //   pipe=0 走下方同步路径（回滚杠杆，§8/S4 不删）。
+                    val panelKey = step.optString("panel")
+                    val cropRect = prof.panelCropRect(panelKey)
+                        ?: throw IllegalStateException(
+                            "pipe=${TimingOverrides.pipeDepth} 需要 panels.$panelKey 裁片并集，但为空",
+                        )
+                    parsePanel(step, ctx, pipeOut = { frame ->
+                        pipeSend(gridKey, col, row, index, cropRect, frame, parseStep = step, panelKey = panelKey)
+                    })
                 } else {
                     parsePanel(step, ctx)
                 }
@@ -1229,13 +1261,21 @@ internal suspend fun ScanEngine.executeVisitStepInner(
         "readConstellation" -> readConstellation(step)
             "emit" -> {
                 // §14 P3：emit as=GoodCharacter → 角色入库；否则沿用既有 vars 快照上报
-                if (step.optString("as") == "GoodCharacter") {
-                    emitCharacter(step)
+                // ★ S2b：pipe>0 且本格已 send job ⇒ emit 由消费者执行（job 携带本步 JSON）；
+                //   跳过格（visitSkipTail，无 job）仍由生产者执行（重复记账，语义不变）。
+                if (TimingOverrides.pipeDepth > 0 && pipeCellJobSent) {
+                    Log.d(TAG, "emit: 由流水线消费者执行（job 携带）")
                 } else {
-                    listener.onProgress("emit", vars.snapshot())
+                    emitByStep(step)
                 }
             }
-            "stopWhen" -> stopWhen(step)
+            "stopWhen" ->
+                // ★ S2b：本格已发 job ⇒ stopWhen 随 job 在消费者按本格 vars 求值（生产者只做非阻塞观察）
+                if (TimingOverrides.pipeDepth > 0 && pipeCellJobSent) {
+                    Log.d(TAG, "stopWhen: 由流水线消费者求值（本格 job）")
+                } else {
+                    stopWhen(step)
+                }
             "notify" -> notifyStep(step)
             // ★ 2026-09-18 单趟扫描：visit 层也要能逐格绑定计划项
             //   （顶层分派有了 visit 层没加 ⇒ 真机全格 `unknown visit step 'planMatch', skipped`）

@@ -214,6 +214,8 @@ class ScriptRunner(
         timingSpec: String? = null,
     ) {
         FlowSource.install(appContext)
+        // #230：钳频/温度摘要需要 Context 读电池粘性广播（sysfs 那几项不需要）。
+        CpuTelemetry.init(appContext)
         Log.i(TAG, "timing: ${TimingOverrides.apply(timingSpec)}")
         // A15（2026-09-30）：上一轮未**真正**终结（含取消收尾中——isActive 在 cancel() 后立即
         // 变 false，不能再用它判忙）⇒ 拒绝新启动，但必须回执：原先静默 return，悬浮窗停在
