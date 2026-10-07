@@ -135,6 +135,12 @@ internal object LockFlow {
  */
 internal suspend fun ScanEngine.runLockScanNative() {
     runPreamble()
+    runLockSteps()
+    runPostamble()
+}
+
+/** artifact_lock 步序主体（ScanEngine.run() 按 flowName 分派用；planSummary 在本体内）。 */
+internal suspend fun ScanEngine.runLockSteps() {
     nativeStep("enterScreen") { enterScreen(LockFlow.ENTER_BAGPACK) }
     nativeStep("enterScreen") { enterScreen(LockFlow.ENTER_ARTIFACT_TAB) }
     nativeStep("dualStateButton") { dualStateButton(LockFlow.DUAL_PILL_OFF) }
@@ -183,5 +189,4 @@ internal suspend fun ScanEngine.runLockScanNative() {
     // ★ 收尾：始终没被绑定的计划项补记 NotFound，并输出 ManageSummary
     //   （planSummary 是结果契约的出口，stopRequested 也不能跳过——与 run() 的 JSON 循环同规）
     nativeStep("planSummary") { planSummary() }
-    runPostamble()
 }

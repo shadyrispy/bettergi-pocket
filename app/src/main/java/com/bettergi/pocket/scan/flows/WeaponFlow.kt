@@ -99,6 +99,12 @@ internal object WeaponFlow {
  */
 internal suspend fun ScanEngine.runWeaponScanNative() {
     runPreamble()
+    runWeaponSteps()
+    runPostamble()
+}
+
+/** weapon_scan 步序主体（ScanEngine.run() 按 flowName 分派用；DryRun 走 runWeaponScanNative）。 */
+internal suspend fun ScanEngine.runWeaponSteps() {
     nativeStep("enterScreen") { enterScreen(WeaponFlow.ENTER_BAGPACK) }
     nativeStep("enterScreen") { enterScreen(WeaponFlow.ENTER_WEAPON_TAB) }
     nativeStep("clicks") {
@@ -126,5 +132,4 @@ internal suspend fun ScanEngine.runWeaponScanNative() {
             }
         }
     }
-    runPostamble()
 }

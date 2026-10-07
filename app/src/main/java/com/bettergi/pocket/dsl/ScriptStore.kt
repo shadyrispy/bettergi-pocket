@@ -2,35 +2,56 @@ package com.bettergi.pocket.dsl
 
 import android.content.Context
 import android.content.Intent
-import org.json.JSONObject
-import java.io.File
-import com.bettergi.pocket.core.FlowSource
 
 /**
- * 脚本清单（P3，2026-09-18）：**本地**脚本管理（导入 JSON + 启用开关）。
+ * 脚本清单（P3 → simple 分支瘦身，2026-10-07）：**内置**脚本管理（启用开关）。
  *
- * 设计要点
- * - 内置脚本来自 `assets/dsl/flows/<name>.json`；导入的脚本写到 `filesDir/scripts/installed/dsl/flows/<name>.json —— 与
- *   [FlowSource] 的 override 路径**同源** ⇒ 导入即生效，无需重编 APK。
- * - 展示信息（按钮文字/图标/顺序）来自流程的 `ui` 段（见 P2）；非法 `ui` 由 [FlowValidator.validate] 列出并把 issue 显示在管理界面，而不是静默丢弃。
- * - 全部用本地文件与纯函数解析 ⇒ 无任何网络交互（本 app 断网）。
- * - 纯函数 [parseEntry] 便于 JVM 单测（Context 相关部分只做 IO：列表/开关/导入。
+ * ★ simple 阶段3（spec §1/§4）：DSL 运行时已下线 ——
+ * - flow JSON（含 `ui` 段）已删除，清单由 [BUILT_INS] Kotlin 常量承载（label/icon/order/actions
+ *   逐字平移原五条 flow 的 `ui` 块）；
+ * - 「导入脚本」持久化通道删除（导入 UI / override 目录 / FlowValidator 校验一并下线）；
+ * - 内置流程的启用开关改为 SharedPreferences **bitset**（一位 = 一条流程，1 = 启用；
+ *   默认全启用——与旧 enabled.json 缺项语义一致）。
+ * 全部用本地存储与纯常量 ⇒ 无任何网络交互（本 app 断网）。
  */
 object ScriptStore {
 
-    const val ENABLED_FILE = "scripts/enabled.json"
-    private const val FLOWS_DIR = "dsl/flows"
-
     /**
-     * 清单变更广播（导入 / 开关 / 恢复内置）。
-     * 用**显式包名广播**而非进程内回调：悬浮窗宿主在 P4b 会迁到 `:a11y`（另一个进程），
+     * 清单变更广播（开关切换）。用**显式包名广播**：悬浮窗宿主在 `:a11y`（另一个进程），
      * 同 UID 跨进程仍可送达；接收侧用 `RECEIVER_NOT_EXPORTED` 保持不对外暴露。
      */
     const val ACTION_SCRIPTS_CHANGED = "com.bettergi.pocket.action.SCRIPTS_CHANGED"
 
-    private fun notifyChanged(context: Context) {
-        runCatching { context.sendBroadcast(Intent(ACTION_SCRIPTS_CHANGED).setPackage(context.packageName)) }
-    }
+    /** 行内动作渲染上限；超出的部分由界面放进「更多」子行（面板只有 248dp 宽，放不下第 3 个）。 */
+    const val MAX_ACTIONS = 2
+
+    /** 悬浮窗按钮上的一个动作（原 FlowValidator.OverlayAction，随其删除并入此处）。 */
+    data class OverlayAction(val kind: String, val label: String)
+
+    /** 一条内置流程的静态清单（原 flow JSON `ui` 段的 Kotlin 平移）。 */
+    data class NativeFlow(
+        val key: String,
+        val label: String,
+        val icon: String,
+        val order: Int,
+        /** 是否声明了 `ui` 段 ⇒ 是否**上悬浮窗**（未声明者只在管理器可见，如 2 个标定流程）。 */
+        val hasUi: Boolean,
+        /** 该脚本声明的动作（`ui.actions`，按顺序）⇒ 悬浮窗行内按钮 / 管理器行副标题都由它派生。 */
+        val actions: List<OverlayAction>,
+    )
+
+    /** 内置流程注册表（order 升序；两条标定流无 ui 段，只在管理器可见）。 */
+    val BUILT_INS: List<NativeFlow> = listOf(
+        NativeFlow("artifact_scan", "圣遗物扫描", "artifact", 10, true, listOf(OverlayAction("export", "导出"), OverlayAction("run", "开始"))),
+        NativeFlow("weapon_scan", "武器扫描", "weapon", 20, true, listOf(OverlayAction("export", "导出"), OverlayAction("run", "开始"))),
+        NativeFlow("character_scan", "角色扫描", "character", 30, true, listOf(OverlayAction("export", "导出"), OverlayAction("run", "开始"))),
+        NativeFlow("artifact_lock", "圣遗物锁定", "lock", 40, true, listOf(OverlayAction("import", "导入"), OverlayAction("run", "开始"))),
+        NativeFlow("auto_equip", "自动装备", "equip", 50, true, listOf(OverlayAction("import", "导入"), OverlayAction("run", "开始"))),
+        NativeFlow("char_calibrate", "char_calibrate", "gear", Int.MAX_VALUE, false, emptyList()),
+        NativeFlow("setfilter_calibrate", "setfilter_calibrate", "gear", Int.MAX_VALUE, false, emptyList()),
+    )
+
+    private val KEYS: List<String> = BUILT_INS.map { it.key }
 
     data class Entry(
         val key: String,
@@ -38,119 +59,42 @@ object ScriptStore {
         val icon: String,
         val order: Int,
         val enabled: Boolean,
-        val imported: Boolean,
-        val issues: List<String>,
         /** 是否声明了 `ui` 段 ⇒ 是否**上悬浮窗**（未声明者只在管理器可见，如 2 个标定流程）。 */
-        val hasUi: Boolean = false,
+        val hasUi: Boolean,
         /** 该脚本声明的动作（`ui.actions`，按顺序）⇒ 悬浮窗行内按钮 / 管理器行副标题都由它派生。 */
-        val actions: List<FlowValidator.OverlayAction> = emptyList(),
+        val actions: List<OverlayAction> = emptyList(),
     )
 
-    /** 纯函数：由流程 JSON 解析清单条目（无 Android 依赖，单测可覆盖）。 */
-    fun parseEntry(json: JSONObject, key: String, imported: Boolean, enabled: Boolean): Entry {
-        val issues = FlowValidator.validate(json).map { "${it.path}: ${it.message}" }
-        val ui = FlowValidator.parseUi(json)
-        return Entry(
-            key = key,
-            label = ui?.label ?: key,
-            icon = ui?.icon ?: "gear",
-            order = ui?.order ?: Int.MAX_VALUE,
-            enabled = enabled,
-            imported = imported,
-            issues = issues,
-            hasUi = ui != null,
-            actions = ui?.actions ?: emptyList(),
-        )
-    }
-
-    /** 内置 + 已导入，按 `ui.order` 升序（同序按 key）。 */
-    fun list(context: Context): List<Entry> {
-        val enabled = readEnabled(context)
-        val out = ArrayList<Entry>()
-        // 内置
-        val names = context.assets.list(FLOWS_DIR)?.filter { it.endsWith(".json") } ?: emptyList()
-        for (n in names) {
-            val key = n.removeSuffix(".json")
-            val json = runCatching {
-                JSONObject(FlowSource.open(context.assets, "$FLOWS_DIR/$n").bufferedReader().use { it.readText() })
-            }.getOrNull() ?: JSONObject()
-            out.add(parseEntry(json, key, imported = false, enabled = enabled[key] ?: true))
-        }
-        // 已导入（override 目录）
-        val dir = File(context.filesDir, "${FlowSource.OVERRIDE_ROOT}/$FLOWS_DIR")
-        dir.listFiles()?.filter { it.isFile && it.name.endsWith(".json") }?.forEach { f ->
-            val key = f.name.removeSuffix(".json")
-            val json = runCatching { JSONObject(f.readText()) }.getOrNull() ?: JSONObject()
-            out.add(parseEntry(json, key, imported = true, enabled = enabled[key] ?: true))
-        }
-        // 同一 key 同时存在内置与导入 ⇒ 以导入为准（FlowSource 亦为 override 优先）。
-        // ★ P3（2026-09-30）：原实现是"先按 order 排序、再后写者胜"—— 导入副本 order 小于内置时，
-        //   内置排后面反而覆盖导入 ⇒ 管理器显示内置、执行却是 override（显示与执行不一致）。
-        //   改为：先按 key 合并（导入覆盖内置，与 FlowSource 语义一致），再排序（order 升序，key 作稳定平局键）。
-        return mergeEntries(out)
-    }
-
-    /** 纯函数：按 key 合并（导入覆盖内置）+ 排序（order 升序，key 稳定平局键）。无 Android 依赖，单测可覆盖。 */
-    fun mergeEntries(out: List<Entry>): List<Entry> {
-        val merged = LinkedHashMap<String, Entry>()
-        out.forEach { e ->
-            val prev = merged[e.key]
-            if (prev == null || (e.imported && !prev.imported)) merged[e.key] = e
-        }
-        return merged.values.sortedWith(compareBy<Entry> { it.order }.thenBy { it.key })
-    }
+    /** 内置清单，按 `order` 升序。 */
+    fun list(context: Context): List<Entry> =
+        BUILT_INS.sortedWith(compareBy { it.order })
+            .map { Entry(it.key, it.label, it.icon, it.order, isEnabled(context, it.key), it.hasUi, it.actions) }
 
     fun setEnabled(context: Context, key: String, enabled: Boolean) {
-        val map = readEnabled(context).toMutableMap()
-        map[key] = enabled
-        writeEnabled(context, map)
+        val idx = KEYS.indexOf(key)
+        if (idx < 0) return
+        val prefs = prefs(context)
+        val mask = prefs.getLong(MASK_KEY, ALL_ENABLED)
+        val updated = if (enabled) mask or (1L shl idx) else mask and (1L shl idx).inv()
+        prefs.edit().putLong(MASK_KEY, updated).apply()
         android.util.Log.i("BetterGI.Scripts", "setEnabled key=$key enabled=$enabled")
-        notifyChanged(context)
+        runCatching { context.sendBroadcast(Intent(ACTION_SCRIPTS_CHANGED).setPackage(context.packageName)) }
     }
 
-    /** 导入：写入 override 目录；返回 (ok, message)。 */
-    fun importFlow(context: Context, key: String, text: String): Pair<Boolean, String> {
-        val json = runCatching { JSONObject(text) }.getOrNull()
-            ?: return false to "不是合法 JSON"
-        val issues = FlowValidator.validate(json)
-        if (issues.isNotEmpty()) {
-            return false to issues.joinToString("; ") { "${it.path}: ${it.message}" }
-        }
-        val dir = File(context.filesDir, "${FlowSource.OVERRIDE_ROOT}/$FLOWS_DIR")
-        if (!dir.exists() && !dir.mkdirs()) return false to "无法创建目录：${dir.path}"
-        // key 来自**导入文件自己**的 "flow" 字段（或 SAF 文件名）⇒ 是外部输入：
-        // `File(dir, "$key.json")` 里带 `../` 就能写到 flows/ 之外去（app 私有目录内的任意覆盖写）。
-        val safeKey = key.trim().filter { it.isLetterOrDigit() || it == '-' || it == '_' }
-        if (safeKey.isEmpty()) return false to "流程名不合法（只允许字母/数字/-/_）：'$key'"
-        val target = File(dir, "$safeKey.json")
-        runCatching { target.writeText(text) }.getOrElse { return false to "写入失败：${it.message}" }
-        notifyChanged(context)
-        return true to "已导入：$safeKey.json"
+    /** 开关状态（bitset）：1 = 启用。缺项/旧安装默认全启用（与旧 enabled.json 缺项语义一致）。 */
+    fun isEnabled(context: Context, key: String): Boolean {
+        val idx = KEYS.indexOf(key)
+        if (idx < 0) return false
+        val mask = prefs(context).getLong(MASK_KEY, ALL_ENABLED)
+        return (mask shr idx) and 1L == 1L
     }
 
-    /** 恢复内置：删除 override 副本。 */
-    fun resetFlow(context: Context, key: String): Boolean {
-        val f = File(context.filesDir, "${FlowSource.OVERRIDE_ROOT}/$FLOWS_DIR/$key.json")
-        val deleted = if (f.exists()) f.delete() else false
-        if (deleted) notifyChanged(context)
-        return deleted
-    }
+    private const val MASK_KEY = "enabled_mask"
 
-    fun readEnabled(context: Context): Map<String, Boolean> {
-        val f = File(context.filesDir, ENABLED_FILE)
-        if (!f.exists()) return emptyMap()
-        val json = runCatching { JSONObject(f.readText()) }.getOrNull() ?: return emptyMap()
-        val out = LinkedHashMap<String, Boolean>()
-        val it = json.keys()
-        while (it.hasNext()) { val k = it.next(); out[k] = json.optBoolean(k, true) }
-        return out
-    }
+    /** 全启用掩码（低 [KEYS] 位全 1）。 */
+    private val ALL_ENABLED: Long =
+        if (KEYS.size >= 64) -1L else ((1L shl KEYS.size) - 1L)
 
-    private fun writeEnabled(context: Context, map: Map<String, Boolean>) {
-        val f = File(context.filesDir, ENABLED_FILE)
-        f.parentFile?.mkdirs()
-        val json = JSONObject()
-        map.forEach { (k, v) -> json.put(k, v) }
-        f.writeText(json.toString(2))
-    }
+    private fun prefs(context: Context) =
+        context.getSharedPreferences("bp_scripts", Context.MODE_PRIVATE)
 }

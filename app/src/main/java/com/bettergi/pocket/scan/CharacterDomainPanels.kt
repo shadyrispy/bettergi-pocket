@@ -700,24 +700,6 @@ internal fun ScanEngine.nameMatches(got: String, target: String): Boolean {
  * - ⚠️ ①段的前提是**网格停在首行**（auto_equip 由 sortBtn→排序弹窗确认这条复位链保证）。
  *   复位链断掉时 ①段扫的是"当前可见的顶三行"，不是第 1..9 号卡 —— 会漏，但不会漏得比修前更狠。
  */
-internal suspend fun ScanEngine.snapTraverseJsonOrBody(
-    gridKey: String,
-    visitJson: JSONArray?,
-    visitBody: NativeVisitRunner?,
-    advance: JSONObject,
-) {
-    // spec §2：snap 模式的 lambda 变体——visit 消费统一走 runner（JSON 路径包 runVisit(snapMode=true)）。
-    if (visitJson != null) {
-        snapTraverseCore(gridKey, advance) { c, r, i, prof ->
-            runVisit(visitJson, gridKey, c, r, i, prof, snapMode = true)
-        }
-    } else {
-        visitBody?.let { body ->
-            snapTraverseCore(gridKey, advance) { c, r, i, prof -> body(c, r, i, prof) }
-        }
-    }
-}
-
 /** snap 遍历主体（simple 分支改名自 snapTraverse；visit 消费改走 runner，其余一字未改）。 */
 internal suspend fun ScanEngine.snapTraverseCore(
     gridKey: String,

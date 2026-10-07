@@ -1279,8 +1279,7 @@ internal fun ScanEngine.longestRunLen(sortedIdx: List<Int>): Int {
  *   拉到阈值误触止扫。
  */
 internal suspend fun ScanEngine.revisitFailedCells(
-    visitJson: JSONArray?,
-    visitBody: NativeVisitRunner?,
+    visitBody: NativeVisitRunner,
     gridKey: String,
     prof: ScreenProfile,
     cols: Int,
@@ -1317,7 +1316,7 @@ internal suspend fun ScanEngine.revisitFailedCells(
                 curCellRow = row
                 curCellCol = col
                 curCellIdx = idx
-                runVisitJsonOrBody(visitJson, visitBody, gridKey, col, row, idx, prof)
+                visitBody(this, col, row, idx, prof)
                 curCellIdx = -1
                 val k = lastCellKey
                 val id = lastCellIdentity

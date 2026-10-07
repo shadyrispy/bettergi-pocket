@@ -8,8 +8,6 @@ import androidx.appcompat.widget.SwitchCompat
 import com.bettergi.pocket.R
 import android.util.Log
 import android.view.Gravity
-import com.bettergi.pocket.dsl.FlowValidator
-import com.bettergi.pocket.dsl.ScriptIcons
 import com.bettergi.pocket.dsl.ScriptStore
 import com.bettergi.pocket.bridge.OverlayEntryContract
 import android.widget.EditText
@@ -17,7 +15,46 @@ import com.bettergi.pocket.overlay.OverlayWindowController.Companion.TAG_OVERLAY
 
 /*
  * Stage 3.4：脚本行 / 流程按钮（从 OverlayWindowController.kt 抽出，扩展函数，函数体一字未改）。
+ * ★ simple 阶段3：dsl/ScriptIcons.kt 并入本文件（唯一映射表语义不变；ui 包经 overlay 包引用）。
  */
+
+/**
+ * 脚本图标 / 动作图标 → drawable 的**唯一映射表**（2026-09-18）。
+ *
+ * 悬浮窗与管理器都要画同一套图标，早先各写一份 `when` ⇒ 必然漂移。这里收成一处：
+ * 界面只问"这个 icon 名 / 这个动作 kind 画什么"，不再各自维护。
+ * 图标本身是**白色描边/填充**的矢量（24dp viewBox），颜色由调用方 tint —— 因为同一个 drawable
+ * 要同时服务深底的悬浮窗与跟随系统深浅色的管理器。
+ */
+object ScriptIcons {
+
+    /** `ui.icon` → 脚本图标。未知名字回落到通用齿轮。 */
+    fun script(icon: String): Int = when (icon) {
+        "artifact" -> R.drawable.ic_script_artifact
+        "weapon" -> R.drawable.ic_script_weapon
+        "character" -> R.drawable.ic_script_character
+        "lock" -> R.drawable.ic_script_lock
+        "equip" -> R.drawable.ic_script_equip
+        else -> R.drawable.ic_script_gear
+    }
+
+    /** `actions[].kind` → 动作图标。未知 kind 回落到「运行」。 */
+    fun action(kind: String): Int = when (kind) {
+        "stop" -> R.drawable.ic_action_stop
+        "export" -> R.drawable.ic_action_export
+        "import" -> R.drawable.ic_action_import
+        "config" -> R.drawable.ic_action_config
+        "open" -> R.drawable.ic_action_open
+        else -> R.drawable.ic_action_run
+    }
+
+    /** 动作的主色：破坏性用红，产出/运行用金，其余用常态色。 */
+    fun actionTint(kind: String): Int = when (kind) {
+        "stop" -> R.color.overlay_notice_bar_error
+        "export", "run" -> R.color.overlay_gold
+        else -> R.color.overlay_text
+    }
+}
 
 internal fun OverlayWindowController.applyFlowSelection(flow: String) {
     if (flowViews.isEmpty()) return
@@ -58,7 +95,7 @@ internal fun OverlayWindowController.applyFlowSelection(flow: String) {
  * 重建脚本区：**唯一来源是脚本自身** —— 只渲染「已启用 且 声明了 `ui`」的流程，顺序取 `ui.order`。
  *
  * 每行 = [图标] 名称 …… [动作图标…]，动作来自脚本的 `ui.actions`（kind 决定图标与行为）。
- * 行内最多 [FlowValidator.MAX_ACTIONS] 个；超出的收进该行的「更多」（点一下就地展开，不用系统 PopupMenu）。
+ * 行内最多 [ScriptStore.MAX_ACTIONS] 个；超出的收进该行的「更多」（点一下就地展开，不用系统 PopupMenu）。
  */
 internal fun OverlayWindowController.renderFlowButtons() {
     val container = scriptGroup ?: return
@@ -115,10 +152,10 @@ internal fun OverlayWindowController.renderFlowButtons() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        val inline = e.actions.take(FlowValidator.MAX_ACTIONS)
+        val inline = e.actions.take(ScriptStore.MAX_ACTIONS)
         inline.forEach { actions.addView(actionView(it, e.key)) }
-        if (e.actions.size > FlowValidator.MAX_ACTIONS) {
-            actions.addView(moreView(e.actions.drop(FlowValidator.MAX_ACTIONS), e.key, actions))
+        if (e.actions.size > ScriptStore.MAX_ACTIONS) {
+            actions.addView(moreView(e.actions.drop(ScriptStore.MAX_ACTIONS), e.key, actions))
         }
         row.addView(actions)
         container.addView(row)
@@ -130,7 +167,7 @@ internal fun OverlayWindowController.renderFlowButtons() {
 }
 
 /** 行内一个动作（图标按钮，视觉 32dp / 触控撑满 48dp 行高）。 */
-internal fun OverlayWindowController.actionView(a: FlowValidator.OverlayAction, flowKey: String): ImageView =
+internal fun OverlayWindowController.actionView(a: ScriptStore.OverlayAction, flowKey: String): ImageView =
     ImageView(themedContext).apply {
         setImageResource(ScriptIcons.action(a.kind))
         setColorFilter(context.getColor(ScriptIcons.actionTint(a.kind)))
@@ -149,7 +186,7 @@ internal fun OverlayWindowController.actionView(a: FlowValidator.OverlayAction, 
  * 点击**就地展开**到同一行动作区（一次性展开，不做折叠）—— 悬浮窗内不能用系统 PopupMenu。
  */
 internal fun OverlayWindowController.moreView(
-    rest: List<FlowValidator.OverlayAction>,
+    rest: List<ScriptStore.OverlayAction>,
     flowKey: String,
     host: LinearLayout,
 ): ImageView = ImageView(themedContext).apply {

@@ -24,6 +24,13 @@ import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.Rect
 import org.opencv.imgcodecs.Imgcodecs
+import com.bettergi.pocket.scan.flows.runArtifactSteps
+import com.bettergi.pocket.scan.flows.runCharacterSteps
+import com.bettergi.pocket.scan.flows.runCharCalibrateSteps
+import com.bettergi.pocket.scan.flows.runEquipSteps
+import com.bettergi.pocket.scan.flows.runLockSteps
+import com.bettergi.pocket.scan.flows.runSetFilterCalibrateSteps
+import com.bettergi.pocket.scan.flows.runWeaponSteps
 
 /**
  * ★ Stage 3.3 拆分地图（2026-10-01）：ScanEngine 曾 8592 行，现按域拆出（均为**扩展函数**，
@@ -163,16 +170,21 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
 
     suspend fun run() {
         runPreamble()
-        // ★ simple 分支（spec §6 执行顺序）：迁移期仍走 JSON 步循环；阶段 3 起此处按 flowName
-        //   分派到五个原生入口（weapon/artifact/character/lock/equip，dict/vars 已由原生层携带）。
-        val steps = flowJson.getJSONArray("steps")
-        for (i in 0 until steps.length()) {
-            val step = steps.getJSONObject(i)
-            // `planSummary` 是结果契约的出口，不能被 stopRequested 跳过：flow 用
-            // `stopWhen planRemaining == 0` 正常收尾、以及回卷止扫/安全中止都会置该标志，
-            // 原先一 break 就连汇总都不出 ⇒「全部达成」与「什么都没报」在结果上同形。
-            if (vars.stopRequested && step.optString("do") != "planSummary") break
-            executeStep(step)
+        // ★ simple 分支（spec §1/§4，2026-10-07）：DSL 运行时已下线 —— 按 flowName 分派到
+        //   原生步序（weapon/artifact/character/lock/equip + 两条标定流；dict/vars/步序常量
+        //   已由 scan/flows/* 携带）。未知名字回落 artifact_scan（与 ScriptRunner 同口径）。
+        when (flowName) {
+            "weapon_scan" -> runWeaponSteps()
+            "artifact_scan" -> runArtifactSteps()
+            "character_scan" -> runCharacterSteps()
+            "artifact_lock" -> runLockSteps()
+            "auto_equip" -> runEquipSteps()
+            "char_calibrate" -> runCharCalibrateSteps()
+            "setfilter_calibrate" -> runSetFilterCalibrateSteps()
+            else -> {
+                Log.w(TAG, "unknown flow '$flowName'; default to artifact_scan")
+                runArtifactSteps()
+            }
         }
         runPostamble()
     }
@@ -307,52 +319,6 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   没有这一对，"这一轮慢"就分不清是代码慢还是中途被 EMUI 压了频。
         Log.i(TAG, "probe ${PerfProbe.summary()} | sigSamples=$tmSigSamples | ${CpuTelemetry.snapshot()}")
         listener.onFinished(reason)
-    }
-
-    internal suspend fun executeStep(step: JSONObject) {
-        // 只读探针：顶层步骤按类型累计（与 executeVisitStep 同法）。真分发在 executeStepInner。
-        val op = step.getString("do")
-        val t0 = System.nanoTime()
-        try {
-            executeStepInner(step, op)
-        } finally {
-            PerfProbe.addStep("top:$op", System.nanoTime() - t0)
-        }
-    }
-
-    private suspend fun executeStepInner(step: JSONObject, op: String) {
-        // §13：埋点打在原语分发层——加锁/装备/角色流程接 runner 后自动继承，无需各流程另写
-        RecognitionLog.log(logTag, RecognitionLog.Level.I, "步骤 $op")
-        when (op) {
-            "enterScreen" -> enterScreen(step)
-            "clicks" -> step.optJSONArray("chain")?.let { arr ->
-                for (i in 0 until arr.length()) clickChainEntry(arr.getString(i))
-            } ?: Log.w(TAG, "clicks: 缺 chain")
-            "dualStateButton" -> dualStateButton(step)
-            "filterReset" -> filterReset(step)
-            "assertScreen" -> assertScreen(step)
-            "readConstellation" -> readConstellation(step)
-            "readCount" -> readCount(step)
-            "pagedGrid" -> pagedGrid(step)
-            "dialog" -> dialog(step)
-            "ocrWithRetry" -> ocrWithRetry(step)
-            "navigate" -> navigate(step)
-            "foreach" -> foreach(step)
-            "rosterFind" -> rosterFind(step)
-            "setFilter" -> setFilter(step)
-            "clickSlotTab" -> clickSlotTab(step)
-            "planMatch" -> planMatch(step)
-            "planDone" -> planDone(step)
-            "planSummary" -> planSummary()
-            "exit" -> exitStep(step)
-            "verify" -> verify(step)
-            "emit" -> listener.onProgress("emit", vars.snapshot())
-            "notify" -> notifyStep(step)
-            else -> {
-                Log.w(TAG, "unknown step '$op', skipped")
-                RecognitionLog.log(logTag, RecognitionLog.Level.W, "未知原语 $op 已跳过")
-            }
-        }
     }
 
     /**

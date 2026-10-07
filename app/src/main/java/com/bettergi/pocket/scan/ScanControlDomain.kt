@@ -492,35 +492,6 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
 }
 
 /** 取当前帧网格缩略图（失败返回 null），用于到底判据（差异比例阈值）。 */
-internal suspend fun ScanEngine.foreach(step: JSONObject) {
-    val over = step.getString("over").removePrefix("$")
-    val items: List<JSONObject>? = when (over) {
-        "plan" -> vars.plan
-        else -> null
-    }
-    if (items.isNullOrEmpty()) {
-        Log.w(TAG, "foreach: '$over' not available or empty, skipped")
-        return
-    }
-    val asName = step.optString("as", "task")
-    val subSteps = step.getJSONArray("steps")
-    // ★ 逐目标循环必须**每项复位流程状态**（止扫计数/页间游标；GOOD 结果跨目标累加去重，
-    //   见 resetScanAccumulation 的 KDoc，2026-10-01 裁决）
-    val resetPerItem = step.optBoolean("resetScanPerItem", false)
-    // simple 分支（2026-10-07）：循环骨架抽到 [forEachPlanItem]（原生 auto_equip 复用）；
-    // JSON 子步包成 step 函数列表，行为逐位一致（每子步仍走 executeStep 的 top:op 埋点）。
-    val jsonSteps: List<suspend ScanEngine.(JSONObject) -> Unit> = (0 until subSteps.length()).map { i ->
-        { _item: JSONObject -> executeStep(subSteps.getJSONObject(i)) }
-    }
-    forEachPlanItem(items, asName, resetPerItem, jsonSteps)
-}
-
-/**
- * 逐目标循环骨架（simple 分支抽取，2026-10-07）：原 `foreach` 的循环体**一字未改**，
- * 仅把「子步序列」从 JSON 数组换成 step 函数列表 —— 原生 auto_equip 传入 Kotlin 步序
- * （每步自带 nativeStep 埋点），JSON 路径包 executeStep 委托。
- * abortItem/stopRequested 的逐步检查、 equipClicked 回读复核、状态映射与汇总全部同源。
- */
 internal suspend fun ScanEngine.forEachPlanItem(
     items: List<JSONObject>,
     asName: String,
@@ -845,48 +816,25 @@ internal suspend fun ScanEngine.ocrWithRetry(step: JSONObject) {
     Log.w(TAG, "ocrWithRetry failed after $maxRetries attempts: $rect")
 }
 
-/** #206 判重命中后 visit 尾部仍要跑的步：止扫登记（stopWhen）与入库/重复记账（emit）。 */
-private val TAIL_RUN_ALWAYS = setOf("stopWhen", "emit")
-
 /**
  * 原生 visit 体（simple 分支五流程原生化，2026-10-07）：每格一次调用。
- * - `col/row/idx` = 本格网格位置（idx = row*cols+col，与 JSON 路径 runVisit 同语义）；
- * - `prof` = 本页相位视图（与 JSON 路径的 pageProfile 同源）。
- * JSON 路径的 visit 数组与此等价：原生层把 visit 步序写成 Kotlin 体，参数取自常量（不再从 flow 文件读）。
+ * - `col/row/idx` = 本格网格位置（idx = row*cols+col，与原 JSON 路径 runVisit 同语义）；
+ * - `prof` = 本页相位视图（与原 JSON 路径的 pageProfile 同源）。
+ * ★ simple 阶段3：JSON visit 分发骨架（runVisit/TAIL_RUN_ALWAYS/executeVisitStep*）已随
+ *   DSL 运行时下线删除 —— visit 只剩原生体一条路。
  */
 internal typealias NativeVisitRunner =
     suspend ScanEngine.(col: Int, row: Int, idx: Int, prof: ScreenProfile) -> Unit
 
 /**
- * JSON / 原生两条 visit 路径的分派点（spec §7）：`pagedGridCore` 的 visit 消费处统一走它。
- * - visitJson ≠ null（迁移期 JSON flow）⇒ 照旧 [runVisit]（TAIL_RUN_ALWAYS 骨架留在其中）；
- * - 否则调原生 visitBody（每格一次，ctx 生命周期壳在 [runVisitBody]）。
- */
-internal suspend fun ScanEngine.runVisitJsonOrBody(
-    visitJson: JSONArray?,
-    visitBody: NativeVisitRunner?,
-    gridKey: String,
-    col: Int,
-    row: Int,
-    idx: Int,
-    prof: ScreenProfile,
-) {
-    if (visitJson != null) {
-        runVisit(visitJson, gridKey, col, row, idx, prof)
-    } else {
-        visitBody?.invoke(this, col, row, idx, prof)
-    }
-}
-
-/**
- * 原生 visit 的 **ctx 生命周期壳**（与 [runVisit] 的壳逐位同语义，spec §7）：
+ * 原生 visit 的 **ctx 生命周期壳**（与原 runVisit 的壳逐位同语义，spec §7）：
  * `visitSkipTail=false` 复位、ctx try/finally release、pipe 预扫步注入（原生常量步）。
- * ⚠️ JSON 路径的 TAIL_RUN_ALWAYS 骨架**留在 [runVisit] 不动**；原生体的尾部放行语义
- * 由各 visitBody 自行保证（如 character_scan 的 dedupeSkip 后用 `if (!visitSkipTail)` 守卫）。
+ * 尾部放行语义（判重跳过时 stopWhen/emit 照跑）由各 visitBody 自行保证
+ * （如 character_scan 的 dedupeSkip 后用 `if (!visitSkipTail)` 守卫）。
  *
- * @param pipeEmit pipe>0 时 job 携带的 emit 步（原生常量 JSON；与 JSON 路径 runVisit 的预扫同源）。
+ * @param pipeEmit pipe>0 时 job 携带的 emit 步（原生常量 JSON；null = 本 visit 无 emit 步）。
  * @param pipeStop pipe>0 时 job 携带的 stopWhen 步——**取 visit 里第一条 stopWhen**
- *   （与 JSON 路径 `firstOrNull { do == "stopWhen" }` 逐字对应，含其幂等重登记语义）。
+ *   （与原 JSON 路径 `firstOrNull { do == "stopWhen" }` 逐字对应，含其幂等重登记语义）。
  */
 internal suspend fun ScanEngine.runVisitBody(
     gridKey: String,
@@ -905,7 +853,7 @@ internal suspend fun ScanEngine.runVisitBody(
         pipeEmitStep = pipeEmit
         pipeStopStep = pipeStop
         pipeCellJobSent = false
-        // ★ ②safetyGuard 降频：跨格边界失效守卫缓存（与 runVisit 同源）
+        // ★ ②safetyGuard 降频：跨格边界失效守卫缓存（与原 runVisit 同源）
         safetyGuardCacheValid = false
         body(ctx)
     } finally {
@@ -913,52 +861,6 @@ internal suspend fun ScanEngine.runVisitBody(
     }
 }
 
-/** P3 exit：via 返回按钮（文本 "return[2913,41]"）→ 点击后终止流程。链名优先走 CHAIN_ANCHOR_PATHS 机读，字面点只是回落。 */
-internal suspend fun ScanEngine.runVisit(
-    visit: JSONArray,
-    gridKey: String,
-    col: Int,
-    row: Int,
-    index: Int,
-    prof: ScreenProfile,
-    /** §14 A3：snap 遍历——点击由外部固定循环完成，visit 内 click 步只做 settle + 抓帧。 */
-    snapMode: Boolean = false,
-) {
-    val ctx = ScanEngine.CellFrameContext()
-    try {
-        // ⚠️ 不在格子级响应 stopRequested：止扫语义是「本页后停」（pagedGrid 在页完成后检查）。
-        visitSkipTail = false
-        // ★ S2b：预扫本 visit 的 emit 步（pipe 模式 job 携带，emit 判据在消费者求值）；
-        //   每格复位「本格已 send job」标记（emit 步据此决定生产者/消费者执行）。
-        pipeEmitStep = (0 until visit.length()).map { visit.getJSONObject(it) }
-            .firstOrNull { it.optString("do") == "emit" }
-        pipeStopStep = (0 until visit.length()).map { visit.getJSONObject(it) }
-            .firstOrNull { it.optString("do") == "stopWhen" }
-        pipeCellJobSent = false
-        // ★ ②safetyGuard 降频：跨格边界失效守卫缓存（格间可能发生 BACK/导航/游戏事件，
-        //   退出确认框只有这些路径能弹；格内连续 clickAt 才允许复用）
-        safetyGuardCacheValid = false
-        for (i in 0 until visit.length()) {
-            val s = visit.getJSONObject(i)
-            if (visitSkipTail && s.optString("do") !in TAIL_RUN_ALWAYS) {
-                Log.i(TAG, "visit cell($col,$row) idx=$index 已判重 ⇒ 跳过 ${s.optString("do")}")
-                continue
-            }
-            executeVisitStep(s, gridKey, col, row, index, ctx, prof, snapMode)
-        }
-    } finally {
-        ctx.release()
-    }
-}
-
-/**
- * 单格共享帧上下文：click 的面板切换轮询收敛帧 → 后续 panel vote/parsePanel 复用。
- * 每件从 ~12 次抓帧降到 2~4 次（轮询 1~3 + card vote 1）。
- */
-/**
- * visit 的 `click` 步（do 原语，从 executeVisitStepInner 的 "click" 分支**原样**抽出，2026-10-07）。
- * JSON 路径（迁移期）与原生 visit 体共用；参数语义见函数体注释，一字未改。
- */
 internal suspend fun ScanEngine.visitClick(
     step: JSONObject,
     gridKey: String,
@@ -1332,102 +1234,6 @@ internal suspend fun ScanEngine.visitDedupeSkip(col: Int, row: Int, index: Int) 
         else -> Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：$key 新角色 ⇒ 全程照跑")
     }
 }
-
-internal suspend fun ScanEngine.executeVisitStep(
-    step: JSONObject,
-    gridKey: String,
-    col: Int,
-    row: Int,
-    index: Int,
-    ctx: ScanEngine.CellFrameContext,
-    prof: ScreenProfile,
-    snapMode: Boolean = false,
-) {
-    // 只读探针：按步骤类型累计耗时（一次跑完即得完整分解，见 PerfProbe）。
-    // 注意：函数名不带 Inner 的那个是"计时外壳"，真正的分发在 executeVisitStepInner。
-    val vop = step.getString("do")
-    val tStep = System.nanoTime()
-    try {
-        executeVisitStepInner(step, vop, gridKey, col, row, index, ctx, prof, snapMode)
-    } finally {
-        PerfProbe.addStep(vop, System.nanoTime() - tStep)
-    }
-}
-
-/**
- * 点格后等「面板名变了且连续两次读数一致」（签名路径不可用时的**旧就绪判据**）。
- *
- * ⚠️ 2026-09-10 的教训保留：判据不能是"名字一变就 break"——面板淡入**早期**名字先变、
- * 等级/属性还没渲染，立刻抓帧会读空。
- *
- * @return 是否**见过**名字变化。全程未变 ⇒ 极可能点击被游戏吞了（面板还停在上一件），
- *   调用方据此同坐标重发；这里不能顺手把它当成"这格本来就是同名件"放行 ——
- *   那正是"漏件且无痕"的形态（读到重复件 ⇒ 被去重吞掉）。
- */
-internal suspend fun ScanEngine.executeVisitStepInner(
-    step: JSONObject,
-    vop: String,
-    gridKey: String,
-    col: Int,
-    row: Int,
-    index: Int,
-    ctx: ScanEngine.CellFrameContext,
-    prof: ScreenProfile,
-    snapMode: Boolean,
-) {
-    // §13：D 级逐格埋点（默认关闭——一页 21 格会刷屏，由 RecognitionLog.verbose 开启）
-    RecognitionLog.log(logTag, RecognitionLog.Level.D, "格($col,$row) $vop")
-    when (vop) {
-            "ifMatch" -> {
-                // 计划匹配闸（artifact_lock）：P4 规则层注入 vars.currentTask；无计划则整段跳过
-                if (vars.currentTask == null) {
-                    Log.i(TAG, "ifMatch: no plan injected (vars.currentTask null), then skipped")
-                } else {
-                    // §15 P2：可选 when 布尔表达式（[Expr] 引擎，标识符查 exprVars）→ 不满足则跳过 then。
-                    // 例：when:"curLock == false" 仅对已解锁件执行加锁，避免盲 toggle 误解锁已锁件（数据腐蚀）。
-                    val whenExpr = step.optString("when", "")
-                    val pass = if (whenExpr.isNotEmpty()) {
-                        runCatchingCancellable { Expr.eval(whenExpr, exprVars()) }.getOrElse { e ->
-                            Log.w(TAG, "ifMatch when eval failed: '$whenExpr' ${e.message}")
-                            false
-                        }.also { if (!it) Log.d(TAG, "ifMatch when='$whenExpr' false, then skipped") }
-                    } else true
-                    if (pass) {
-                        val thenSteps = step.getJSONArray("then")
-                        for (i in 0 until thenSteps.length()) {
-                            executeVisitStep(thenSteps.getJSONObject(i), gridKey, col, row, index, ctx, prof, snapMode)
-                            if (vars.stopRequested) break
-                        }
-                    }
-                }
-            }
-            "vote" -> vote(step, gridKey, col, row, ctx, prof)
-            "click" -> visitClick(step, gridKey, col, row, index, ctx, prof, snapMode)
-            "parsePanel" -> visitParsePanel(step, gridKey, col, row, index, ctx, prof)
-            "dedupeSkip" -> visitDedupeSkip(col, row, index)
-            "navigate" -> {
-                navigate(step)
-                // §15 P0-1：有 leftMenu 时已在 navigate 内逐页读；无 leftMenu 才走 read 数组兜底
-                val menuLen = step.optJSONArray("leftMenu")?.length() ?: 0
-                if (menuLen == 0) readAfterNavigate(step)
-            }
-            "dialog" -> dialog(step)
-            "verify" -> verify(step)
-            "assertScreen" -> assertScreen(step)
-        "readConstellation" -> readConstellation(step)
-            "emit" -> visitEmit(step)
-            "stopWhen" -> visitStopWhen(step)
-            "notify" -> notifyStep(step)
-            // ★ 2026-09-18 单趟扫描：visit 层也要能逐格绑定计划项
-            //   （顶层分派有了 visit 层没加 ⇒ 真机全格 `unknown visit step 'planMatch', skipped`）
-            "planMatch" -> planMatch(step)
-            "planDone" -> planDone(step)
-            else -> {
-                Log.w(TAG, "unknown visit step '$vop', skipped")
-                RecognitionLog.log(logTag, RecognitionLog.Level.W, "未知 visit 步 $vop 已跳过")
-            }
-        }
-    }
 
 /**
  * 角色判重的**唯一口径**：本轮已入库的词典 key。

@@ -147,6 +147,12 @@ internal object EquipFlow {
  */
 internal suspend fun ScanEngine.runEquipScanNative() {
     runPreamble()
+    runEquipSteps()
+    runPostamble()
+}
+
+/** auto_equip 步序主体（ScanEngine.run() 按 flowName 分派用；foreach + 条件 exit）。 */
+internal suspend fun ScanEngine.runEquipSteps() {
     nativeStep("foreach") {
         val items = vars.plan
         if (items.isNullOrEmpty()) {
@@ -164,7 +170,6 @@ internal suspend fun ScanEngine.runEquipScanNative() {
     if (!vars.stopRequested) {
         nativeStep("exit") { exitStep(EquipFlow.EXIT) }
     }
-    runPostamble()
 }
 
 /**

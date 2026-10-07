@@ -11,8 +11,7 @@ import android.widget.TextView
 import com.bettergi.pocket.PendingHandoff
 import com.bettergi.pocket.R
 import com.bettergi.pocket.bridge.OverlayEntryContract
-import com.bettergi.pocket.dsl.ScriptIcons
-import com.bettergi.pocket.dsl.ScriptStore
+import com.bettergi.pocket.overlay.ScriptIcons
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.notice.NoticeCenter
 import com.bettergi.pocket.notice.NoticeRouter
@@ -91,25 +90,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     internal val prefs by lazy { getSharedPreferences(PREFS, MODE_PRIVATE) }
-
-    /** 打开导入器（SAF，本地文件，不需要网络/存储权限）。 */
-    internal val importLauncher = registerForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
-    ) { uri ->
-        if (uri == null) return@registerForActivityResult
-        val text = runCatching {
-            contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
-        }.getOrNull()
-        if (text.isNullOrBlank()) {
-            NoticeCenter.error("读取失败")
-            return@registerForActivityResult
-        }
-        val key = runCatching { org.json.JSONObject(text).optString("flow", "") }.getOrDefault("")
-            .ifBlank { uri.lastPathSegment?.substringAfterLast('/')?.removeSuffix(".json") ?: "imported" }
-        val (ok, msg) = com.bettergi.pocket.dsl.ScriptStore.importFlow(this, key, text)
-        NoticeCenter.post(if (ok) NoticeCenter.Level.INFO else NoticeCenter.Level.ERROR, msg)
-        if (ok) renderAll()
-    }
 
     /** 输入文件（GOOD / 配装计划）选择器——SAF 只能由 Activity 发起，所以悬浮窗只能"拉起本页再选"。 */
     internal val goodImportLauncher = registerForActivityResult(

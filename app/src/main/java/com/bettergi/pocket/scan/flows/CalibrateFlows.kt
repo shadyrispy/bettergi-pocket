@@ -44,6 +44,12 @@ internal object CalibrateFlows {
  */
 internal suspend fun ScanEngine.runCharCalibrateNative() {
     runPreamble(returnHomeOverride = false)
+    runCharCalibrateSteps()
+    runPostamble()
+}
+
+/** char_calibrate 步序主体（ScanEngine.run() 按 flowName 分派用；归位由 flowJson.returnHome=false 承载）。 */
+internal suspend fun ScanEngine.runCharCalibrateSteps() {
     nativeStep("pagedGrid") {
         pagedGridNative("char_popup") { col, row, idx, prof ->
             runVisitBody("char_popup", col, row, idx, prof) { _ctx ->
@@ -51,7 +57,6 @@ internal suspend fun ScanEngine.runCharCalibrateNative() {
             }
         }
     }
-    runPostamble()
 }
 
 /**
@@ -60,7 +65,12 @@ internal suspend fun ScanEngine.runCharCalibrateNative() {
  */
 internal suspend fun ScanEngine.runSetFilterCalibrateNative() {
     runPreamble(returnHomeOverride = true)
+    runSetFilterCalibrateSteps()
+    runPostamble()
+}
+
+/** setfilter_calibrate 步序主体（ScanEngine.run() 按 flowName 分派用）。 */
+internal suspend fun ScanEngine.runSetFilterCalibrateSteps() {
     nativeStep("enterScreen") { enterScreen(CalibrateFlows.SETFILTER_ENTER) }
     nativeStep("setFilter") { setFilter(CalibrateFlows.SETFILTER_STEP) }
-    runPostamble()
 }

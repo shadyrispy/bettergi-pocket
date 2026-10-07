@@ -11,6 +11,9 @@ import java.io.File
  * DSL 资产完整性守门（防复发：2026-09-02 曾因 assets/dsl 文件静默丢失
  * 导致 APK 缺 profiles.json、真机报 error: dsl/profiles.json）。
  *
+ * ★ simple 阶段3/4（spec §4）：flows 目录下的 flow JSON 随 DSL 运行时下线，本类收缩为
+ * **profiles 完整性小断言**（标定坐标 + 运行时词典/档位表仍在 assets，必须守）。
+ *
  * testDebugUnitTest 挂在 assembleDebug 前，文件缺失/损坏时构建直接红。
  */
 class DslAssetsIntegrityTest {
@@ -28,10 +31,11 @@ class DslAssetsIntegrityTest {
 
     private fun requiredFiles() = listOf(
         "profiles.json",
-        "flows/artifact_scan.json",
         // 单一名称词典（由 dsl/scripts/gen_mappings.py 一步生成并同步）：GoodNames 运行时唯一依赖。
         // fix45 教训：文件放在 app/assets/（无 src/main 前缀）不进 APK → 词典全部 unavailable。
         "tools/mappings.json",
+        // 副词条档位表（flow dict.subStats="rollTable" 依赖）
+        "tools/rollTable.json",
     )
 
     /**
@@ -78,13 +82,6 @@ class DslAssetsIntegrityTest {
                 assertTrue("profiles.json missing '$path'", node != null)
             }
         }
-    }
-
-    @Test
-    fun `flow json references supported profile`() {
-        val flow = JSONObject(File(assetsDir(), "flows/artifact_scan.json").readText())
-        assertTrue(flow.getString("profile") == "android_3200x1440")
-        assertTrue(flow.getJSONArray("steps").length() > 0)
     }
 
     @Test

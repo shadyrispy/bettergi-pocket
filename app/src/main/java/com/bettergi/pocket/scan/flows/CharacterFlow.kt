@@ -113,6 +113,12 @@ internal object CharacterFlow {
  */
 internal suspend fun ScanEngine.runCharacterScanNative() {
     runPreamble()
+    runCharacterSteps()
+    runPostamble()
+}
+
+/** character_scan 步序主体（ScanEngine.run() 按 flowName 分派用）。 */
+internal suspend fun ScanEngine.runCharacterSteps() {
     nativeStep("enterScreen") { enterScreen(CharacterFlow.ENTER_CHAR) }
     nativeStep("pagedGrid") {
         pagedGridNative(CharacterFlow.GRID, scrollToTop = true) { col, row, idx, prof ->
@@ -148,5 +154,4 @@ internal suspend fun ScanEngine.runCharacterScanNative() {
             }
         }
     }
-    runPostamble()
 }

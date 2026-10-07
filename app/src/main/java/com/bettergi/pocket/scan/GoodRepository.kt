@@ -110,14 +110,14 @@ object GoodRepository {
 
     /** 这条脚本是否需要用户提供输入（声明了 `import` 动作 且 `vars` 要数据）。 */
     fun needsInput(context: Context, flowKey: String): Boolean =
-        GoodPlan.needsInput(flowJson(context, flowKey))
+        GoodPlan.needsInput(flowJson(flowKey))
 
     /**
      * 取出能喂给该脚本的输入。
      * @return null = 没有文件 / 该脚本不需要输入 / 这份文件喂不了它 —— 三者都要求调用方**给出提示**，不要静默开跑。
      */
     fun planFor(context: Context, flowKey: String): List<JSONObject>? {
-        val demand = GoodPlan.demandOf(flowJson(context, flowKey))
+        val demand = GoodPlan.demandOf(flowJson(flowKey))
         if (!demand.needsInput) return null
         return GoodPlan.pick(read(context), demand)
     }
@@ -130,7 +130,7 @@ object GoodRepository {
      * 用户在**已经选过 GOOD 导出**却跑 `auto_equip` 时会被这句误导（2026-09-18 真机实测）。
      */
     fun inputProblem(context: Context, flowKey: String): String? {
-        val flow = flowJson(context, flowKey) ?: return null
+        val flow = flowJson(flowKey) ?: return null
         val demand = GoodPlan.demandOf(flow)
         if (!GoodPlan.needsInput(flow)) return null
         val label = labelOf(context, flowKey)
@@ -141,18 +141,28 @@ object GoodRepository {
         return "「$label」用不了这份输入：$why"
     }
 
-    /** 脚本显示名（`ui.label`），拿不到就退回 flowKey —— 给提醒文案用。 */
-    fun labelOf(context: Context, flowKey: String): String =
-        runCatching { org.json.JSONObject(
-            FlowSource.open(context.assets, "dsl/flows/$flowKey.json").bufferedReader().use { it.readText() },
-        ).optJSONObject("ui")?.optString("label", "") }
-            .getOrNull()?.takeIf { it.isNotBlank() } ?: flowKey
+    /**
+     * ★ simple 阶段3（spec §1/§4）：flow JSON 资产已下线 —— 各流程的 `vars`/`ui` 声明由
+     * **原生种子**承载（逐字平移原 artifact_lock.json / auto_equip.json 的对应块），
+     * 「GOOD 输入通道」的判据逻辑（GoodPlan.demandOf / needsInput / whyNot）与调用面**零改动**。
+     * 其余流程（纯扫描/标定）无种子 ⇒ 不需要输入（与原 JSON 缺 import 动作时同形）。
+     */
+    private val NATIVE_FLOW_SEEDS: Map<String, String> = mapOf(
+        "artifact_lock" to
+            "{\"vars\":{\"lock\":\"list<GoodArtifact>\",\"unlock\":\"list<GoodArtifact>\"}," +
+            "\"ui\":{\"label\":\"圣遗物锁定\",\"icon\":\"lock\",\"actions\":[{\"kind\":\"import\",\"label\":\"导入\"},{\"kind\":\"run\",\"label\":\"开始\"}]}}",
+        "auto_equip" to
+            "{\"vars\":{\"equip\":\"list<{artifact:GoodArtifact, location:string}>\"}," +
+            "\"ui\":{\"label\":\"自动装备\",\"icon\":\"equip\",\"actions\":[{\"kind\":\"import\",\"label\":\"导入\"},{\"kind\":\"run\",\"label\":\"开始\"}]}}",
+    )
 
-    private fun flowJson(context: Context, flowKey: String): JSONObject? = runCatching {
-        JSONObject(
-            FlowSource.open(context.assets, "dsl/flows/$flowKey.json").bufferedReader().use { it.readText() },
-        )
-    }.getOrNull()
+    /** 脚本显示名：种子 `ui.label` → 退回 ScriptStore 清单 → flowKey（给提醒文案用）。 */
+    fun labelOf(context: Context, flowKey: String): String =
+        flowJson(flowKey)?.optJSONObject("ui")?.optString("label", "")?.takeIf { it.isNotBlank() }
+            ?: flowKey
+
+    private fun flowJson(flowKey: String): JSONObject? =
+        NATIVE_FLOW_SEEDS[flowKey]?.let { runCatching { JSONObject(it) }.getOrNull() }
 
     /** 至少含一个可识别的清单键（形态判断；合法性另见 `validateArtifacts`）。 */
     private fun looksLikeData(json: JSONObject): Boolean =
