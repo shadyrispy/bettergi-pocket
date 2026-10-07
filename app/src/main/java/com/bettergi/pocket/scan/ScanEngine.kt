@@ -180,8 +180,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     /**
      * run() 的**前半段**（simple 分支抽出，一字未改）：计时/观察计数复位、PerfProbe.reset、
      * §15 流程前置归位（returnHome）。原生入口（runWeaponScanNative 等）与 JSON 路径共用。
+     *
+     * @param returnHomeOverride 原生流程的显式归位声明（null = 读 flowJson.returnHome，JSON 路径）。
+     *   标定流 char_calibrate 原 flow 显式 `returnHome:false`、setfilter_calibrate 未声明
+     *   （真机启动路径默认 true）—— 原生层以此参数平移该语义。
      */
-    internal suspend fun runPreamble() {
+    internal suspend fun runPreamble(returnHomeOverride: Boolean? = null) {
         tmStartMs = clock()
         tmCells = 0; tmPages = 0; tmNavMs = 0; tmPanelMs = 0; tmSettleMs = 0
         // ★ 2026-09-24：观察类计数在此复位。它们的 KDoc 一直写着"随 run 重置"，但此前**没有任何复位点**
@@ -203,7 +207,8 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         // §15 流程前置归位：GOODScanner `GenshinGameController::return_to_main_ui` 同思想
         // （循环点返回直至主界面），各流程启动前统一回到 game_home，避免残留弹窗/界面错位。
         // 默认 false：仅 ScriptRunner 真机启动路径显式开启（干跑单测不注入 → 不产生归位点击/取帧）
-        if (flowJson.optBoolean("returnHome", false)) {
+        val returnHome = returnHomeOverride ?: flowJson.optBoolean("returnHome", false)
+        if (returnHome) {
             val tHome = System.nanoTime()
             try {
                 returnToHome()

@@ -507,6 +507,26 @@ internal suspend fun ScanEngine.foreach(step: JSONObject) {
     // ★ 逐目标循环必须**每项复位流程状态**（止扫计数/页间游标；GOOD 结果跨目标累加去重，
     //   见 resetScanAccumulation 的 KDoc，2026-10-01 裁决）
     val resetPerItem = step.optBoolean("resetScanPerItem", false)
+    // simple 分支（2026-10-07）：循环骨架抽到 [forEachPlanItem]（原生 auto_equip 复用）；
+    // JSON 子步包成 step 函数列表，行为逐位一致（每子步仍走 executeStep 的 top:op 埋点）。
+    val jsonSteps: List<suspend ScanEngine.(JSONObject) -> Unit> = (0 until subSteps.length()).map { i ->
+        { _item: JSONObject -> executeStep(subSteps.getJSONObject(i)) }
+    }
+    forEachPlanItem(items, asName, resetPerItem, jsonSteps)
+}
+
+/**
+ * 逐目标循环骨架（simple 分支抽取，2026-10-07）：原 `foreach` 的循环体**一字未改**，
+ * 仅把「子步序列」从 JSON 数组换成 step 函数列表 —— 原生 auto_equip 传入 Kotlin 步序
+ * （每步自带 nativeStep 埋点），JSON 路径包 executeStep 委托。
+ * abortItem/stopRequested 的逐步检查、 equipClicked 回读复核、状态映射与汇总全部同源。
+ */
+internal suspend fun ScanEngine.forEachPlanItem(
+    items: List<JSONObject>,
+    asName: String,
+    resetPerItem: Boolean,
+    steps: List<suspend ScanEngine.(JSONObject) -> Unit>,
+) {
     manageResults.clear()
     for ((idx, item) in items.withIndex()) {
         if (resetPerItem) resetScanAccumulation()
@@ -528,8 +548,8 @@ internal suspend fun ScanEngine.foreach(step: JSONObject) {
         var itemAborted = false
         val pagesAtItemStart = tmPages
         Log.i(TAG, "foreach iter $asName[$idx/${items.size}]: $label")
-        for (i in 0 until subSteps.length()) {
-            executeStep(subSteps.getJSONObject(i))
+        for (stepFn in steps) {
+            stepFn(item)
             // ★ #136：某一步断言"我还在不在该界面上"失败 ⇒ 本项余下步骤**一步都不再执行**
             //   （尤其不能再跑 pagedGrid：它只会按坐标点格子，不知道屏上是什么）。
             if (vars.abortItem) {
@@ -1289,6 +1309,30 @@ internal suspend fun ScanEngine.visitStopWhen(step: JSONObject) {
     }
 }
 
+/**
+ * visit 的 `dedupeSkip` 步（do 原语，从 executeVisitStepInner 的 "dedupeSkip" 分支**原样**抽出）。
+ * #206：属性页点头像 + 读名是必经（用户 2026-10-03 定），本步只裁命之座/天赋两跳。
+ * 判重口径与 emitCharacter 完全同源：按词典 key，key==null（未解析出身份）不介入
+ * （宁可多扫，CharDupJudge 的误杀教训）。跳过仍放行 stopWhen/emit ⇒
+ * 回卷止扫记账与「重复不入库」语义不变（原生体里后续步用 `if (!visitSkipTail)` 守卫）。
+ */
+internal suspend fun ScanEngine.visitDedupeSkip(col: Int, row: Int, index: Int) {
+    // #206：属性页点头像 + 读名是必经（用户 2026-10-03 定），本步只裁命之座/天赋两跳。
+    // 判重口径与 emitCharacter 完全同源：按词典 key，key==null（未解析出身份）不介入
+    // （宁可多扫，CharDupJudge 的误杀教训）。跳过仍放行 stopWhen/emit ⇒
+    // 回卷止扫记账与「重复不入库」语义不变。
+    val key = charKey
+    when {
+        key == null ->
+            Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：身份未解析 ⇒ 不跳过")
+        characterAlreadySeen(key) -> {
+            visitSkipTail = true
+            Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：$key 已入库 ⇒ 跳过命之座/天赋")
+        }
+        else -> Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：$key 新角色 ⇒ 全程照跑")
+    }
+}
+
 internal suspend fun ScanEngine.executeVisitStep(
     step: JSONObject,
     gridKey: String,
@@ -1360,22 +1404,7 @@ internal suspend fun ScanEngine.executeVisitStepInner(
             "vote" -> vote(step, gridKey, col, row, ctx, prof)
             "click" -> visitClick(step, gridKey, col, row, index, ctx, prof, snapMode)
             "parsePanel" -> visitParsePanel(step, gridKey, col, row, index, ctx, prof)
-            "dedupeSkip" -> {
-                // #206：属性页点头像 + 读名是必经（用户 2026-10-03 定），本步只裁命之座/天赋两跳。
-                // 判重口径与 emitCharacter 完全同源：按词典 key，key==null（未解析出身份）不介入
-                // （宁可多扫，CharDupJudge 的误杀教训）。跳过仍放行 stopWhen/emit ⇒
-                // 回卷止扫记账与「重复不入库」语义不变。
-                val key = charKey
-                when {
-                    key == null ->
-                        Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：身份未解析 ⇒ 不跳过")
-                    characterAlreadySeen(key) -> {
-                        visitSkipTail = true
-                        Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：$key 已入库 ⇒ 跳过命之座/天赋")
-                    }
-                    else -> Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：$key 新角色 ⇒ 全程照跑")
-                }
-            }
+            "dedupeSkip" -> visitDedupeSkip(col, row, index)
             "navigate" -> {
                 navigate(step)
                 // §15 P0-1：有 leftMenu 时已在 navigate 内逐页读；无 leftMenu 才走 read 数组兜底
