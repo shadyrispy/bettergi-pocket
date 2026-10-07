@@ -112,3 +112,21 @@ P0 筛选三态（部分命中⇒清筛选改扫全量）。P1 锁图标歧义�
 3. 删 DSL 运行时与测试 → 默认闸门全绿（预计 77→约 60 类）。
 4. BS：pipe=0 全流程对账（与 10-03 基线：63a/63w/14c）→ pipe=1 A/B（正反两序 + CpuTelemetry）。
 5. 真机（小米/华为任一）对账 → main 合并。
+
+## 7. pagedGridCore 抽取与 weapon visitBody（2026-10-07 勘察补遗，实施按此）
+
+**pagedGrid 签名改造（两步委托，主体零改动）**：
+- 现 `pagedGrid(step: JSONObject)` 拆成 `pagedGridCore(gridKey, pageSkipExpr, visitJson?, visitBody?)`
+  —— 主体（页循环/翻页/相位/回读/行级闭环/锚定/页级冻结）原样；visit 的两处消费
+  （主循环 :467 + 空读回读 :731）改走 `runVisitJsonOrBody`：visitJson≠null 走 runVisit(JSON)，
+  否则 `runVisitBody(col,row,idx)` 调 visitBody。
+- `pagedGrid(step)` 保留为 JSON 委托（迁移期其它流程用）；`pagedGridNative(gridKey, pageSkip, visitBody)`
+  为原生入口。
+
+**weapon visitBody（原生体，stopWhen 两个语义入口需从 stopWhen(step) 抽出）**：
+- `stopWhenRegisterDuplicateStreak(streak, dupPageConfirm)` —— duplicateStreak 分支直提；
+- `stopWhenRarityAtMost2()` —— expr "rarity<=2" 的原生式：哨兵守卫（rarity<0 跳过）+
+  `vars.rarity in 0..2` ⇒ stopRequested=true/stopReason="stopWhen"（scope 默认 page 立即停；
+  "Stop+flush" 的 action 字段在引擎里**无消费者**（flush 就是扫描结束的自然导出））。
+- vote(locked)/vote(rarity)/parsePanel/emit 四步的原生调用式见 §3.1；其中 vote 全部留在
+  生产者（读闸门整帧，无 origin 需求——S2a 并集是为未来搬迁预铺）。
