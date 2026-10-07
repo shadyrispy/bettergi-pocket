@@ -3,6 +3,7 @@ package com.bettergi.pocket.scan
 import com.bettergi.pocket.capture.FrameSource
 import com.bettergi.pocket.capture.FrameTimeoutException
 import com.bettergi.pocket.recognition.name.GoodNames
+import com.bettergi.pocket.scan.flows.runWeaponScanNative
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -387,11 +388,12 @@ class ScanEngineDryRunTest {
         // `dialogs.filterPanel.anchorTitle = [179,50,419,104]`（3200 基坐标；calibrate(3200,1440) 后不变）。
         // 不给这条 ⇒ `panelOpen()` 恒 false ⇒ 复位链走「BACK → 重试 → 放弃」，重置/确认都不会点。
         base[FrameRect(179, 50, 419, 104)] = "圣遗物筛选"
-        // assertScreen 的标题条（profiles.json 3200 基坐标 `screens._common.titleBar` = [157,21,1084,136]）：
+        // assertScreen 的标题条（profiles.json 3200 基坐标 `screens._common.titleBar` = [145,21,1084,136]；
+        // ⚠️ 1d0629a 把 3200 titleBar 左沿 157→145，干跑夹具随之同步——否则锚点 OCR 全读空）：
         // 供「背包/圣遗物」⇒ artifact_scan 的标题锚点 / `assertScreen(expect="圣遗物")` 走通过路径。
         // ⚠️ **与 count 一起受 `withCountLine` 控制**：「anchor 失败应中止」那条用例靠"锚点必失败"验证
         //    abort 路径，而 artifact_scan 的**第一段锚点已改为标题条**（原为 count）⇒ 不喂它才会失败。
-        if (withCountLine) base[FrameRect(157, 21, 1084, 136)] = "背包/圣遗物"
+        if (withCountLine) base[FrameRect(145, 21, 1084, 136)] = "背包/圣遗物"
         return base
     }
 
@@ -402,7 +404,7 @@ class ScanEngineDryRunTest {
      *   · count [2603,60,2846,98]：readCount 走 readNumber 夹具（ocrNumber），不消费本行 —— 仅备查。
      */
     private fun weaponLines(): Map<FrameRect, String> = mapOf(
-        FrameRect(157, 21, 1084, 136) to "背包/武器",
+        FrameRect(145, 21, 1084, 136) to "背包/武器",
         FrameRect(2603, 60, 2846, 98) to "武器 ${CELLS_PER_PAGE}/${CELLS_PER_PAGE}",
     )
 
@@ -450,6 +452,16 @@ class ScanEngineDryRunTest {
          * 失败无法归因（实际就误读过一次，见 design-docs/scan-pipeline-20261006.md §13.2）。
          */
         forceCrop: Boolean = false,
+        /**
+         * ★ simple 分支（spec §5）：非空 = 直调**原生流程入口**（不再走 engine.run()+flow JSON）。
+         * 取值："weapon" / "artifact" / "character" / "lock" / "equip"；此时 flowFile 只用于
+         * 裁片原点的面板键推导（JSON 资产删除后改为 nativePanelKey）。
+         */
+        nativeFlow: String? = null,
+        /** 原生驱动时的面板键（裁片原点推导用）；null = 从 flowFile/nativeFlow 推。 */
+        nativePanelKey: String? = null,
+        /** 原生 artifact 的 pageSkip 注入（对应 JSON 路径的 flowTransformer 注入 pageSkip）。 */
+        nativePageSkipExpr: String? = null,
     ): RunResult {
         // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
@@ -460,7 +472,7 @@ class ScanEngineDryRunTest {
         TimingOverrides.entryIdempotent = false
         val profile = ScreenProfile(JSONObject(File(assetsDir(), "profiles.json").readText()))
         profile.calibrate(3200, 1440)
-        val flow = JSONObject(File(assetsDir(), flowFile).readText())
+        val flow = if (nativeFlow != null) JSONObject() else JSONObject(File(assetsDir(), flowFile).readText())
         flowTransformer?.invoke(flow)
         // 单一名称词典（角色/武器/套装/单件/词条/部位）——与生产同路径
         // 词典解析失败**不许吞成 null**：那会让整批干跑静默换一条代码路径
@@ -473,7 +485,11 @@ class ScanEngineDryRunTest {
             //   cropRect 的 left/top 作 origin 平移 ROI，夹具另算一份就会和实现对不上。
             cropOrigin = run {
                 if (pipeDepth == 0 && !forceCrop) return@run 0 to 0
-                val panelKey = if (flowFile.contains("weapon")) "weapon_backpack" else "artifact_backpack"
+                val panelKey = nativePanelKey ?: when {
+                    nativeFlow == "weapon" -> "weapon_backpack"
+                    flowFile.contains("weapon") -> "weapon_backpack"
+                    else -> "artifact_backpack"
+                }
                 profile.panelCropRect(panelKey)?.let { it.left to it.top } ?: (0 to 0)
             },
         )
@@ -507,7 +523,19 @@ class ScanEngineDryRunTest {
         TimingOverrides.pipeDepth = pipeDepth
         if (pipeDepth > 0 || forceCrop) TimingOverrides.panelCrop = true
         try {
-            runBlocking { withTimeout(ENGINE_RUN_TIMEOUT_MS) { engine.run() } }
+            runBlocking {
+                withTimeout(ENGINE_RUN_TIMEOUT_MS) {
+                    if (nativeFlow != null) {
+                        // ★ simple 分支（spec §5）：原生驱动——合成帧 + 原生流程入口直调。
+                        when (nativeFlow) {
+                            "weapon" -> engine.runWeaponScanNative()
+                            else -> error("未支持的原生驱动: $nativeFlow")
+                        }
+                    } else {
+                        engine.run()
+                    }
+                }
+            }
         } finally {
             TimingOverrides.pipeDepth = prevPipe
             TimingOverrides.panelCrop = prevCrop
@@ -959,7 +987,8 @@ class ScanEngineDryRunTest {
     fun `weapon scan finishes without fake total mismatch`() {
         val (engine, h) = runEngine(
             listOf(Page(syntheticFrame(5), weaponLines(), CELLS_PER_PAGE)),
-            flowFile = "flows/weapon_scan.json",
+            // ★ simple 分支：weapon 原生化后干跑直调 runWeaponScanNative（spec §5，17 场景语义逐条保留）
+            nativeFlow = "weapon",
             weaponNames = weaponDictNames(),
         )
         assertEquals("武器应整页入库", CELLS_PER_PAGE, engine.resultsWeapons.size)

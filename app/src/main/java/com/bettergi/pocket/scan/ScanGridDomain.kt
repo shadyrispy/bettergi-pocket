@@ -49,9 +49,42 @@ import com.bettergi.pocket.capture.FrameTimeoutException
 internal fun pageWatchdogFired(prevProgressAt: Long, nowAt: Long, budgetMs: Long): Boolean =
     nowAt - prevProgressAt > budgetMs
 
+/**
+ * JSON flow 的 pagedGrid（迁移期保留）：把 step JSON 的 grid/visit/pageSkip/scrollToTop
+ * 解包后委托给 [pagedGridCore]（spec §7：两步委托，主体零改动）。
+ */
 internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
-    val gridKey = step.getString("grid")
-    val visit = step.getJSONArray("visit")
+    pagedGridCore(
+        gridKey = step.getString("grid"),
+        scrollToTop = step.optBoolean("scrollToTop", false),
+        pageSkipExpr = step.optJSONObject("pageSkip")?.optString("expr"),
+        visitJson = step.optJSONArray("visit"),
+        visitBody = null,
+    )
+}
+
+/** 原生流程的 pagedGrid 入口（spec §2/§7）：visit 体 = Kotlin lambda，参数不再从 flow 文件读。 */
+internal suspend fun ScanEngine.pagedGridNative(
+    gridKey: String,
+    scrollToTop: Boolean = false,
+    pageSkipExpr: String? = null,
+    visitBody: NativeVisitRunner,
+) {
+    pagedGridCore(gridKey, scrollToTop, pageSkipExpr, visitJson = null, visitBody = visitBody)
+}
+
+/**
+ * pagedGrid 主体（**原样**，spec §7）：页循环/翻页/相位/回读/行级闭环/锚定/页级冻结一字未改；
+ * 仅 visit 的消费点（主循环 / 空读回读 / 定点重访 / snap 遍历）改走 [runVisitJsonOrBody]——
+ * visitJson ≠ null（迁移期 JSON flow）走 runVisit(JSON)，否则逐格调原生 visitBody。
+ */
+internal suspend fun ScanEngine.pagedGridCore(
+    gridKey: String,
+    scrollToTop: Boolean,
+    pageSkipExpr: String?,
+    visitJson: JSONArray?,
+    visitBody: NativeVisitRunner?,
+) {
     val rawGrid = profile.rawObject("grids.$gridKey")
     if (rawGrid == null) {
         Log.w(TAG, "pagedGrid: grids.$gridKey missing, skipped")
@@ -60,7 +93,7 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
     val advance = rawGrid.getJSONObject("advance")
     // §14 A1/A3：两种推进模式——snap（click-to-snap 零滑动，仅选择界面）/ swipe
     if (advance.optString("type") == "snap") {
-        snapTraverse(gridKey, visit, advance, step)
+        snapTraverseJsonOrBody(gridKey, visitJson, visitBody, advance)
         return
     }
     val cols = rawGrid.optInt("cols", -1)
@@ -71,7 +104,8 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
     }
     // §14 A4 pageSkip：按页快筛（末格等级已低于目标最高等级 → 整页跳过，仍继续翻页）。
     // flow 表达式含 max(targets.level) 函数调用，Expr 仅支持变量/比较 → 引擎预计算后文本替换。
-    val pageSkipExpr = step.optJSONObject("pageSkip")?.optString("expr")
+    // （spec §7：pageSkipExpr 由调用方传入——JSON 路径取 step.pageSkip.expr，原生路径取常量。）
+    val pageSkipExprPrep = pageSkipExpr
         // ⚠️ 2026-09-18：`targets` 是旧拼写、`plan` 是新拼写，**两种都认**（跨版本 flow 兼容）。
         ?.replace("max(targets.level)", "targetMaxLevel")
         ?.replace("max(plan.level)", "targetMaxLevel")
@@ -112,7 +146,7 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
     var pageProfile = profile
     // p0 基准：清上轮残留（GridAlign 单例跨扫描持久），首帧顶对齐建立（见下方 beforeFrame）
     // §16.2 安全回顶：进背包连续上滑到顶（避 EMUI 节流：每轮单次 swipe + awaitGridStable 吸收）
-    if (step.optBoolean("scrollToTop", false)) {
+    if (scrollToTop) {
         // 背包列表跨会话残留 → 先滚到顶。此处要求「连续 2 次未动」才认定到顶（双保险）。
         val tTop = System.nanoTime()
         try {
@@ -166,9 +200,9 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
     while (true) {
         if (vars.stopRequested) break
         // §14 A4 pageSkip 命中则整页跳过（仍继续翻页，避免提前终止漏掉后续页）
-        val skip = pageSkipExpr != null && pageMinLevel != null && runCatchingCancellable {
+        val skip = pageSkipExprPrep != null && pageMinLevel != null && runCatchingCancellable {
             Expr.eval(
-                pageSkipExpr,
+                pageSkipExprPrep,
                 mapOf(
                     "pageMinLevel" to pageMinLevel!!,
                     "targetMinRarity" to (minTargetRarity() ?: 0),
@@ -496,7 +530,7 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                         curCellRow = row
                         curCellCol = col
                         curCellIdx = idx
-                        runVisit(visit, gridKey, col, row, idx, pageProfile)
+                        runVisitJsonOrBody(visitJson, visitBody, gridKey, col, row, idx, pageProfile)
                     }
                     pageKeys += (lastCellKey ?: "")
                     pageIdentities += (lastCellIdentity ?: "")
@@ -787,7 +821,7 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                     curCellRow = row
                     curCellCol = col
                     curCellIdx = i
-                    runVisit(visit, gridKey, col, row, i, pageProfile)
+                    runVisitJsonOrBody(visitJson, visitBody, gridKey, col, row, i, pageProfile)
                     // ★ S2b：回读也走流水线（job 携带）⇒ 逐格 join 后再读 lastCellKey
                     if (TimingOverrides.pipeDepth > 0) pipeJoinPage()
                     curCellIdx = -1
@@ -920,7 +954,7 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                         "pagedGrid[$gridKey] 相邻重复指纹 ${failed.size} 处 idx=$failed" +
                             " ⇒ 定点重访（不退行、不整页重扫）",
                     )
-                    val gained = revisitFailedCells(visit, gridKey, pageProfile, cols, failed, pageKeys, pageIdentities)
+                    val gained = revisitFailedCells(visitJson, visitBody, gridKey, pageProfile, cols, failed, pageKeys, pageIdentities)
                     dupRevisitRecovered += gained
                     Log.w(TAG, "  → 定点重访完成：救回 $gained 件（累计 $dupRevisitRecovered/$dupRevisits）")
                 }

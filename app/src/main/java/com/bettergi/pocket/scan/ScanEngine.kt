@@ -162,6 +162,26 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     }
 
     suspend fun run() {
+        runPreamble()
+        // ★ simple 分支（spec §6 执行顺序）：迁移期仍走 JSON 步循环；阶段 3 起此处按 flowName
+        //   分派到五个原生入口（weapon/artifact/character/lock/equip，dict/vars 已由原生层携带）。
+        val steps = flowJson.getJSONArray("steps")
+        for (i in 0 until steps.length()) {
+            val step = steps.getJSONObject(i)
+            // `planSummary` 是结果契约的出口，不能被 stopRequested 跳过：flow 用
+            // `stopWhen planRemaining == 0` 正常收尾、以及回卷止扫/安全中止都会置该标志，
+            // 原先一 break 就连汇总都不出 ⇒「全部达成」与「什么都没报」在结果上同形。
+            if (vars.stopRequested && step.optString("do") != "planSummary") break
+            executeStep(step)
+        }
+        runPostamble()
+    }
+
+    /**
+     * run() 的**前半段**（simple 分支抽出，一字未改）：计时/观察计数复位、PerfProbe.reset、
+     * §15 流程前置归位（returnHome）。原生入口（runWeaponScanNative 等）与 JSON 路径共用。
+     */
+    internal suspend fun runPreamble() {
         tmStartMs = clock()
         tmCells = 0; tmPages = 0; tmNavMs = 0; tmPanelMs = 0; tmSettleMs = 0
         // ★ 2026-09-24：观察类计数在此复位。它们的 KDoc 一直写着"随 run 重置"，但此前**没有任何复位点**
@@ -194,15 +214,13 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 PerfProbe.addStep("returnToHome", System.nanoTime() - tHome)
             }
         }
-        val steps = flowJson.getJSONArray("steps")
-        for (i in 0 until steps.length()) {
-            val step = steps.getJSONObject(i)
-            // `planSummary` 是结果契约的出口，不能被 stopRequested 跳过：flow 用
-            // `stopWhen planRemaining == 0` 正常收尾、以及回卷止扫/安全中止都会置该标志，
-            // 原先一 break 就连汇总都不出 ⇒「全部达成」与「什么都没报」在结果上同形。
-            if (vars.stopRequested && step.optString("do") != "planSummary") break
-            executeStep(step)
-        }
+    }
+
+    /**
+     * run() 的**后半段**（simple 分支抽出，一字未改）：endConditions 的 total 核对、
+     * `scan finished` 摘要行、probe 行、listener.onFinished。原生入口与 JSON 路径共用。
+     */
+    internal suspend fun runPostamble() {
         // endConditions：total 核对。
         // ★ A10：对账口径必须与 pagedGrid 的「件数达标」判据**同源**（那边就是三者之和）。
         //   单轮扫描只有一个 flow 域的容器在增长（weapon_scan 只进 resultsWeapons、artifact_scan
