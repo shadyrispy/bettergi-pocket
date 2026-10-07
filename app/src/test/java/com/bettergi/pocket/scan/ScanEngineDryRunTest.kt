@@ -694,6 +694,25 @@ class ScanEngineDryRunTest {
     }
 
     /**
+     * #234：**表头计数小于一页格数 ⇒ 只点那么多格、一次都不翻**。
+     * 立项依据是 BS 新账号（6 件圣遗物）实测：主判据拿 `collected`（已入库）比 `total`，
+     * 而 1★/2★ 按设计不入库 ⇒ 永不达标 ⇒ 42 格点满、36 格是空格，
+     * `吞击重发=150 点击放弃=30格`。上游 GOODScanner 用计数当**格数**上界
+     * （`backpack_scanner.rs:1372-1379`），6 件 = 6 次点击、0 次滑动。
+     * ⚠️ 本用例在**改动前必红**（旧版会点满 21 格），所以它同时是可达性证明：
+     *   604 条全绿时 `计数上界` 那条日志在结果里一条都没有 ⇒ 分支根本没走到。
+     */
+    @Test
+    fun countBelowOnePageBoundsTheClicksAndSkipsPaging() {
+        // 第三参是 `ocrNumber`（readCount 的读数），格数由网格几何固定给 21 ⇒
+        // "表头说 6 件、屏幕上一页 21 格"这个真机形状正好复现。
+        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 6)))
+        assertEquals(6, engine.results.size)
+        assertEquals(ENTER_CHAIN_CLICKS + 6, h.clicks.size)
+        assertEquals(0, h.swipes.size)
+    }
+
+    /**
      * #48：**名字路径**（干跑恒定走这条 —— `FrameSource.sampleSignature` 是接口默认实现返回 false
      * ⇒ `sigUsed=false`）原先缺签名路径的两条闸门。这里造出「打开背包时游戏已自动选中第一件」
      * 那个真机形态：点第一个格**面板名不会变** ⇒ 就绪判据看不到变化。

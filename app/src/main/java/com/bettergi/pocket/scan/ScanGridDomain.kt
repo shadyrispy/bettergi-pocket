@@ -352,6 +352,35 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                     //   「本页后停」（当页仍完整遍历，避免漏掉同页后面的高稀有度件）。
                     //   一旦在此加 stopRequested 检查，就会把它变成「立即停」——
                     //   实测三星期用例由 21 格/页塌成 1 格/页（expected 46 but was 26）。勿加。
+                    // ★ #234：**表头计数当格数上界**（对齐上游 `backpack_scanner.rs:1094-1099` +
+                    //   `:1372-1379` —— `total_row=ceil(total/cols)`、`last_row_col=total%cols`，
+                    //   内层 `for col in 0..row_item_count`；表头说 6 件就只点 6 格、0 次滑动，
+                    //   终止走 `ScanTermination::Exhausted`（`:1660-1663`），全程不看画面）。
+                    //   本引擎此前只把 `total` 拿来跟**已入库件数**比（下方 `collected >= totalForStop`），
+                    //   而 1★/2★ 按设计不入库 ⇒ 只要背包里有低星件，`collected` 就**恒**追不上 `total`，
+                    //   主判据永不成立。实测（BS 新账号 6 件圣遗物）：42 格点满、其中 36 格是空格，
+                    //   每格都走「面板未变化」回退 ⇒ `吞击重发=150 点击放弃=30格`、panel 等待占 71%。
+                    //   ⚠️ **只在第一页生效**（`pageNo == 0`）：第一页在任何滑动之前，屏幕上就是
+                    //   第 1..cols×traverseRows 格，所以"点过第 total 格 ⇒ 余下全是空格"是无假设结论；
+                    //   且 `total ≤ cols×traverseRows` 时它同时给出上游的 `Exhausted`（不再翻页）。
+                    //   后面的页**不能**这么算 —— 本引擎设计上允许欠滚（一页可能只前进 ~1.9 行），
+                    //   拿累计点击数当进度尺会**提前截断**，那正是 09-26 删 `pagesByCount` 的原因
+                    //   （误伤 21 件尾巴）。`total` 读不到（null/0）或大于一页格数 ⇒ 本分支不介入。
+                    val counterCap = vars.total
+                    if (pageNo == 0 && counterCap != null && counterCap in 1 until cols * traverseRows &&
+                        row * cols + col >= counterCap
+                    ) {
+                        vars.stopRequested = true
+                        vars.stopReason = "stopWhen"
+                        vars.gridExhausted = true
+                        dupWrapped = true
+                        Log.i(
+                            TAG,
+                            "pagedGrid[$gridKey]: 计数上界（表头 total=$counterCap）⇒ 第 $counterCap 格之后" +
+                                "全是空格，收尾（停在 r$row c$col 之前，0 次滑动；上游 Exhausted 同款）",
+                        )
+                    }
+                    if (dupWrapped) break
                     val dupLim = if (dupLimitEffective > 0) dupLimitEffective else charDupStreakLimit
                     if (dupLim > 0 && vars.charDupStreak >= dupLim) {
                         // 页内已攒满「一页卡片数」个连续重复 ⇒ 本页疑似零新增。
