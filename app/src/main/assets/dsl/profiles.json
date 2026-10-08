@@ -11,8 +11,6 @@
   "note": "坐标事实源 = flow1-5 终稿表 + verify/_ocr_backpack_panel.json(2026-09-01 四图定谳) + verify/_manage_panel_regions.json。rect 均为 [x0,y0,x1,y1]。祝圣 yShift=+63 作用于背包面板 level/lock/astral/sub1-4。",
   "screens": {
     "_common": {
-        "paimonBtn": [224, 83, 228, 87],
-        "paimonBtnNote": "主界面派蒙钮矩形（帧像素，[l,t,r,b] 四元；中心=钮心）：归位判定 atHomeScreen 5 点亮度采样（GS is_likely_main_world 对齐，阈值>160 ≥3/5 亮）。等比推算，TODO 首跑大世界帧复核。",
       "titleBar": [
         145,
         21,

@@ -134,6 +134,40 @@ object TemplateMatcher {
     }
 
     /**
+     * ★ 2026-10-08：profile 级**模板文件覆盖**（`profiles.templateFiles.<key>`）。
+     *
+     * 为什么需要：跨分辨率时**图标像素尺寸不成比例**（派蒙钮实测：2244 帧 68px、
+     * 3200 帧 92px，比例 1.35 ≠ 分辨率比 1.43/1.33）⇒ 用 A 档模板匹配 B 档帧峰值只有
+     * 0.48（无从判别）；用**本档自裁模板**匹配则 0.95 vs 干扰页 0.57 干净分离
+     * （BS3200/华为2244 双档实测）。`templateRects` 只管 rect，管不了文件 ⇒ 补此机制。
+     *
+     * 缓存键含文件路径（同 key 不同档不互串）。
+     */
+    private fun profileTemplateFile(key: String, profile: ScreenProfile?): String? =
+        profile?.rawObject("templateFiles")?.optString(key)?.takeIf { it.isNotEmpty() }
+
+    private fun loadTemplate(key: String, fileOverride: String?): Mat? {
+        if (fileOverride == null) return loadTemplate(key)
+        val cacheKey = "$key#$fileOverride"
+        templateCache[cacheKey]?.let { return it }
+        val am = assets ?: return null
+        return try {
+            val bytes = FlowSource.open(am, fileOverride).use { it.readBytes() }
+            val mat = Imgcodecs.imdecode(MatOfByte(*bytes), Imgcodecs.IMREAD_COLOR)
+            if (mat.empty()) {
+                Log.w(TAG, "模板解码失败：$key ($fileOverride)")
+                null
+            } else {
+                templateCache[cacheKey] = mat
+                mat
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "模板读取失败：$key ($fileOverride) ${e.message}")
+            null
+        }
+    }
+
+    /**
      * 缩放模板（带缓存，见 [scaledCache]）。resize 比例只依赖 frameRows（fit-height），
      * 命中缓存时返回**共享只读** Mat —— 调用方不得 release。退化（0 尺寸）返回 null 且不缓存。
      */
@@ -161,14 +195,18 @@ object TemplateMatcher {
      */
     fun match(frame: Mat, templateKey: String, profile: ScreenProfile): MatchResult {
         val spec = templateSpec(templateKey) ?: return MatchResult(false, -1.0, 0, 0)
-        val tpl = loadTemplate(templateKey) ?: return MatchResult(false, -1.0, 0, 0)
+        val fileOverride = profileTemplateFile(templateKey, profile)
+        val tpl = loadTemplate(templateKey, fileOverride) ?: return MatchResult(false, -1.0, 0, 0)
 
         // 模板恒按 3200×1440 基准裁切 → 统一按「高比」缩放（游戏的 fit-height 布局）。
         // 不能用 profile.scaleX/scaleY：2244×1080 profile 的 scale 恒为 1，会让 3200 系坐标直接越界。
         // ★ P3：resize 结果按 (模板, 帧行数) 缓存，不再每次匹配新建（缓存条目只读共享，不在此 release）。
-        val s = frame.rows().toDouble() / TEMPLATE_BASE_H // ROI 兜底换算仍需此比例
-        val scaled = scaledTemplate(templateKey, tpl, frame.rows())
-            ?: return MatchResult(false, -1.0, 0, 0)
+        // ★ 2026-10-08：profile 提供了本档自裁模板（templateFiles 覆盖）时**不缩放**——
+        //   该模板已按本档帧原生裁切（跨档图标尺寸不成比例，缩放系数不可推导，见 loadTemplate KDoc）。
+        val s = if (fileOverride != null) 1.0 else frame.rows().toDouble() / TEMPLATE_BASE_H
+        val scaled = if (fileOverride != null) tpl else {
+            scaledTemplate(templateKey, tpl, frame.rows()) ?: return MatchResult(false, -1.0, 0, 0)
+        }
         val (tw, th) = scaled.cols() to scaled.rows()
         if (tw > frame.cols() || th > frame.rows()) {
             return MatchResult(false, -1.0, 0, 0)

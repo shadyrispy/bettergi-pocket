@@ -32,75 +32,38 @@ import com.bettergi.pocket.recognition.name.NameMatcher
  */
 
     /**
-     * ★ 主界面判定（2026-10-08 重做，GS 对齐 `is_likely_main_world`）：**派蒙钮亮度采样**。
+     * ★ 主界面判定（2026-10-08 定稿）：**派蒙钮 OpenCV 模板匹配**。
      *
-     * 旧实现 = home.bagpack/character 模板 `||` 任一命中 —— 真机实测误报：标题页/游戏中心
-     * 右上角的**白圈功能图标列**与主界面钮模板纹理偶合，`atHomeScreen` 误判 true ⇒
-     * 归位直接跳过（一次返回都不按）⇒ enterScreen 在标题页点空气（2026-10-08 华为/BS2244 两机同踩）。
+     * 沿革（三步演进，前面两步的教训都写在这）：
+     * 1. 旧实现 = home.bagpack/character 模板 `||` 任一命中 —— 标题页/游戏中心右上角的
+     *    **白圈功能图标列**与模板纹理偶合 ⇒ 误判 true ⇒ 归位跳过 ⇒ enterScreen 点空气
+     *    （2026-10-08 华为/BS2244 两机同踩）。
+     * 2. 过渡版 = 派蒙钮固定点亮度/白度采样 —— 能分离，但**跨档图标尺寸不成比例**
+     *    （派蒙钮：2244 帧 68px、3200 帧 92px，比例 1.35 ≠ 分辨率比），每个分辨率都要
+     *    手工标一次坐标，不是通用解。
+     * 3. **定稿 = 模板匹配**（用户指正 + 双档实测）：模板**按档自裁**（`templateFiles` 覆盖，
+     *    见 TemplateMatcher），`templateRects` 给该档搜索 ROI。实测分离度：
+     *    3200 模板：大世界 **0.952** vs 背包页 0.589；2244 模板：大世界 **0.928** vs
+     *    背包页 0.568 / 标题页 0.535 —— 阈值 0.8 一刀切干净。
+     *    （跨档复用模板是错的：2244 模板打 3200 峰值仅 0.48——UI 图标不随分辨率等比缩放。）
      *
-     * 新判据（GOODScanner `game_controller.rs` 同思想）：主世界左上角的**派蒙钮是白/奶油色
-     * 圆钮**（2244 帧实测中心 (172,52)、bbox ≈[120,20,259,139] 内最亮连通区）；任何菜单/
-     * 界面打开时该处被深色背景或标题盖住 ⇒ 亮度掉下去。GS 1920 基准 5 点相对中心布局
-     * (+4,+1)/(-5,-3)/(-9,-15)/(-3,+20)/(+9,+27)，阈值 >160、≥3/5 亮 ⇒ 主界面。
-     * 2244 华为实机验证：大世界 5/5 亮（191-255），标题页 0/5（82-89）——阈值 120/140/160 全分离。
-     *
-     * 坐标按帧宽换算：GS 1920 基准 (58,50)，x×(frameW/1920)、y×(frameH/1080)。
      * 返回 null = 帧不可用（沿用旧契约，调用方跳过归位）。
      */
     internal fun ScanEngine.atHomeScreen(frame: Mat): Boolean? {
         if (frame.empty() || frame.cols() == 0 || frame.rows() == 0) return null
-        // ★ 派蒙钮中心**按档位标定**（profiles._common.paimonBtn，帧像素坐标）——
-        //   不做 1920 等比换算：华为 2244 帧实测派蒙钮在 (172,52)，等比推算 (68,50)
-        //   落在深色背景 ⇒ 采样恒暗 ⇒ 归位误判"非主界面"乱点返回钮（2026-10-08 实录）。
-        //   游戏布局按设备 UI 缩放因子排，与分辨率非线性 ⇒ 必须逐档标定。
-        val btn = runCatchingCancellable { profile.rect("screens._common.paimonBtn") }.getOrNull()
-        if (btn == null) {
-            Log.w(TAG, "atHomeScreen: profile 缺 _common.paimonBtn 标定，跳过归位判定")
+        if (!TemplateMatcher.hasTemplate("home.paimon")) {
+            Log.w(TAG, "atHomeScreen: home.paimon 模板未注册，跳过归位判定")
             return null
         }
-        val cx = btn.centerX.toDouble()
-        val cy = btn.centerY.toDouble()
-        val rel = listOf(4.0 to 1.0, -5.0 to -3.0, -9.0 to -15.0, -3.0 to 20.0, 9.0 to 27.0)
-        var bright = 0
-        var whiteish = 0
-        val samples = mutableListOf<Int>()
-        for ((dx, dy) in rel) {
-            val x = (cx + dx).toInt().coerceIn(0, frame.cols() - 2)
-            val y = (cy + dy).toInt().coerceIn(0, frame.rows() - 2)
-            // 3x3 均值（单点噪声防护；GS 是单点，这里略加固）+ **色彩判据**：
-            // ★ 2026-10-08 真机数据（华为 2244）：派蒙钮是**白/奶油**（r≈b，如 255,255,255 /
-            //   185,192,200）；背包页那个位置是**金色背包图标**（r-b≈44-70，如 205,183,139）。
-            //   只按亮度会把金色图标误判成派蒙（实测背包页 4/5 亮假阳性）⇒ 加白度门
-            //   `|r-b| < 40`（白/灰像素才计数）。
-            // ⚠️ Kotlin 优先级：`and` 低于 `+` —— 必须每个通道显式括号，否则
-            //    `a and 0xFF + b` = `a and (0xFF+b)` ⇒ 亮度全错（2026-10-08 真机实录：
-            //    采样读数全是与运算残渣 [5,5,5,5,0]，归位误判"非主界面"乱点返回钮）。
-            var sumR = 0
-            var sumG = 0
-            var sumB = 0
-            var n = 0
-            for (j in -1..1) for (i in -1..1) {
-                val buf = ByteArray(3)
-                frame.get(y + j, x + i, buf)
-                sumB += buf[0].toInt() and 0xFF
-                sumG += buf[1].toInt() and 0xFF
-                sumR += buf[2].toInt() and 0xFF
-                n++
-            }
-            val r = sumR / n
-            val g = sumG / n
-            val b = sumB / n
-            val v = (r + g + b) / 3
-            samples.add(v)
-            if (v > 160) bright++
-            if (v > 160 && kotlin.math.abs(r - b) < 40) whiteish++
-        }
+        val r = TemplateMatcher.match(frame, "home.paimon", profile)
         Log.d(
             TAG,
-            "atHomeScreen 派蒙采样: $samples 亮=$bright/5 白=$whiteish/5 ⇒ " +
-                "${if (whiteish >= 3) "主界面" else "非主界面"}",
+            "atHomeScreen 派蒙模板: score=${"%.3f".format(r.score)} matched=${r.matched} @(${r.x},${r.y})" +
+                " ⇒ ${if (r.matched) "主界面" else "非主界面"}",
         )
-        return whiteish >= 3
+        // score < 0 = 模板不可用/尺寸不符（沿用旧 null 契约让调用方跳过归位）
+        if (r.score < 0) return null
+        return r.matched
     }
 
 /** 返回钮落点 + 是否来自 `ui.return` 模板命中（false = 走兜底坐标，属**盲点**）。 */
