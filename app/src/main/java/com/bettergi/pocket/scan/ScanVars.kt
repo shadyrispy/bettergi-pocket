@@ -12,8 +12,6 @@ class ScanVars {
     var rarity: Int = -1
     var locked: Boolean? = null
     var favorited: Boolean? = null
-    /** ocrWithRetry 命中写入（fuzzy 词典匹配 key）。 */
-    var ocrMatch: String? = null
     /** vote as=curLock 快照（artifact_lock ifMatch 的 verify toggle 依据）。 */
     var curLock: Boolean? = null
     /**

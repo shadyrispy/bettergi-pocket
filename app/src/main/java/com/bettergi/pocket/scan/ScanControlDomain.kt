@@ -787,36 +787,6 @@ internal fun ScanEngine.lookupName(dictKey: String, text: String, allowFuzzy: Bo
 }
 
 /**
- * P3 ocrWithRetry：OCR 区域 → 词典模糊匹配 → vars.ocrMatch = key。
- * 重试 N 次（每次重新取帧），重试间 200ms（动画缓冲）。
- * fuzzy：0=仅精确；>0=走完整分级（子串/编辑距离/LCS/Dice）。
- */
-internal suspend fun ScanEngine.ocrWithRetry(step: JSONObject) {
-    val ocrGateway = ocr ?: return
-    val rect = profile.rect(step.getString("rect").removePrefix("$"))
-    val fuzzy = step.optInt("fuzzy", 0)
-    val maxRetries = step.optInt("retries", 3)
-    val dictKey = step.optString("dict", "mappings.characters")
-    for (attempt in 1..maxRetries) {
-        val frame = freshFrame()
-        val text = try {
-            ocrGateway.readLines(frame, listOf(rect)).joinToString(" ")
-        } finally { frame.release() }
-        val cleaned = StatParser.clean(text)
-        if (cleaned.isNotEmpty()) {
-            val key = lookupName(dictKey, cleaned, allowFuzzy = fuzzy > 0)
-            if (key != null) {
-                vars.ocrMatch = key
-                Log.i(TAG, "ocrWithRetry matched: $cleaned → $key (attempt $attempt)")
-                return
-            }
-        }
-        if (attempt < maxRetries) delay(200)
-    }
-    Log.w(TAG, "ocrWithRetry failed after $maxRetries attempts: $rect")
-}
-
-/**
  * 原生 visit 体（simple 分支五流程原生化，2026-10-07）：每格一次调用。
  * - `col/row/idx` = 本格网格位置（idx = row*cols+col，与原 JSON 路径 runVisit 同语义）；
  * - `prof` = 本页相位视图（与原 JSON 路径的 pageProfile 同源）。

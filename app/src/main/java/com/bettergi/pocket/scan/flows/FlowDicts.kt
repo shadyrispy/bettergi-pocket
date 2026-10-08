@@ -12,28 +12,31 @@ import org.json.JSONObject
  * 步骤常量一律用 JSONObject 字面量**逐字**平移原 flow params（spec §3「优先照旧构造 JSONObject，
  * 最小 diff」）—— 原生层只是不再从 flow 文件读。
  *
- * ══ P0/P1 对齐项登记（spec §3.6，gs-flow-step-diff §0.1）══
+ * ══ P0/P1 对齐项登记（spec §3.6，gs-flow-step-diff §0.1；2026-10-08 复核修订）══
  *
- * 【P0 · 随转换保留（实现就在 do 原语层，原生流程直调同一实现，语义零改动）】
- * 1. 缺席证明门禁（emit 处 NotFound/Skipped 分流）：
- *    `ScanControlDomain.foreach` 的状态映射 —— abortItem ⇒ Failed、整轮停 ⇒ Skipped、
- *    网格到底未命中 ⇒ NotFound（不是 Skipped），出处 ManageStatus / emitManageSummary。
- *    证据：ManageStatusTest（含 flowStop/abortItem 分流用例）。
+ * 【P0 · 按流程分列——「已实现」只对 equip 成立，lock/scan 侧是缺口】
+ * 1. 缺席证明门禁（NotFound/Skipped 分流）：
+ *    - equip（foreach）：✅ 已实现 —— `manageStatusOf` 五态（flowStop⇒Skipped、
+ *      abortItem⇒Failed、网格到底未命中⇒NotFound），证据 ManageStatusTest。
+ *    - lock（planMatch/planDone）：❌ 未实现 —— `planSummary()` 把从未 planDone 的项
+ *      无条件补 NotFound（ScanJudgmentDomain），没有 flowStop/abort 证据分流；
+ *      修复见 LockFlow/planSummary（2026-10-08，随 P0-A 落地）。
  * 2. 副词条重试链（solver 不可解→重解→兜底）：
- *    `RollSolver.solve` —— 原值 → level+10 候选重解 → 待激活两变体 → 全不可解时**原样导出**
- *    （宁缺不错，`ArtifactDomainPanels.parseArtifactPanel` 消费）。证据：RollSolverTest
- *    （聚合钉 8 + ambiguous init 单件用例）。
+ *    - solver **内**兜底：✅ level+10 候选 → 待激活两变体 → 全不可解原样导出（宁缺不错），
+ *      证据 RollSolverTest。
+ *    - solver **外**图像级重试（上游 9 组 (dy,dw)×双引擎 + -10/-20px 重裁 + 启发式兜底）：
+ *      ❌ 未实现 —— 先以 logMiss 率观测（scan finished 摘要），有数据再定（spec §3.6）。
  * 3. 筛选三态（部分命中处理）：
- *    `ScanControlDomain.setFilter` —— 全命中 ⇒ 确认筛选；部分命中 ⇒ 确认带筛扫 + 逐格
- *    planMatch 兜；零命中/面板未开 ⇒ not_applied 放弃筛选扫全量（绝不盲点）。
- *    证据：GoodPlanTest（whyNot/pick 契约）+ FilterPageConsistencyTest。
+ *    - `setFilter` 现状：全命中⇒确认；**部分命中⇒确认带筛扫（缺口，GS 上游是清筛改扫全量）**；
+ *      零命中⇒not_applied 放弃筛选扫全量。修复见 setFilter（2026-10-08，随 P0-C 落地）。
  *
  * 【P1 · follow-up（转换期刻意不加，防归因混淆；待办按序）】
  * - 锁图标歧义带（2560 档 lock badge 与祝圣 yShift 的重叠带判读）
  * - 套装分组（导出/管理页按 set 分组展示）
  * - 页签交替（weapon/artifact 双页签连续跑时的入口交替幂等）
  * - skip_open（enterScreen 幂等跳过的显式声明位）
- * - 名称匹配护栏（NameOverrides 撞名告警阈值化）
+ * - 名称匹配护栏（`dist < key.length` 禁单字全替换；CONFUSIONS 替换表已实现）
+ * - character_scan Phase 2（可疑重扫；描述背离已在 CharacterFlow 头注释如实标注）
  */
 
 /** 原生顶层步的埋点壳：与 ScanEngine.executeStep 逐位同语义（RecognitionLog「步骤」+ PerfProbe top:op）。 */

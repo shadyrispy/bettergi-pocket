@@ -11,6 +11,7 @@ import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.log.RecognitionLog
 import com.bettergi.pocket.bridge.OverlayBridge
 import com.bettergi.pocket.core.FlowSource
+import com.bettergi.pocket.dsl.ScriptStore
 import com.bettergi.pocket.recognition.ocr.OcrFactory
 import com.bettergi.pocket.recognition.name.GoodNames
 import kotlinx.coroutines.CoroutineScope
@@ -279,8 +280,8 @@ class ScriptRunner(
             listener.onFinished("no_frame_size")
             return
         }
-        val validFlows = setOf("artifact_scan", "weapon_scan", "character_scan", "artifact_lock", "auto_equip", "char_calibrate", "setfilter_calibrate")
-        if (flowName !in validFlows) {
+        // flowName 单一事实源 = ScriptStore.KEYS（与 ScanEngine.run() 分派同源，防三处漂移）
+        if (flowName !in ScriptStore.KEYS) {
             Log.w(TAG, "unknown flow $flowName; default to artifact_scan")
             startScan("artifact_scan"); return
         }

@@ -51,7 +51,8 @@ object ScriptStore {
         NativeFlow("setfilter_calibrate", "setfilter_calibrate", "gear", Int.MAX_VALUE, false, emptyList()),
     )
 
-    private val KEYS: List<String> = BUILT_INS.map { it.key }
+    /** 全部 flowName 的**单一事实源**：run() 分派、ScriptRunner 起跑校验、UI 清单三处共用。 */
+    val KEYS: List<String> = BUILT_INS.map { it.key }
 
     data class Entry(
         val key: String,

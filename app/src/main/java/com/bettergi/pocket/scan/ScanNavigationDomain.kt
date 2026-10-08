@@ -583,20 +583,6 @@ internal fun ScanEngine.parseChainAnchor(entry: String): String {
 }
 
 // ---- #6 dualStateButton：判态（pill 底色）+ ensure ----
-/**
- * 管理面板「已装备」标识：`panels.artifact_manage.equipped` ROI 有字 → 该件正被穿戴
- * （决定 leftBtn 当前是「卸下」还是「替换」）。OCR 不可用/读空按未装备处理。
- */
-internal suspend fun ScanEngine.readAfterNavigate(step: JSONObject) {
-    val read = step.optJSONArray("read") ?: return
-    for (i in 0 until read.length()) {
-        val page = read.optJSONObject(i)?.optString("page", "") ?: continue
-        when {
-            page.contains("constellation") -> readConstellation()
-            page.contains("talent") -> readTalent()
-        }
-    }
-}
 
 /**
  * 连续重复**件**判据（通用：角色/武器/圣遗物；2026-09-12 由角色专用推广）。
