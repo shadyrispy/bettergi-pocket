@@ -481,13 +481,35 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
     }
     if (pending.isNotEmpty()) Log.w(TAG, "setFilter: 目标未全部点选，剩余=$pending")
     // ★ 2026-09-18（P0）：一个都没勾上 ⇒ 同样**不确认**，退出并记 not_applied。
-    //   （部分勾上则照旧确认：有筛选总比没有好，未点到的由后面的逐格匹配兜。）
     if (selected == 0) {
         Log.w(TAG, "setFilter: 一个目标都没勾上（selected=0，翻页 $turns 次）⇒ 不确认、直接退出（not_applied）")
         leaveFilterPanels("selected=0", homeHint = homeHintOf(step))
         return
     }
-    Log.i(TAG, "setFilter: 已勾选 $selected 个目标（翻页 $turns 次，未点完=$pending）⇒ 确认筛选")
+    // ★ P0-C（2026-10-08，GS 对齐 lock_manager.rs set_filter_plan 三态）：**部分命中**
+    //   （勾上了部分、剩余目标没找到）⇒ **清掉筛选改扫全量**，不再"带半套筛选扫"。
+    //   原因（GS 对齐）：游戏记住最后一次筛选 ⇒ 剩余目标在"看不见"的区段里被漏，
+    //   且与缺席证明门禁叠加把这些项谎报成 NotFound。改扫全量后逐格 planMatch 照常兜。
+    //   实现：**不点确认**（面板保持打开）→ leaveFilterPanels 逐层退出即视为取消筛选；
+    //   置 `lockFilterPartial` ⇒ planSummary 把未绑定项记 Skipped（需要重跑才有完整结论）。
+    //   equip 流程不受影响（foreach 有自己的逐格匹配兜，且 manageStatusOf 五态已在）。
+    if (pending.isNotEmpty()) {
+        if (vars.currentTask != null || vars.plan.isNullOrEmpty()) {
+            // 非 lock/非计划驱动流程（防御）：保持旧行为（带半套筛选扫）
+            Log.w(TAG, "setFilter: 部分命中 selected=$selected 未点完=$pending ⇒ 确认带筛扫（旧语义，非计划驱动）")
+            confirmFilter(step)
+            return
+        }
+        Log.w(
+            TAG,
+            "setFilter: 部分命中 selected=$selected/未点完=$pending ⇒ 清掉筛选改扫全量" +
+                "（未绑定项将记 Skipped，P0-C）",
+        )
+        vars.lockFilterPartial = true
+        leaveFilterPanels("partial=$selected", homeHint = homeHintOf(step))
+        return
+    }
+    Log.i(TAG, "setFilter: 已勾选全部 $selected 个目标（翻页 $turns 次）⇒ 确认筛选")
     confirmFilter(step)
 }
 

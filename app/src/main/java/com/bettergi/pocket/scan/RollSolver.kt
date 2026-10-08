@@ -212,6 +212,20 @@ object RollSolver {
 
     /** 诊断用：整册成功率（仅日志）。 */
     internal fun logMiss(rarity: Int, level: Int, subs: List<In>) {
+        missCount++
         Log.d(TAG, "roll solve 失败: rarity=$rarity level=$level subs=$subs")
+    }
+
+    /**
+     * ★ P0-B 观测（2026-10-08）：本会话 solver 不可解计数（`logMiss` 累计）。
+     * 打进 `scan finished` 摘要 —— 据此决定要不要上图像级重试链（GS 对齐 P0-2；
+     * miss=0 ⇒ 不加，miss 持续 >0 ⇒ 补 9 组重裁，见 simple-conversion-spec §3.6）。
+     * `run()` 复位（与 PerfProbe.reset 同点）。
+     */
+    internal var missCount: Int = 0
+        private set
+
+    internal fun resetMissCount() {
+        missCount = 0
     }
 }

@@ -3,6 +3,7 @@ package com.bettergi.pocket.scan.flows
 import android.util.Log
 import com.bettergi.pocket.scan.GoodPlan
 import com.bettergi.pocket.scan.ScanEngine
+import kotlinx.coroutines.CancellationException
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
 import com.bettergi.pocket.scan.assertScreen
 import com.bettergi.pocket.scan.dualStateButton
@@ -141,6 +142,24 @@ internal suspend fun ScanEngine.runLockScanNative() {
 
 /** artifact_lock 步序主体（ScanEngine.run() 按 flowName 分派用；planSummary 在本体内）。 */
 internal suspend fun ScanEngine.runLockSteps() {
+    try {
+        runLockStepsInner()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        // ★ P0-A 缺席证明门禁：流程**异常中止**（enterScreen/assertScreen 未达、profile 缺失、
+        //   zone 缺失等）⇒ 未绑定项在 planSummary 记 Skipped（这一轮不可信，需重跑），
+        //   而不是谎报 NotFound（"这件不存在"，会误导用户重造方案）。
+        //   正常止扫（stopWhen/maxPages/网格到底）不经过这里 ⇒ 缺席仍是 NotFound。
+        //   补跑 planSummary（异常已跳过本体内的那次）后**重抛**——ScriptRunner 的
+        //   exportNow("aborted") 导出与 error 回执语义不变，ManageSummary 汇总不缺席。
+        vars.lockPlanAborted = true
+        planSummary()
+        throw e
+    }
+}
+
+private suspend fun ScanEngine.runLockStepsInner() {
     nativeStep("enterScreen") { enterScreen(LockFlow.ENTER_BAGPACK) }
     nativeStep("enterScreen") { enterScreen(LockFlow.ENTER_ARTIFACT_TAB) }
     nativeStep("dualStateButton") { dualStateButton(LockFlow.DUAL_PILL_OFF) }

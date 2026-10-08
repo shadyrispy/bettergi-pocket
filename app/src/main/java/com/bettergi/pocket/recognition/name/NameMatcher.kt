@@ -191,12 +191,14 @@ object NameMatcher {
             return MatchResult(table.getValue(bestKey), bestKey, Tier.SUBSTRING_REVERSE, bestLen.toDouble())
         }
 
-        // ── 5. 编辑距离（阈值 = max(1, 名称长度*30%)）
+        // ── 5. 编辑距离（阈值 = max(1, 名称长度*30%)；附加门 dist < 名称长度 —— 禁"整名全替换"）
+        //   ★ P1（2026-10-08，GS 对齐 fuzzy_match.rs：`dist < name.len()`）：单字名读成任意
+        //   别的单字（dist=1 == key.length=1）此前能通过 30% 阈值 ⇒ 挡掉（宁可 miss 不误配）。
         var minDist = Int.MAX_VALUE
         var candidates: MutableList<Pair<String, String>>? = null
         for ((key, value) in table) {
             val dist = levenshtein(cleaned, key)
-            if (dist <= maxOf(1, (key.length * LEV_RATIO).toInt())) {
+            if (dist < key.length && dist <= maxOf(1, (key.length * LEV_RATIO).toInt())) {
                 if (dist < minDist) {
                     minDist = dist
                     candidates = mutableListOf(key to value)

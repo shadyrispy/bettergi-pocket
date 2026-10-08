@@ -200,6 +200,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     internal suspend fun runPreamble(returnHomeOverride: Boolean? = null) {
         tmStartMs = clock()
         tmCells = 0; tmPages = 0; tmNavMs = 0; tmPanelMs = 0; tmSettleMs = 0
+        RollSolver.resetMissCount() // P0-B：solver 未解计数随 run 复位（同观察类计数口径）
         // ★ 2026-09-24：观察类计数在此复位。它们的 KDoc 一直写着"随 run 重置"，但此前**没有任何复位点**
         //   ⇒ 同进程连跑两轮时第二轮的 `scan finished` 摘要会把上一轮的数一起算进去。
         dupRevisits = 0; dupRevisitRecovered = 0; pageFreezeAbandoned = 0; swallowedClickRetries = 0
@@ -293,6 +294,9 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 // ★ #104：只观测、已照常入库 —— 对账"多 N 件"时先看这个数，别把它算成丢件或真多出来的装备
                 (if (weaponOverlapRepeats > 0) "武器重叠重读=${weaponOverlapRepeats}件(已入库) " else "") +
                 "页级冻结放弃=${pageFreezeAbandoned}格 未知套装=${unknownSetPieces}件 " +
+                // ★ P0-B（2026-10-08）：solver 不可解率观测 —— >0 ⇒ 有件按"原样导出"走（roll 未解出），
+                //   持续 >0 就是补图像级重试链的依据（GS 对齐 P0-2，见 simple-conversion-spec §3.6）。
+                (if (RollSolver.missCount > 0) "roll未解=${RollSolver.missCount}件 " else "") +
                 // ★ #156：身份未解析的位数（照常入库、导出无 key）。>0 就说明昵称表又漏人了，
                 //   对账侧会同时报"多 N 条未解析 + 缺 N 个真角色"。
                 "未解析身份=${charUnresolved}位 " +

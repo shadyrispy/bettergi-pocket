@@ -768,12 +768,28 @@ internal fun ScanEngine.planDone(step: JSONObject) {
     Log.i(TAG, "planDone: 第 $i 项 $label \u21d2 $status（剩余未绑定 ${vars.planRemaining()}）")
 }
 
-/** `planSummary`：把**始终没被绑定**的项补记 `NotFound`，然后出汇总（照 `emitManageSummary`）。 */
+/**
+ * `planSummary`：把**始终没被绑定**的项按缺席证明门禁分流后出汇总（照 `emitManageSummary`）。
+ *
+ * ★ P0-A（2026-10-08，GS 对齐 lock_manager.rs 的 missed/skipped 分流）：未绑定项的**处境**
+ *   决定状态，不是一律 NotFound ——
+ * - [ScanVars.lockPlanAborted]（流程异常中止：enterScreen/assertScreen 未达、profile 缺失）
+ *   ⇒ **Skipped**：这一轮结果不可信，需要重跑，而不是"这件不存在"；
+ * - [ScanVars.lockFilterPartial]（P0-C：筛选只勾上了部分目标）⇒ **Skipped**：剩余目标
+ *   在筛选遮蔽的区段里，"没扫到"≠"不存在"；
+ * - 正常走查完整（stopWhen/maxPages/网格到底）且两项都未置位 ⇒ **NotFound**：
+ *   "背包里确实没有这件"（可据此重造方案——equip 侧 manageStatusOf 同款语义）。
+ */
 internal fun ScanEngine.planSummary() {
     val plan = vars.plan ?: return
+    val absenceStatus = when {
+        vars.lockPlanAborted -> "Skipped"
+        vars.lockFilterPartial -> "Skipped"
+        else -> "NotFound"
+    }
     for (i in plan.indices) {
         if (i !in vars.consumedPlanIndexes) {
-            manageResults.add(Triple(i, taskLabel(plan[i]), "NotFound"))
+            manageResults.add(Triple(i, taskLabel(plan[i]), absenceStatus))
         }
     }
     emitManageSummary()
