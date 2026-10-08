@@ -33,6 +33,8 @@
  },
  "screens": {
   "_common": {
+        "paimonBtn": [172, 52],
+        "paimonBtnNote": "主界面派蒙钮中心（帧像素）：归位判定 atHomeScreen 5 点亮度采样（GS is_likely_main_world 对齐，阈值>160 ≥3/5 亮）。2244=华为实机实测。",
    "titleBar": [
     110,
     16,

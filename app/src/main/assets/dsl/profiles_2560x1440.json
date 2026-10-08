@@ -33,6 +33,8 @@
   },
   "screens": {
     "_common": {
+        "paimonBtn": [77, 67],
+        "paimonBtnNote": "主界面派蒙钮中心（帧像素）：归位判定 atHomeScreen 5 点亮度采样（GS is_likely_main_world 对齐，阈值>160 ≥3/5 亮）。等比推算，TODO 首跑大世界帧复核。",
       "titleBar": [
         30,
         21,

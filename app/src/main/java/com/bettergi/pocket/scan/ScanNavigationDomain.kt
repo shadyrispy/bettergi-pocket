@@ -47,27 +47,38 @@ import com.bettergi.pocket.recognition.name.NameMatcher
      * 坐标按帧宽换算：GS 1920 基准 (58,50)，x×(frameW/1920)、y×(frameH/1080)。
      * 返回 null = 帧不可用（沿用旧契约，调用方跳过归位）。
      */
-    internal fun atHomeScreen(frame: Mat): Boolean? {
+    internal fun ScanEngine.atHomeScreen(frame: Mat): Boolean? {
         if (frame.empty() || frame.cols() == 0 || frame.rows() == 0) return null
-        val sx = frame.cols().toDouble() / 1920.0
-        val sy = frame.rows().toDouble() / 1080.0
-        // GS 1920 基准：派蒙钮中心 (58,50)；5 个采样点（绝对坐标）
-        val cx = 58.0 * sx
-        val cy = 50.0 * sy
+        // ★ 派蒙钮中心**按档位标定**（profiles._common.paimonBtn，帧像素坐标）——
+        //   不做 1920 等比换算：华为 2244 帧实测派蒙钮在 (172,52)，等比推算 (68,50)
+        //   落在深色背景 ⇒ 采样恒暗 ⇒ 归位误判"非主界面"乱点返回钮（2026-10-08 实录）。
+        //   游戏布局按设备 UI 缩放因子排，与分辨率非线性 ⇒ 必须逐档标定。
+        val btn = runCatchingCancellable { profile.rect("screens._common.paimonBtn") }.getOrNull()
+        if (btn == null) {
+            Log.w(TAG, "atHomeScreen: profile 缺 _common.paimonBtn 标定，跳过归位判定")
+            return null
+        }
+        val cx = btn.centerX.toDouble()
+        val cy = btn.centerY.toDouble()
         val rel = listOf(4.0 to 1.0, -5.0 to -3.0, -9.0 to -15.0, -3.0 to 20.0, 9.0 to 27.0)
-        val px = frame.nativeObj // 保留引用语义（Android Mat 直读走 JNI）
         var bright = 0
         val samples = mutableListOf<Int>()
         for ((dx, dy) in rel) {
-            val x = (cx + dx * sx).toInt().coerceIn(0, frame.cols() - 2)
-            val y = (cy + dy * sy).toInt().coerceIn(0, frame.rows() - 2)
+            val x = (cx + dx).toInt().coerceIn(0, frame.cols() - 2)
+            val y = (cy + dy).toInt().coerceIn(0, frame.rows() - 2)
             // 3x3 均值（单点噪声防护；GS 是单点，这里略加固）
+            // ⚠️ Kotlin 优先级：`and` 低于 `+` —— 必须每个通道显式括号，否则
+            //    `a and 0xFF + b` = `a and (0xFF+b)` ⇒ 亮度全错（2026-10-08 真机实录：
+            //    采样读数全是与运算残渣 [5,5,5,5,0]，归位误判"非主界面"乱点返回钮）。
             var sum = 0
             var n = 0
             for (j in -1..1) for (i in -1..1) {
                 val buf = ByteArray(3)
                 frame.get(y + j, x + i, buf)
-                sum += (buf[0].toInt() and 0xFF + buf[1].toInt() and 0xFF + buf[2].toInt() and 0xFF) / 3
+                val b0 = buf[0].toInt() and 0xFF
+                val b1 = buf[1].toInt() and 0xFF
+                val b2 = buf[2].toInt() and 0xFF
+                sum += (b0 + b1 + b2) / 3
                 n++
             }
             val v = sum / n
