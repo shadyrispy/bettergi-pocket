@@ -62,34 +62,45 @@ import com.bettergi.pocket.recognition.name.NameMatcher
         val cy = btn.centerY.toDouble()
         val rel = listOf(4.0 to 1.0, -5.0 to -3.0, -9.0 to -15.0, -3.0 to 20.0, 9.0 to 27.0)
         var bright = 0
+        var whiteish = 0
         val samples = mutableListOf<Int>()
         for ((dx, dy) in rel) {
             val x = (cx + dx).toInt().coerceIn(0, frame.cols() - 2)
             val y = (cy + dy).toInt().coerceIn(0, frame.rows() - 2)
-            // 3x3 均值（单点噪声防护；GS 是单点，这里略加固）
+            // 3x3 均值（单点噪声防护；GS 是单点，这里略加固）+ **色彩判据**：
+            // ★ 2026-10-08 真机数据（华为 2244）：派蒙钮是**白/奶油**（r≈b，如 255,255,255 /
+            //   185,192,200）；背包页那个位置是**金色背包图标**（r-b≈44-70，如 205,183,139）。
+            //   只按亮度会把金色图标误判成派蒙（实测背包页 4/5 亮假阳性）⇒ 加白度门
+            //   `|r-b| < 40`（白/灰像素才计数）。
             // ⚠️ Kotlin 优先级：`and` 低于 `+` —— 必须每个通道显式括号，否则
             //    `a and 0xFF + b` = `a and (0xFF+b)` ⇒ 亮度全错（2026-10-08 真机实录：
             //    采样读数全是与运算残渣 [5,5,5,5,0]，归位误判"非主界面"乱点返回钮）。
-            var sum = 0
+            var sumR = 0
+            var sumG = 0
+            var sumB = 0
             var n = 0
             for (j in -1..1) for (i in -1..1) {
                 val buf = ByteArray(3)
                 frame.get(y + j, x + i, buf)
-                val b0 = buf[0].toInt() and 0xFF
-                val b1 = buf[1].toInt() and 0xFF
-                val b2 = buf[2].toInt() and 0xFF
-                sum += (b0 + b1 + b2) / 3
+                sumB += buf[0].toInt() and 0xFF
+                sumG += buf[1].toInt() and 0xFF
+                sumR += buf[2].toInt() and 0xFF
                 n++
             }
-            val v = sum / n
+            val r = sumR / n
+            val g = sumG / n
+            val b = sumB / n
+            val v = (r + g + b) / 3
             samples.add(v)
             if (v > 160) bright++
+            if (v > 160 && kotlin.math.abs(r - b) < 40) whiteish++
         }
         Log.d(
             TAG,
-            "atHomeScreen 派蒙采样: $samples 亮=$bright/5 ⇒ ${if (bright >= 3) "主界面" else "非主界面"}",
+            "atHomeScreen 派蒙采样: $samples 亮=$bright/5 白=$whiteish/5 ⇒ " +
+                "${if (whiteish >= 3) "主界面" else "非主界面"}",
         )
-        return bright >= 3
+        return whiteish >= 3
     }
 
 /** 返回钮落点 + 是否来自 `ui.return` 模板命中（false = 走兜底坐标，属**盲点**）。 */
@@ -129,11 +140,10 @@ internal fun ScanEngine.returnButtonPoint(frame: Mat): Pair<FramePoint, Boolean>
  *    归位失败意味着后面每一步都在未知界面上点，**继续跑比停下来危险**。
  */
 internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTEMPTS) {
-    // 模板未注册（干跑单测/未下发模板）→ 无法判据，直接放弃（且不消耗帧，避免打乱帧序列）
-    if (!TemplateMatcher.hasTemplate("home.bagpack")) {
-        Log.w(TAG, "returnToHome: home.bagpack 模板未注册，跳过归位")
-        return
-    }
+    // ★ 2026-10-08：旧守卫 `hasTemplate("home.bagpack")` 已删除 —— 旧判定靠模板匹配，
+    //   新判定（atHomeScreen）走**派蒙钮亮度采样**（profile._common.paimonBtn），
+    //   不依赖模板注册。标定缺失/帧不可用时 atHomeScreen 返回 null，由循环内兜底（下方）。
+    //   干跑单测的"不消耗帧"语义不受影响：returnHome 默认 false（runPreamble），单测不进来。
     var attempt = 0
     var blindClicks = 0
     while (attempt++ < maxAttempts) {
@@ -145,9 +155,9 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
         try {
             atHome = atHomeScreen(frame)
             // 模板未注册/配置未加载时 match 返回 score=-1 → 无法判据，直接放弃归位
-            // （干跑单测与未下发模板的环境不应产生无意义点击）
+            // （干跑单测与未标定 paimonBtn 的环境不应产生无意义点击）
             if (atHome == null) {
-                Log.w(TAG, "returnToHome: home 模板不可用，跳过归位")
+                Log.w(TAG, "returnToHome: 派蒙判定不可用（paimonBtn 未标定/帧异常），跳过归位")
                 return
             }
             beforeThumb = VoteJudges.screenThumb(frame)
