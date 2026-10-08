@@ -196,7 +196,9 @@ class ScriptRunner(
     }
 
     /**
-     * 启动扫描流程。flowName 决定 assets/dsl/flows/<flowName>.json（"artifact_scan" | "weapon_scan"）。
+     * 启动扫描流程。flowName（"artifact_scan" | "weapon_scan" | …）决定分派到 `scan/flows` 包里的
+     * **原生步序** —— ⚠️ 自 simple 阶段3/4 起 flow JSON 已下线，**不再**读 `assets/dsl/flows/` 下的 json
+     * （那个目录也从未进版本库；见 DslAssetsIntegrityTest 头注与 check_dsl_sync.py 的 FLOW_DIRS 移除说明）。
      * 名称词典统一加载（dsl/tools/mappings.json → GoodNames），各原语经 NameMatcher 反查。
      */
     fun startScan(

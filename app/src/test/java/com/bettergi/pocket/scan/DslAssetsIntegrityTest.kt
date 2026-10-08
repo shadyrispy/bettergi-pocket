@@ -181,15 +181,12 @@ class DslAssetsIntegrityTest {
                 drifted += "tools/$rel ≠ assets/tools/$rel"
             }
         }
-        val cf = File(json, "flows"); val af = File(assets, "flows")
-        if (cf.isDirectory && af.isDirectory) {
-            for (f in cf.listFiles()?.filter { it.name.endsWith(".json") }.orEmpty()) {
-                val g = File(af, f.name)
-                if (!g.isFile || f.readBytes().contentEquals(g.readBytes()).not()) {
-                    drifted += "flows/${f.name} ≠ assets/flows/${f.name}"
-                }
-            }
-        }
+        // 本类**不再**比对 `assets/dsl/flows/`：flow JSON 已随 DSL 运行时下线（引擎按 flowName 分派到
+        // scan/flows/*，`FlowSource.open` 的调用点只有 profiles / templates / rollTable / GoodNames），
+        // 且那份目录从未进版本库 ⇒ 新构建的 APK 里根本没有它。
+        // 原先这段带 `if (cf.isDirectory && af.isDirectory)` 守卫，看着无害，实为**定时炸弹**：
+        // 谁把目录重建出来（例如照着 check_dsl_sync 的旧 FLOW_DIRS 手工补拷），这段就会重新生效，
+        // 于是开始守一份没人读的死资产 —— 2026-10-08 就是重建后又清掉的。
         org.junit.Assert.assertTrue(
             "DSL 双侧漂移（跑 dsl/scripts/check_dsl_sync.py 看方向；本次已验证的修复在 assets 侧时用 --fix-rev）：\n  " +
                 drifted.joinToString("\n  "),
