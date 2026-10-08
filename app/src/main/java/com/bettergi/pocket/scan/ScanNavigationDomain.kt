@@ -31,11 +31,55 @@ import com.bettergi.pocket.recognition.name.NameMatcher
  * Stage 3.3 步④：ScanNavigationDomain（do 原语按族拆分，扩展函数，函数体一字未改）。
  */
 
-internal fun ScanEngine.atHomeScreen(frame: Mat): Boolean? {
-    val rb = TemplateMatcher.match(frame, "home.bagpack", profile)
-    if (rb.score < 0) return null
-    return rb.matched || TemplateMatcher.match(frame, "home.character", profile).matched
-}
+    /**
+     * ★ 主界面判定（2026-10-08 重做，GS 对齐 `is_likely_main_world`）：**派蒙钮亮度采样**。
+     *
+     * 旧实现 = home.bagpack/character 模板 `||` 任一命中 —— 真机实测误报：标题页/游戏中心
+     * 右上角的**白圈功能图标列**与主界面钮模板纹理偶合，`atHomeScreen` 误判 true ⇒
+     * 归位直接跳过（一次返回都不按）⇒ enterScreen 在标题页点空气（2026-10-08 华为/BS2244 两机同踩）。
+     *
+     * 新判据（GOODScanner `game_controller.rs` 同思想）：主世界左上角的**派蒙钮是白/奶油色
+     * 圆钮**（2244 帧实测中心 (172,52)、bbox ≈[120,20,259,139] 内最亮连通区）；任何菜单/
+     * 界面打开时该处被深色背景或标题盖住 ⇒ 亮度掉下去。GS 1920 基准 5 点相对中心布局
+     * (+4,+1)/(-5,-3)/(-9,-15)/(-3,+20)/(+9,+27)，阈值 >160、≥3/5 亮 ⇒ 主界面。
+     * 2244 华为实机验证：大世界 5/5 亮（191-255），标题页 0/5（82-89）——阈值 120/140/160 全分离。
+     *
+     * 坐标按帧宽换算：GS 1920 基准 (58,50)，x×(frameW/1920)、y×(frameH/1080)。
+     * 返回 null = 帧不可用（沿用旧契约，调用方跳过归位）。
+     */
+    internal fun atHomeScreen(frame: Mat): Boolean? {
+        if (frame.empty() || frame.cols() == 0 || frame.rows() == 0) return null
+        val sx = frame.cols().toDouble() / 1920.0
+        val sy = frame.rows().toDouble() / 1080.0
+        // GS 1920 基准：派蒙钮中心 (58,50)；5 个采样点（绝对坐标）
+        val cx = 58.0 * sx
+        val cy = 50.0 * sy
+        val rel = listOf(4.0 to 1.0, -5.0 to -3.0, -9.0 to -15.0, -3.0 to 20.0, 9.0 to 27.0)
+        val px = frame.nativeObj // 保留引用语义（Android Mat 直读走 JNI）
+        var bright = 0
+        val samples = mutableListOf<Int>()
+        for ((dx, dy) in rel) {
+            val x = (cx + dx * sx).toInt().coerceIn(0, frame.cols() - 2)
+            val y = (cy + dy * sy).toInt().coerceIn(0, frame.rows() - 2)
+            // 3x3 均值（单点噪声防护；GS 是单点，这里略加固）
+            var sum = 0
+            var n = 0
+            for (j in -1..1) for (i in -1..1) {
+                val buf = ByteArray(3)
+                frame.get(y + j, x + i, buf)
+                sum += (buf[0].toInt() and 0xFF + buf[1].toInt() and 0xFF + buf[2].toInt() and 0xFF) / 3
+                n++
+            }
+            val v = sum / n
+            samples.add(v)
+            if (v > 160) bright++
+        }
+        Log.d(
+            TAG,
+            "atHomeScreen 派蒙采样: $samples 亮=$bright/5 ⇒ ${if (bright >= 3) "主界面" else "非主界面"}",
+        )
+        return bright >= 3
+    }
 
 /** 返回钮落点 + 是否来自 `ui.return` 模板命中（false = 走兜底坐标，属**盲点**）。 */
 internal fun ScanEngine.returnButtonPoint(frame: Mat): Pair<FramePoint, Boolean> {
