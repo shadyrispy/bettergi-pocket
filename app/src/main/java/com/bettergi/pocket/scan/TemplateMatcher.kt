@@ -80,6 +80,16 @@ object TemplateMatcher {
     private fun defaults() = config?.optJSONObject("defaults")
 
     private fun threshold(): Double = defaults()?.optDouble("threshold", 0.80) ?: 0.80
+
+    /**
+     * ★ 2026-10-08：per-template 阈值覆盖（`templates.<key>.threshold`）。
+     * 为什么需要：`home.paimon` 的干扰场景（**登录/加载页**夜间渲染的左上亮块）真机可达
+     * score=0.804，撞全局 0.80 阈值 ⇒ 加载页被误判"主界面"。实测分离：真机大世界 ≥0.95、
+     * 加载页 0.80、背包页 0.58 ⇒ 该模板单独用 0.90（两侧余量均 >0.05）。
+     */
+    private fun thresholdFor(key: String): Double =
+        config?.optJSONObject("templates")?.optJSONObject(key)?.optDouble("threshold", -1.0)
+            ?.takeIf { it > 0 } ?: threshold()
     private fun margin(): Int = defaults()?.optInt("margin", 48) ?: 48
     private fun nmsRadius(): Int = defaults()?.optInt("nmsRadius", 24) ?: 24
 
@@ -251,7 +261,7 @@ object TemplateMatcher {
             var best = -1.0
             var bx = 0
             var by = 0
-            val thr = threshold()
+            val thr = thresholdFor(templateKey)
             // 步长 1：result 尺寸 = ROI - 模板，部位 tab 场景约百余见方，开销可忽略
             // ★ P3（2026-10-01）性能改：逐像素 `result.get(y,x)` + `dilated.get(y,x)` 是每像素两次
             //   JNI 调用 ⇒ 改为**整行** FloatArray 批量读（matchTemplate 输出恒 CV_32F 单通道，
