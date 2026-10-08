@@ -146,6 +146,8 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
     //   干跑单测的"不消耗帧"语义不受影响：returnHome 默认 false（runPreamble），单测不进来。
     var attempt = 0
     var blindClicks = 0
+    /** 每层最多一次 BACK 退化（有进展即重置）；见无进展分支的注释。 */
+    var backFallbackUsed = false
     while (attempt++ < maxAttempts) {
         val frame = freshFrame()
         val atHome: Boolean?
@@ -200,12 +202,29 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
             null
         }
         if (reachedEnd(beforeThumb, afterThumb)) {
-            Log.e(TAG, "returnToHome: 点击后画面无变化 ⇒ 判定无进展，停手（点的位置不是返回钮）")
+            // ★ 2026-10-08：点返回钮无进展 ⇒ **退化为系统 BACK 一次**（GS 的 Escape 等价物），
+            //   而不是立刻停手。安全性依据：此刻 [atHome] 已判定**非主界面**（派蒙判定），
+            //   主世界不会因 BACK 弹「退出游戏」确认框；BACK 只在弹窗/子界面上关一层。
+            //   真机实测（BS3200 化种匣弹窗）：returnBtn 标定被弹窗挡住时 BACK 一次即关。
+            //   BACK 用后继续轮询（下一轮重新判派蒙 + 试返回钮）——不改变"无进展才退化"的语义。
+            if (!backFallbackUsed) {
+                backFallbackUsed = true
+                Log.w(
+                    TAG,
+                    "returnToHome: 点返回钮无进展（画面无变化）⇒ 退化为系统 BACK 一次" +
+                        "（非主界面状态，不会触发大世界退出框）",
+                )
+                actions.back()
+                delay(RETURN_HOME_SETTLE_MS)
+                continue
+            }
+            Log.e(TAG, "returnToHome: 返回钮与 BACK 均无进展 ⇒ 停手（不再盲点漂移）")
             NoticeCenter.error("自动归位点击后画面无变化，已停手（避免继续盲点漂移）")
             vars.stopRequested = true
             vars.stopReason = "returnHomeStuck"
             return
         }
+        backFallbackUsed = false // 有进展 ⇒ 重置退化机会（每层最多退一次）
     }
     Log.e(TAG, "returnToHome: $maxAttempts 次未达主界面 ⇒ 停手（首步 enterScreen 会再校验，但不会再盲点入口）")
     NoticeCenter.error("自动归位 $maxAttempts 次未达主界面，已停止点击")
