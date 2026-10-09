@@ -999,7 +999,12 @@ internal suspend fun ScanEngine.parseArtifactPanel(
             level.toString(),
             mainStatKey,
             "L$lock",
-            "F$favorited",
+            // ★ 2026-10-09：favorited **归一成 Boolean** —— vars.favorited 是 Boolean?，astral vote
+            //   步没跑到（或投票 miss 前）时为 null，读到的面板为 false。同一件两次读一次 null 一次
+            //   false ⇒ "Fnull" ≠ "Ffalse" ⇒ contentKey 不同 ⇒ dedupe 漏拦（BS 全量 16:26 轮实证：
+            //   NightOfTheSkysUnveiling|sands 同件入库两次，导出 favorited 字段都不写 ⇒ 对账等价性
+            //   掩盖了键差异）。导出口径里 null 与 false 同形（都"未收藏"），键里也必须同形。
+            "F${favorited == true}",
             // 内容身份含**全部**读到的行（含待激活那条：它也是该件的真实数据，GT 单列导出）
         ).joinToString("|") + "|" +
             // ★ 2026-10-09：substats 段**按 (key,value) 排序后 join** —— 修 BS 全量对账抓到的
@@ -1066,6 +1071,10 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     // ★ 连续重复件判据：身份键用**与 dedupe 相同的 contentKey**（件名+等级+词条），
     //   不能只用件名 —— 同件名的不同圣遗物会被秒判重复。
     noteDupAndMaybeStop(contentKey, seenArtifactKeys)
+    // ★ 2026-10-09 诊断：把每条入库的 contentKey 打出来（I 级，全量 ~958 行可接受）——
+    //   BS 四轮里每轮冒一对「导出等价却双双入库」的件，favors 三态修掉后又现一对 ⇒
+    //   还有未知键差异源；有这行日志，下次复现可直接 diff 两条 key。
+    Log.i(TAG, "emit contentKey: $contentKey")
     if (dedupe && !seenArtifactKeys.add(contentKey)) {
         Log.d(TAG, "duplicate artifact skipped: $pieceName")
         return
