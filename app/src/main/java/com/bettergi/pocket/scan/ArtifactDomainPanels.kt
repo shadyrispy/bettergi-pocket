@@ -905,10 +905,57 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //   不可解 ⇒ 原样导出（宁缺不错）；解出后 initialValue 只在唯一时写入。
     // ★ 2026-09-16：带「(待激活)」标记一起送进 solver —— lv0 时 init 由标记直接定
     //   （GOODScanner result_init = num_active − count(inactive)），不再靠猜；且待激活条
-    //   **不计入 totalRolls**、导出时单列 `unactivatedSubstats`（GT 894/894 件都有该字段）。
+    //   **不计入 totalRolls**、导出时单列 `unactivatedSubstats`（894/894 件都有该字段）。
+    // ★ 2026-10-09（GS 对齐 P0-2，scanner.rs Phase 3）：首轮单候选失败 ⇒ **重裁重读产第二候选**——
+    //   每行右缘裁 8%/16% 各重读一次，新解析值并入该行候选列表，交给行候选枚举 solver。
+    //   现场 motivating：enerRech 5.8 误读 5.89（8→9 形近），单候选无解；重裁后读出 5.8 ⇒ 解出。
+    //   只在失败后触发（≈1% 的件），正常件零开销。
     val rollIn = substats.map { RollSolver.In(it.key, it.value, it.inactive) }
-    val solved = RollSolver.solve(rarity, vars.level, rollIn)
-    if (solved == null && substats.isNotEmpty()) RollSolver.logMiss(rarity, vars.level, rollIn)
+    var solved = RollSolver.solve(rarity, vars.level, rollIn)
+    if (solved == null && substats.isNotEmpty()) {
+        // ⚠️ 行对应关系：rollIn[i] 对应 subRects 前 N 行（parseBlock 是"连续块"读取，压缩尾部空行），
+        //    候选列表必须按 rollIn 构建而非 subRects.indices（3★ 件 subRects=4 行、rollIn 可能只有 2 条
+        //    —— 22:36 真机 IndexOutOfBounds 即此错位）。
+        val candidates = rollIn.indices.map { i -> mutableListOf(rollIn[i]) }
+        val ocrGateway = ocr
+        if (ocrGateway == null) {
+            RollSolver.logMiss(rarity, vars.level, rollIn)
+        } else {
+            for (cropPct in intArrayOf(8, 16)) {
+                val retryRects = rollIn.indices.map { i ->
+                    val r = subRects[i]
+                    val w = (r.width * (100 - cropPct) / 100).coerceAtLeast(20)
+                    FrameRect(r.left, r.top, r.left + w, r.bottom)
+                }
+                val retryTexts = try {
+                    ocrGateway.readRois(frame, retryRects)
+                } catch (e: Exception) {
+                    null
+                } ?: continue
+                var anyNew = false
+                for (i in rollIn.indices) {
+                    val t = retryTexts.getOrNull(i).orEmpty()
+                    if (t.isBlank()) continue
+                    val line = if (VoteJudges.substatRowPending(frame, subRects[i]) == true && !t.contains("待激活")) "$t（待激活）" else t
+                    val parsed = StatParser.parse(line, names) ?: continue
+                    val cand = RollSolver.In(parsed.key, parsed.value, parsed.inactive)
+                    if (candidates[i].none { it.key == cand.key && Math.abs(it.value - cand.value) < 0.01 }) {
+                        candidates[i].add(cand)
+                        anyNew = true
+                    }
+                }
+                if (anyNew) {
+                    solved = RollSolver.solve(rarity, vars.level, candidates)
+                    if (solved != null) {
+                        Log.i(TAG, "roll 重裁抢救成功（-$cropPct%）: " +
+                            candidates.joinToString("|") { c -> c.joinToString(",") { "${it.key}=${it.value}" } })
+                        break
+                    }
+                }
+            }
+            if (solved == null) RollSolver.logMiss(rarity, vars.level, rollIn)
+        }
+    }
     // ★ 2026-09-16（GT 定案）：`+0` 件末尾那行「待激活」词条 **要保留** —— Irminsul/GT 把它
     //   **单列**到 `unactivatedSubstats`（894/894 件都有该字段），不是丢弃。
     //   拆分优先级：① OCR 显式「(待激活)」标记（最准）② 无标记但 solver 推断出末尾一条是待激活
@@ -1078,6 +1125,31 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     if (dedupe && !seenArtifactKeys.add(contentKey)) {
         Log.d(TAG, "duplicate artifact skipped: $pieceName")
         return
+    }
+    // ★ 2026-10-09 终兜底（**只对 5★**）：BS 四轮全量每轮随机冒 1 对「导出逐字段一致却双双入库」
+    //   的 5★ 件（NightOfTheSkysUnveiling/ObsidianCodex……），F 归一后仍偶发——键差异源未定位
+    //   （logcat 环形缓冲把 flower|20 的 emit 行刷掉，无法 diff）。这里在**导出口径**上兜底：
+    //   与既有 5★ 件 setKey/slotKey/level/mainStatKey/lock/substats(排序) 全等 ⇒ 丢弃本条。
+    //   先验依据：GT 958 件里 5★ **零**同键对（词池大）；4★/低星同键多件是常态（指挥的礼帽等
+    //   成对真件，17:33 轮过杀 340+ 实证）⇒ 绝不能扩到 4★。
+    if (rarity == 5) {
+        val exportedKey = artifact.run {
+            listOf(setKey ?: "", slotKey ?: "", level.toString(), mainStatKey ?: "", lock.toString()) +
+                substats.sortedWith(compareBy({ it.key }, { it.value })).map { "${it.key}:${it.value}" }
+        }.joinToString("|")
+        // ⚠️ 这里必须显式 r. 前缀：run{} 里同名局部变量（setKey/slotKey/mainStatKey）会遮蔽
+        //   receiver 成员，导致 r 的键被当前格的值替换 ⇒ 误杀所有同词条件（23:19 冒烟 18 格
+        //   只入 1 件即此因）。
+        val dupOf = results.any { r ->
+            (listOf(
+                r.setKey ?: "", r.slotKey ?: "", r.level.toString(), r.mainStatKey ?: "", r.lock.toString(),
+            ) + r.substats.sortedWith(compareBy({ it.key }, { it.value })).map { "${it.key}:${it.value}" })
+                .joinToString("|") == exportedKey
+        }
+        if (dupOf) {
+            Log.w(TAG, "5★ contentKey 漏拦兜底：与已入库件导出键全等 ⇒ 丢弃（piece=$pieceName）")
+            return
+        }
     }
     results.add(artifact)
     listener.onProgress("artifact", vars.snapshot() + ("piece" to pieceName) + ("idx" to results.size))
