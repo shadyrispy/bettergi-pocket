@@ -191,11 +191,11 @@ class ScanEngineDryRunTest {
         var finished: String? = null
 
         // 按格递增的唯一件名（模拟真实网格每件不同）；页切换时重置（模拟跨页同件重叠 → 去重测试）
-        private val NAME_RECT = FrameRect(2230, 220, 2630, 270)
-        private val SUB0_RECT = FrameRect(2230, 794, 2660, 848)
-        private val SUB0_RECT_CRAFTED = FrameRect(2230, 857, 2660, 911)
+        private val NAME_RECT = FrameRect(2230, 220, 2462, 270)   // ★ 2026-10-09 ROI 瘦身同步（6字宽）
+        private val SUB0_RECT = FrameRect(2268, 794, 2660, 848)   // ★ 2026-10-09 ROI 瘦身同步（左缘收 6px）
+        private val SUB0_RECT_CRAFTED = FrameRect(2268, 857, 2660, 911)
         // ★ A10：weapon_backpack 面板的 name/level ROI（profiles.json 3200 基坐标，calibrate 后不变）
-        private val WEAPON_NAME_RECT = FrameRect(2221, 214, 2728, 273)
+        private val WEAPON_NAME_RECT = FrameRect(2231, 214, 2470, 273)
         private val WEAPON_LEVEL_RECT = FrameRect(2210, 709, 2455, 763)
         /** 标定后的整帧宽度（与 [frameSource] 的 capturedSize 同源）；窄于此 ⇒ 收到的是裁片。 */
         private val fullFrameW = 3200

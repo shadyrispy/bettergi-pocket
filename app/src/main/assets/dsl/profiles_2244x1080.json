@@ -1120,7 +1120,7 @@
     2038,
     568
    ],
-   "equipped": [1577, 872, 1748, 913],
+   "equipped": [1577, 872, 1728, 913],
    "note": "name→level 左对齐 x0≈2221；字段 OCR det 框±8px 内",
    "starBand": {
     "y": [
@@ -1181,7 +1181,7 @@
     "reverseDict": "tools/mappings.json（artifactPieces 305 件/65 套，由 gen_mappings.py 从游戏 Reliquary 表生成并同步进 app assets）",
     "archivedMeasure": "动态 set_top=800+nSubs*64(±4) 实测留档，勿用于采集"
    },
-   "equipped": [1578, 878, 1748, 908],
+   "equipped": [1578, 878, 1728, 908],
    "banner": [
     1854,
     154,

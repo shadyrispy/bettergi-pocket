@@ -1177,7 +1177,7 @@
     2423,
     760
    ],
-   "equipped": [1793, 1165, 2119, 1210],
+   "equipped": [1792, 1165, 1989, 1210],
    "note": "2560x1440 实机 OCR 标定 2026-09-08：name/slot/main/base/level/refine/equipped 已测；stars/starColor/lock 待 on-device 验证",
    "starBand": {
     "y": [
@@ -1242,7 +1242,7 @@
     "reverseDict": "tools/mappings.json（artifactPieces 305 件/65 套，由 gen_mappings.py 从游戏 Reliquary 表生成并同步进 app assets）",
     "archivedMeasure": "动态 set_top=800+nSubs*64(±4) 实测留档，勿用于采集"
    },
-   "equipped": [1893, 1166, 2119, 1210],
+   "equipped": [1792, 1166, 1989, 1210],
    "banner": [
     2160,
     205,

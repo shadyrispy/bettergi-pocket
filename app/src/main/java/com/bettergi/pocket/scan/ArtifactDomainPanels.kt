@@ -1001,7 +1001,15 @@ internal suspend fun ScanEngine.parseArtifactPanel(
             "L$lock",
             "F$favorited",
             // 内容身份含**全部**读到的行（含待激活那条：它也是该件的真实数据，GT 单列导出）
-        ).joinToString("|") + "|" + substats.joinToString("|") { "${it.key}:${it.value}" }
+        ).joinToString("|") + "|" +
+            // ★ 2026-10-09：substats 段**按 (key,value) 排序后 join** —— 修 BS 全量对账抓到的
+            //   「同件入库两次」：同一物理件被重叠带读到两次，两次 OCR **行序**可能不同
+            //   （滚动中面板的 det 框序抖动），parseBlock 行序跟着变 ⇒ 行序敏感的 join 造出
+            //   两个不同的 contentKey ⇒ dedupe（seenArtifactKeys）拦不住；而导出走 solver 归一，
+            //   两条又变回逐字段一致 —— 对账就成了「多 1 件」。（身份键 lastCellIdentity 一直是
+            //   排序口径，两者此处对齐。）
+            substats.sortedWith(compareBy({ it.key }, { it.value }))
+                .joinToString("|") { "${it.key}:${it.value}" }
     }
     lastCellKey = contentKey
     // ★ 2026-09-16（新 GT 对账定标）：**垃圾条拦截** —— 实测导出 22 件是 setKey/词条全空的空壳
