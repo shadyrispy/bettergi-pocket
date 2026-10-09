@@ -1329,9 +1329,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         /**
          * 面板"就绪内容带"的典型组成项（**仅文档性**；实现取面板内**所有**矩形条目的并集，
          * 刻意不按 key 过滤 —— 带必须覆盖我们实际要读的每个字段，锁图标/星行/横幅都算）。
+         * ★ 2026-10-09 同步 ROI 瘦身：slot/mainValue 槽已删（slot 词典反查、主词条不读值），
+         *   武器 baseLabel/baseValue/mainLabel 亦不读；列表只保留现存键。
          */
         val PANEL_BAND_TYPICAL_KEYS = arrayOf(
-            "name", "level", "slot", "mainName", "mainValue", "baseLabel", "baseValue",
+            "name", "level", "mainName",
             "refine", "subStats", "lock", "stars", "starColor", "banner", "equipped",
         )
         // 自适应 settle（替代固定 PAGE_SETTLE）：轮询指纹至连续稳定，自动标定各设备翻页动画时长
