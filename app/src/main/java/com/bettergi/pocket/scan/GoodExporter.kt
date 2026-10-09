@@ -27,7 +27,6 @@ object GoodExporter {
                 put("level", a.level)
                 put("rarity", a.rarity)
                 put("mainStatKey", a.mainStatKey ?: "")
-                put("mainStatValue", a.mainStatValue)
                 put("location", a.location)
                 put("lock", a.lock)
                 val subs = org.json.JSONArray()

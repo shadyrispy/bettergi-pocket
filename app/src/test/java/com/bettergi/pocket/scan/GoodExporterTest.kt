@@ -2,6 +2,7 @@ package com.bettergi.pocket.scan
 
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -17,7 +18,6 @@ class GoodExporterTest {
                 level = 20,
                 rarity = 5,
                 mainStatKey = "atk_",
-                mainStatValue = 46.6,
                 substats = listOf(
                     GoodSubStat("critRate_", 5.8),
                     GoodSubStat("hp", 717.0),
@@ -25,7 +25,7 @@ class GoodExporterTest {
                 lock = true,
                 favorited = true,
             ),
-            GoodArtifact(null, null, 0, 3, null, 0.0, emptyList(), false, null),
+            GoodArtifact(null, null, 0, 3, null, emptyList(), false, null),
         )
         val root = GoodExporter.buildGoodJson(artifacts)
         assertEquals("GOOD", root.getString("format"))
@@ -39,7 +39,7 @@ class GoodExporterTest {
         assertEquals(20, first.getInt("level"))
         assertEquals(5, first.getInt("rarity"))
         assertEquals("atk_", first.getString("mainStatKey"))
-        assertEquals(46.6, first.getDouble("mainStatValue"), 1e-9)
+        assertFalse(first.has("mainStatValue"))   // GOOD v3 无该字段（2026-10-09 删）
         assertTrue(first.getBoolean("lock"))
         assertEquals(2, first.getJSONArray("substats").length())
         assertEquals("critRate_", first.getJSONArray("substats").getJSONObject(0).getString("key"))

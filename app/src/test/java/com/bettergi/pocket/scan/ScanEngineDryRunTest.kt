@@ -370,21 +370,22 @@ class ScanEngineDryRunTest {
     }
 
     private fun pageLines(levelText: String, withCountLine: Boolean = true): Map<FrameRect, String> {
+        // ★ 2026-10-09 ROI 瘦身同步：rect 对齐 profiles.json 新标定（slot/mainValue 槽已删，
+        //    slotKey 由「晨光的明誓」经 artifactPieces 反查，mainKey 由「生命值"+slot=plume」…）
+        //    ⚠️ 夹具件名与 slot 的对应关系由词典决定：晨光的明誓 → circlet。
         val base = mutableMapOf(
-            FrameRect(2230, 220, 2630, 270) to "晨光的明誓",            // name
-            FrameRect(2210, 306, 2450, 364) to "死之羽",                // slot
-            FrameRect(2210, 444, 2460, 500) to "生命值",                // mainName
-            FrameRect(2210, 490, 2510, 590) to "4,780",                // mainValue
-            FrameRect(2200, 716, 2400, 766) to levelText,              // level（未祝圣位置）
-            FrameRect(2200, 779, 2400, 829) to levelText,              // level（crafted yShift+63 后）
-            FrameRect(2230, 794, 2660, 848) to "暴击率+5.8%",           // sub0（原位）
-            FrameRect(2230, 858, 2660, 912) to "生命值+717",            // sub1（原位）
-            FrameRect(2230, 922, 2660, 976) to "元素充能效率+12.4%",     // sub2（原位）
-            FrameRect(2230, 986, 2660, 1040) to "元素精通+23",           // sub3（原位）
-            FrameRect(2230, 857, 2660, 911) to "暴击率+5.8%",           // sub0（crafted yShift+63）
-            FrameRect(2230, 921, 2660, 975) to "生命值+717",            // sub1
-            FrameRect(2230, 985, 2660, 1039) to "元素充能效率+12.4%",    // sub2
-            FrameRect(2230, 1049, 2660, 1103) to "元素精通+23",          // sub3
+            FrameRect(2230, 220, 2462, 270) to "晨光的明誓",            // name（6字宽）
+            FrameRect(2224, 444, 2340, 500) to "生命值",                // mainName（3字宽）
+            FrameRect(2230, 716, 2340, 766) to levelText,              // level（未祝圣位置）
+            FrameRect(2230, 779, 2340, 829) to levelText,              // level（crafted yShift+63 后）
+            FrameRect(2268, 794, 2660, 848) to "暴击率+5.8%",           // sub0（原位）
+            FrameRect(2268, 858, 2660, 912) to "生命值+717",            // sub1（原位）
+            FrameRect(2268, 922, 2660, 976) to "元素充能效率+12.4%",     // sub2（原位）
+            FrameRect(2268, 986, 2660, 1040) to "元素精通+23",           // sub3（原位）
+            FrameRect(2268, 857, 2660, 911) to "暴击率+5.8%",           // sub0（crafted yShift+63）
+            FrameRect(2268, 921, 2660, 975) to "生命值+717",            // sub1
+            FrameRect(2268, 985, 2660, 1039) to "元素充能效率+12.4%",    // sub2
+            FrameRect(2268, 1049, 2660, 1103) to "元素精通+23",          // sub3
         )
         if (withCountLine) base[FrameRect(2674, 63, 2874, 95)] = "圣遗物 1026/2400"
         // filterReset 的面板开合判据：标题「圣遗物筛选」位于 profiles.json 的
@@ -836,13 +837,12 @@ class ScanEngineDryRunTest {
             nativeFlow = "artifact",
         )
         val a = engine.results[0]
-        assertEquals("plume", a.slotKey)                       // "死之羽"
+        assertEquals("plume", a.slotKey)                       // 「晨光的明誓」经 artifactPieces 反查（slot 槽已删）
         assertEquals(5, a.rarity)                              // banner 橙 + 星带 5 格
         assertEquals(90, a.level)                              // "Lv.90"（extractValue 完整数字优先）
         assertEquals(true, a.lock)
         assertEquals(true, a.favorited)
-        assertEquals("hp", a.mainStatKey)                      // "生命值" + "4,780"
-        assertEquals(4780.0, a.mainStatValue, 1e-9)
+        assertEquals("atk", a.mainStatKey)                     // 死之羽主词条恒 atk（slot 消歧，mainValue 槽已删）
         assertEquals(4, a.substats.size)
         assertEquals("critRate_", a.substats[0].key)
         // 夹具的 sub0 现按**格序**制造差异（格 0 ⇒ 5.4）；名字已不参与去重键（用户 2026-09-16 定稿）

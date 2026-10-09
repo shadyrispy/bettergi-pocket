@@ -1184,22 +1184,32 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         const val CLICK_RETRY_MAX_ON_NOCHANGE = 5
 
         /**
-         * 「珐露珊已装备」⇒ `珐露珊`；文案里没有装备标记 ⇒ null（= 未装备，导出空串）。
+         * 装备者行文本 → 角色名。**双语义**（2026-10-09）：
          *
-         * ⚠️ 必须容忍**尾部截断**（武器/圣遗物两条路径共用，2026-09-25 武器全量实测）：
-         *   97 个带「已装…」的格子里 **15 个 OCR 把末字「备」吃掉**（读成 `九条裟罗已装`），
-         *   旧写法 `takeIf { it.contains("已装备") }` 让这 15 件的装备者**静默变空** ⇒
-         *   与 GT 按 (key,rarity,level,refine,location,lock) 严格对齐时全部判成错身份。
-         *   角色名不会以「已 / 装 / 备」结尾，故按尾缀逐级截断是安全的。
+         * ① `artifact_manage`（装配/卸下复核）读全行「XX已装备」→ 截断取标记前的名字，
+         *    兼容尾部截断（2026-09-25 武器全量实测：97 格里 15 个末字「备」被吃掉；
+         *    角色名不以「已/装/备」结尾，逐级截断安全）。
+         * ② `artifact_backpack`/`weapon_backpack`（懒识别后）equipped ROI 已收窄到**角色名
+         *    3 字区**（头像/「已装备」不入画面）→ 文本**就是名字**，直接清洗返回。
+         *    （顺带修掉旧 bug：旧 backpack ROI 从头像中间起切，det 把头像当主文本，
+         *    125/125 历史实读全只露出名字首字。）
+         *
+         * 空文本 ⇒ null（= 未装备，导出空串）。
          */
         internal fun equippedOwnerOf(text: String?): String? {
             val t = text?.trim().orEmpty()
             if (t.isEmpty()) return null
+            if (!t.contains("已") && !t.contains("装") && !t.contains("备")) {
+                return StatParser.clean(t).takeIf { it.isNotEmpty() }
+            }
             val cut = when {
                 t.contains("已装备") -> t.substringBefore("已装备")
                 t.endsWith("已装") -> t.removeSuffix("已装")
                 t.endsWith("已") -> t.removeSuffix("已")
-                else -> return null
+                // 名字里合法含「装/备/已」字（如「装备」词不在名字里但字符可能混入 OCR 噪声）
+                // → 走到这说明文本不含完整标记又不以截断尾缀结束：按 manage 全行带噪处理，
+                //   交给上层词典匹配判弃。
+                else -> t
             }
             return StatParser.clean(cut).takeIf { it.isNotEmpty() }
         }

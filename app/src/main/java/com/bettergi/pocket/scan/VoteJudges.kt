@@ -84,6 +84,51 @@ object VoteJudges {
         //   阈值给 10× 余量；背景米色（lum ~228）被 215 上限排除。
         const val SUBSTAT_PENDING_DARK_MAX = 150   // 深灰核心少于该数 ⇒ 待激活（激活行实测 ≥1913）
         const val SUBSTAT_MIN_TEXT_PIXELS = 400    // 双带合计低于该数 ⇒ 空行（无词条）
+
+        /**
+         * equipped 行"已装备"饱和度门（2026-10-09 华为 2244 真机实测定标）：
+         * 未装备=面板底色（mean sat 16），已装备=黄底高亮条+彩色头像（mean sat 52）。
+         * 门槛取 35（中点偏下，两侧余量 ≥19）；抽样步长 2 已足够稳。
+         */
+        const val EQUIPPED_SAT_THRESHOLD = 35
+        const val EQUIPPED_SAT_SAMPLE_STEP = 2
+    }
+
+    /**
+     * equipped 行"是否被装备"像素预判（2026-10-09 懒识别）：区域平均饱和度门。
+     *
+     * 93.8% 的格子装备者为空（31085 行真机面板原文统计），先过本门再决定是否把
+     * equipped 槽塞进 readRois 批量——未装备整槽免 rec（scaledW≈534px，最贵槽之一）。
+     *
+     * 实测（华为 2244，三帧）：未装备 equipped 区 mean sat=16；已装备（黄条+头像）=52。
+     * 圣遗物/武器两面板同判据（布局同源）。
+     *
+     * 返回：true=已装备（要做 OCR）；false=未装备（跳过）；null=帧/区域不可用（保守起见做 OCR）。
+     */
+    fun equippedRowPresent(frame: Mat, rect: FrameRect): Boolean? {
+        if (frame.empty()) return null
+        val x0 = rect.left.coerceIn(0, frame.cols() - 1)
+        val y0 = rect.top.coerceIn(0, frame.rows() - 1)
+        val x1 = rect.right.coerceIn(0, frame.cols())
+        val y1 = rect.bottom.coerceIn(0, frame.rows())
+        if (x1 <= x0 || y1 <= y0) return null
+        val w = x1 - x0
+        val rowBuf = ByteArray(3 * w)
+        var sum = 0L
+        var n = 0
+        for (y in y0 until y1 step Thresholds.EQUIPPED_SAT_SAMPLE_STEP) {
+            frame.get(y, x0, rowBuf)
+            for (i in 0 until w step Thresholds.EQUIPPED_SAT_SAMPLE_STEP) {
+                val o = i * 3
+                val b = rowBuf[o].toInt() and 0xFF
+                val g = rowBuf[o + 1].toInt() and 0xFF
+                val r = rowBuf[o + 2].toInt() and 0xFF
+                sum += maxOf(r, g, b) - minOf(r, g, b)
+                n++
+            }
+        }
+        if (n == 0) return null
+        return (sum / n) > Thresholds.EQUIPPED_SAT_THRESHOLD
     }
 
     /**
