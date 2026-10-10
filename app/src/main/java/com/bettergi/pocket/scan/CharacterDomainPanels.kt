@@ -890,6 +890,12 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
             profile.rect("panels.char_profile.name"),
             profile.rect("panels.char_profile.level"),
             profile.rect("panels.char_profile.header"),
+            // ★ 2026-10-10（合并 assert 进同帧读，省 2 次 freshFrame+OCR）：原流程 parse 之前
+            //   有两个 assertScreen——各 freshFrame + 单矩形 OCR，且 header 与 parse 重复读。
+            //   合并后一帧读 5 矩形：[3]=bottomBar(属性页判据"提升指南") [4]=titleBar(元素判据)。
+            //   判定内联（onFail=continue 语义不变：未命中只打 W）。
+            profile.rect("panels.char_profile.bottomBar"),
+            profile.rect("screens._common.titleBar"),
         )
         var texts = gateway.readRois(frame, rects)
         // 2026-09-10 诊断日志：name/level 在 app 内读空（离线 paddleocr 同源 ROI 能读）→ 打印原始输出与实际 ROI
@@ -899,6 +905,16 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
                 "hdr='${tt.getOrElse(2) { "" }}' | rects=${rects.joinToString { "(${it.left},${it.top},${it.right},${it.bottom})" }}",
         )
         logRaw(texts)
+
+        // ★ 2026-10-10 assert 内联（原 assertScreen×2 → 同帧判定）：onFail=continue 语义不变，
+        //   未命中只打 W（不打断流程——与原 assertScreen 的 retries 重试不同，这里同一帧内
+        //   不再重试：parse 的名称重读循环本身就会再拿新帧，届时 bottomBar/titleBar 一并重判）。
+        run {
+            val attrOk = Regex("提升指南|升指南").containsMatchIn(texts.getOrElse(3) { "" })
+            val elOk = Regex("元素").containsMatchIn(texts.getOrElse(4) { "" })
+            if (!attrOk) Log.w(TAG, "char: 属性页判据未命中（bottomBar='${texts.getOrElse(3) { "" }}'）⇒ 继续")
+            if (!elOk) Log.w(TAG, "char: 元素判据未命中（titleBar='${texts.getOrElse(4) { "" }}'）⇒ 继续")
+        }
 
         /**
          * 本帧的 name / level / ascension / element 解析（抽成本地函数，供「名称未命中 ⇒ 重读」复用）。

@@ -127,9 +127,8 @@ internal suspend fun ScanEngine.runCharacterSteps() {
                 visitClick(CharacterFlow.CLICK_CELL, CharacterFlow.GRID, col, row, idx, ctx, prof)
                 // ② navigate 复位属性页（原 visit[1]；leftMenu 非空 ⇒ 无 read 数组兜底）
                 navigate(CharacterFlow.NAV_ATTRIBUTES)
-                // ③④ 页签级 + 界面级确认
-                assertScreen(CharacterFlow.ASSERT_ATTRIBUTES)
-                assertScreen(CharacterFlow.ASSERT_ELEMENT)
+                // ③④（2026-10-10 合并进 parseCharacterPanel 同帧读）：属性页/元素判据内联，
+                //    原 assertScreen×2 的 2 次 freshFrame+OCR 省去（header 原本就重复读）。
                 // ⑤ 解析角色面板（char_profile 分支 = 取新帧）
                 visitParsePanel(CharacterFlow.PARSE_CHAR, CharacterFlow.GRID, col, row, idx, ctx, prof)
                 // ⑥ dedupeSkip（key==null 不跳过语义照旧）
