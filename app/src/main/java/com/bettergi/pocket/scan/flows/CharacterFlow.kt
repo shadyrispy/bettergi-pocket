@@ -29,6 +29,15 @@ internal object CharacterFlow {
     /** 网格键（原 pagedGrid.grid）：左侧头像条 1 列网格（自由滚动无吸附，引擎每轮重检槽位）。 */
     const val GRID = "char_strip"
 
+    /**
+     * ★ 2026-10-10（GS 对齐 scanner.rs:1770-1822）：**相邻角色交替正/反序**——
+     * 正序 属性→命座→天赋（结束在天赋页），反序 天赋→命座→属性（结束在属性页）；
+     * 上一角色的结束页 = 下一角色的起始页 ⇒ 每角色省 1 次"复位属性页"页签点击。
+     * 名字读 header（三页签同位「X元素/名字」）⇒ 反序格天赋页上即可判重（dedupeSkip 共存）。
+     * 判重跳过格不翻转（跳过格结束在属性页，下格正序）。
+     */
+    var reverse = false
+
     /** 原 steps[0]：进角色界面（标题条 `<元素>/<角色名>` 含「元素」= 到达判据）。 */
     val ENTER_CHAR: JSONObject = FlowDicts.step("enterScreen")
         .put("target", "char_interface")
@@ -73,6 +82,16 @@ internal object CharacterFlow {
     /** 原 visit[4]：解析角色概览面板（dict 平移：name=mappings.characters, fuzzy=1）。 */
     val PARSE_CHAR: JSONObject = FlowDicts.step("parsePanel")
         .put("panel", "char_profile")
+        .put("dict", JSONObject().put("name", "mappings.characters").put("fuzzy", 1))
+
+    /**
+     * ★ 2026-10-10 交替页签序：反序格起始在天赋页的**预读**步——header（三页签同位「X元素/名字」）
+     * 出 key 供 dedupeSkip 判定；name/level 矩形在天赋页读到的是脏值 ⇒ headerOnly=true：
+     * 不写角色草案字段、不进重读循环。正式采集由属性页 parse（PARSE_CHAR）完成。
+     */
+    val PARSE_CHAR_TALENT_CONTEXT: JSONObject = FlowDicts.step("parsePanel")
+        .put("panel", "char_profile")
+        .put("headerOnly", true)
         .put("dict", JSONObject().put("name", "mappings.characters").put("fuzzy", 1))
 
     /** 原 visit[6]：去命之座页（navigate 内含页确认 readConstellation()）。 */
@@ -123,33 +142,62 @@ internal suspend fun ScanEngine.runCharacterSteps() {
     nativeStep("pagedGrid") {
         pagedGridNative(CharacterFlow.GRID, scrollToTop = true) { col, row, idx, prof ->
             runVisitBody(CharacterFlow.GRID, col, row, idx, prof, CharacterFlow.EMIT_CHAR, CharacterFlow.STOP_DUP) { ctx ->
-                // ① 点头像
-                visitClick(CharacterFlow.CLICK_CELL, CharacterFlow.GRID, col, row, idx, ctx, prof)
-                // ② navigate 复位属性页（原 visit[1]；leftMenu 非空 ⇒ 无 read 数组兜底）
-                navigate(CharacterFlow.NAV_ATTRIBUTES)
-                // ③④（2026-10-10 合并进 parseCharacterPanel 同帧读）：属性页/元素判据内联，
-                //    原 assertScreen×2 的 2 次 freshFrame+OCR 省去（header 原本就重复读）。
-                // ⑤ 解析角色面板（char_profile 分支 = 取新帧）
-                visitParsePanel(CharacterFlow.PARSE_CHAR, CharacterFlow.GRID, col, row, idx, ctx, prof)
-                // ⑥ dedupeSkip（key==null 不跳过语义照旧）
-                visitDedupeSkip(col, row, idx)
-                if (!visitSkipTail) {
-                    // ⑦ 命之座（navigate 内含页确认）+ ⑧ 命座页确认
-                    navigate(CharacterFlow.NAV_CONSTELLATION)
-                    readConstellation(CharacterFlow.READ_CONSTELLATION)
-                    // ⑨ 天赋页 + ⑩ 落点确认
-                    navigate(CharacterFlow.NAV_TALENT)
-                    assertScreen(CharacterFlow.ASSERT_TALENT)
+                // ★ 交替页签序（GS scanner.rs:1770-1822 对齐，2026-10-10 双源名字方案）：
+                //   正序格 属性→命→天（结束天赋页）；反序格 天赋→命→属性（结束属性页）。
+                //   每格 2 次页签点击（原 3 次）。名字读 header（三页签同位「X元素/名字」）
+                //   ⇒ 反序格天赋页上就能判重/识别，与 dedupeSkip 共存。
+                //   level 矩形只在属性页有 ⇒ 反序格 parse 挪到属性页之后（level 由 parse 补读）。
+                if (!CharacterFlow.reverse) {
+                    // ── 正序格 ──
+                    // ① 点头像
+                    visitClick(CharacterFlow.CLICK_CELL, CharacterFlow.GRID, col, row, idx, ctx, prof)
+                    // ② navigate 复位属性页（上一格结束在天赋页 ⇒ name/header ROI 需回属性页语境）
+                    navigate(CharacterFlow.NAV_ATTRIBUTES)
+                    // ③ parse（assert 属性/元素判据内联同帧）
+                    visitParsePanel(CharacterFlow.PARSE_CHAR, CharacterFlow.GRID, col, row, idx, ctx, prof)
+                    // ④ dedupeSkip（header 名字判重；key==null 不跳过照旧）
+                    visitDedupeSkip(col, row, idx)
+                    if (!visitSkipTail) {
+                        // ⑤ 命之座 + ⑥ 天赋页（结束在天赋页）
+                        navigate(CharacterFlow.NAV_CONSTELLATION)
+                        readConstellation(CharacterFlow.READ_CONSTELLATION)
+                        navigate(CharacterFlow.NAV_TALENT)
+                        assertScreen(CharacterFlow.ASSERT_TALENT)
+                        CharacterFlow.reverse = true
+                    } else {
+                        // 跳过格结束在属性页 ⇒ 下格保持正序
+                        Log.i(TAG, "visit cell($col,$row) idx=$idx 已判重 ⇒ 跳过两跳（停属性页，下格正序）")
+                        CharacterFlow.reverse = false
+                    }
+                    stopWhenRegisterDuplicateStreak(3, 2)
+                    visitEmit(CharacterFlow.EMIT_CHAR)
                 } else {
-                    Log.i(
-                        TAG,
-                        "visit cell($col,$row) idx=$idx 已判重 ⇒ 跳过 命之座/天赋 两跳（stopWhen/emit 照跑）",
-                    )
+                    // ── 反序格 ──
+                    // ① 点头像（面板停在天赋页——上一格结束页）
+                    visitClick(CharacterFlow.CLICK_CELL, CharacterFlow.GRID, col, row, idx, ctx, prof)
+                    // ② parse@天赋页：header（名字/元素，三页签同位）可读 ⇒ dedupeSkip 判定提前可用；
+                    //    level 矩形在天赋页不存在 ⇒ parse 内 level 会读空并走重读/置 0 分支，
+                    //    正式的 level 采集在下方属性页 parse 完成（那里重读 name+level）。
+                    visitParsePanel(CharacterFlow.PARSE_CHAR_TALENT_CONTEXT, CharacterFlow.GRID, col, row, idx, ctx, prof)
+                    // ③ dedupeSkip（用天赋页 header 名字判重；已见过 ⇒ 跳过属性/命座两跳）
+                    visitDedupeSkip(col, row, idx)
+                    if (!visitSkipTail) {
+                        // ④ 命之座 + ⑤ 属性页（parse 补读 level/元素，结束在属性页）
+                        navigate(CharacterFlow.NAV_CONSTELLATION)
+                        readConstellation(CharacterFlow.READ_CONSTELLATION)
+                        navigate(CharacterFlow.NAV_ATTRIBUTES)
+                        visitParsePanel(CharacterFlow.PARSE_CHAR, CharacterFlow.GRID, col, row, idx, ctx, prof)
+                        CharacterFlow.reverse = false
+                    } else {
+                        // 跳过格：level 没读过 ⇒ 必须回属性页补一次完整 parse（否则该角色 level=0 入库 ✗）
+                        navigate(CharacterFlow.NAV_ATTRIBUTES)
+                        visitParsePanel(CharacterFlow.PARSE_CHAR, CharacterFlow.GRID, col, row, idx, ctx, prof)
+                        Log.i(TAG, "visit cell($col,$row) idx=$idx 已判重 ⇒ 属性页补读后跳过两跳")
+                        CharacterFlow.reverse = false
+                    }
+                    stopWhenRegisterDuplicateStreak(3, 2)
+                    visitEmit(CharacterFlow.EMIT_CHAR)
                 }
-                // ⑪ 止扫登记（判据在 emitCharacter/格级闭环求值）
-                stopWhenRegisterDuplicateStreak(3, 2)
-                // ⑫ 入库（重复不入库语义在 emitCharacter 内）
-                visitEmit(CharacterFlow.EMIT_CHAR)
             }
         }
     }

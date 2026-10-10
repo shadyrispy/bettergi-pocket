@@ -877,7 +877,16 @@ internal fun ScanEngine.looksLikeTravelerName(s: String): Boolean =
     s.length <= 4 && s.contains('旅') && s.contains('者')
 
 /** 角色概览面板：name/level/header(元素) —— panels.char_profile。 */
-internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanEngine.CellFrameContext?) {
+internal suspend fun ScanEngine.parseCharacterPanel(
+    step: JSONObject,
+    ctx: ScanEngine.CellFrameContext?,
+    /** ★ 2026-10-10 交替页签序：true = 反序格天赋页的**预读**（header 出名字供 dedupeSkip 判定）。
+     *  天赋页上 name/level 矩形读的是天赋名/天赋等级（脏值）⇒ 只判 key、**不写角色草案字段**、
+     *  不进重读循环；正式采集由随后的属性页 parse 完成。 */
+    headerOnly: Boolean = false,
+) {
+    // 步声明可覆盖（visitParsePanel 经 step 传入，无需改调用点签名）
+    val headerOnlyEffective = headerOnly || step.optBoolean("headerOnly", false)
     val gateway = ocr
     if (gateway == null) {
         Log.w(TAG, "parseCharacterPanel: OCR 未接入，跳过")
@@ -991,7 +1000,8 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
         //   ⇒ lv=7 却 >0，旧条件（key==null || level<=0）不会重读 ✗。
         //   等级 OCR 只会**欠读**（丢末位/首位）⇒ 重读时**逐次取 max** 是安全合并律；
         //   `< CHAR_LEVEL_MIN_PLAUSIBLE` 仅作触发条件（不参与取值）。
-        while ((key == null || level <= 0 || level < CHAR_LEVEL_MIN_PLAUSIBLE) && nTry < CHAR_NAME_MAX_TRIES) {
+        while (!headerOnlyEffective &&
+            (key == null || level <= 0 || level < CHAR_LEVEL_MIN_PLAUSIBLE) && nTry < CHAR_NAME_MAX_TRIES) {
             nTry++
             delay(CHAR_NAME_REREAD_MS)
             val f2 = runCatchingCancellable { settleFrame() }.getOrNull() ?: break
@@ -1019,14 +1029,21 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
             //   （去管理器页补昵称，#105），也不要静默少两件。
             Log.w(TAG, "char: 显示名 '$rawName' 三档解析全未命中 ⇒ 按原文入库（lv=$level el=$element），请补昵称表")
         }
-        charName = key ?: rawName
-        charKey = key
-        lastCharKey = key
-        charLevel = level
-        val elGood = exportElement(key, element)
-        charElement = elGood
-        vars.level = level
-        Log.i(TAG, "char: name=${key ?: rawName} lv=$level element=$elGood（页头 OCR='$element'）")
+        if (headerOnlyEffective) {
+            // 反序格预读：只暂存 key（dedupeSkip 判定用）；草案字段留给属性页 parse 覆写
+            charKey = key
+            lastCharKey = key
+            Log.i(TAG, "char: headerOnly 预读 key=$key（rawName='$rawName'）——草案字段待属性页 parse")
+        } else {
+            charName = key ?: rawName
+            charKey = key
+            lastCharKey = key
+            charLevel = level
+            val elGood = exportElement(key, element)
+            charElement = elGood
+            vars.level = level
+            Log.i(TAG, "char: name=${key ?: rawName} lv=$level element=$elGood（页头 OCR='$element'）")
+        }
     } catch (e: OcrUnavailableException) {
         // ★ A7/G：函数级 catch 会把「OCR 引擎未就绪」吞成「跳过该格」（静默错数据）。
         //   引擎不可用是 loud 失败，必须放行（轨 E 已在 OcrGatewayImpl 侧显式抛出）。
