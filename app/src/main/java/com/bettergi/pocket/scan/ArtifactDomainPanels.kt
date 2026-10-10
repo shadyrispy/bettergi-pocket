@@ -793,6 +793,10 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //   JPEG 有损下仍完美分离）。判得 pending ⇒ 给该行文本补上与 OCR 时代相同的
     //   「（待激活）」标记 ⇒ 下游 StatParser/RollSolver/GoodExporter 语义零改动
     //   （拆分优先级①的标记来源从 OCR 换成颜色；ROI 收窄同时把 rec Σw 砍 ~27%）。
+    // ★ 2026-10-10 #244：那次收窄把 2244 档推到 278 宽，正好把 6 字标签行「元素充能效率」的
+    //   % 裁在 ROI 外（华为 304 次读数 0 次带 % ⇒ #243 的 123 格解不出）。右缘已按 2560 基准
+    //   摆回，**长标签行的「（待」会重新进文本**：StatParser 要 contains(待激活) 整串才置位，
+    //   截断后缀既不污染数值也不与颜色判据冲突（2244 档短标签行一直如此，实测无害）。
     val judgedSubLines = (0 until subRects.size).map { i ->
         val t = lines.getOrNull(3 + i).orEmpty()
         if (t.isBlank()) t else when (VoteJudges.substatRowPending(frame, subRects[i])) {

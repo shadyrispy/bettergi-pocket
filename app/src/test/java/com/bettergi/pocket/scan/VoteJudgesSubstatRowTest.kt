@@ -20,6 +20,9 @@ import java.io.File
  * 背景：subStats ROI 收窄（2990→2660）后"（待激活）"后缀不再进 OCR 文本，
  * 待激活改由颜色判定 —— 激活行文字**深灰**（中性 lum 90-150 核心像素 1913-2219），
  * 待激活行**中灰**（同带深灰 0、全部 150-215），JPEG 有损下仍完美分离。
+ * ⚠️ 2026-10-10 #244 右缘又按 2560 基准摆回 2720（2660 只剩 1px 余量，见 profiles note）：
+ *   长标签行的「（待」会重新进文本，但**进不了本判据的 dark 带**（后缀是中灰 150-215），
+ *   下面两条用例的 rect 已按摆回后的右缘重画，判据结论不变。
  *
  * GT 帧来源：小米 15 / 3200×1440 真机截图（熔铸者的观测 +0，第 4 条待激活），
  * 裁 subStats 面板区 (2230,780)-(3000,1060) 存为 `substats_pending_gt.jpg`。
@@ -88,9 +91,10 @@ class VoteJudgesSubstatRowTest {
         }
         val mat = Imgcodecs.imread(f.absolutePath)
         assertTrue("GT 帧加载失败", !mat.empty())
-        // 裁剪区 (2230,780) 起；profile 行带 y=794/858/922/986，高 54，右缘已收窄到 2660
+        // 裁剪区 (2230,780) 起（宽 770 ⇒ 覆盖到原帧 x=3000）；profile 行带 y=794/858/922/986，高 54。
+        // 右缘按 2026-10-10 #244 摆回后的 profile 画：x[2238,2720] = 2560 基准 [1718,2200]+520。
         val rects = listOf(794, 858, 922, 986).map { y ->
-            FrameRect(2230 - 2230, y - 780, 2660 - 2230, y - 780 + 54)
+            FrameRect(2238 - 2230, y - 780, 2720 - 2230, y - 780 + 54)
         }
         val verdicts = rects.map { VoteJudges.substatRowPending(mat, it) }
         assertNotNull(verdicts[0])
@@ -99,9 +103,12 @@ class VoteJudgesSubstatRowTest {
     }
 
     /**
-     * 2244 档跨档安全：华为真机帧（4 条全激活）收窄后 (1516,596)-(1862,780) 逐行仍判 false。
+     * 2244 档跨档安全：华为真机帧（4 条全激活）裁片区 (1516,586)-(1862,780) 逐行仍判 false。
      * 判据阈值在 0.7× 缩档下的实测余量：激活行 dark 921~1784（阈值 150），
-     * 文本右缘 ≤1782（收窄线 1862 留 80px 余量）。
+     * 文本右缘 ≤1782（本裁片右缘 1862 留 80px 余量）。
+     * ⚠️ 2026-10-10 #244 后 profile 的 2244 档右缘是 **1884**（不是这里的 1862）：
+     *   旧值 1800 把 6 字标签行的 % 整枚裁在外面（#243）。外扩的 1800..1884 段在奶白底上，
+     *   与上面 3200 档那条同理 ⇒ 计数不变；本用例只覆盖到 1862，因为 GT 裁片就那么大。
      */
     @Test
     fun `GT 帧 2244 档四条全激活逐行判 false`() {
@@ -111,9 +118,11 @@ class VoteJudgesSubstatRowTest {
         }
         val mat = Imgcodecs.imread(f.absolutePath)
         assertTrue("2244 GT 帧加载失败", !mat.empty())
-        // 裁剪区 (1516,586) 起；profile 行带 y=596/644/692/740，高 40，右缘收窄到 1862
+        // 裁剪区 (1516,586) 起（宽 354 ⇒ 覆盖到原帧 x=1870）；profile 行带 y=596/644/692/740，高 40。
+        // 右缘按 #244 摆回后的 1884 写，裁片只到 1870 ⇒ 判据内部 coerceIn 截到 1870（差 14px，
+        // 那 14px 与已覆盖段同为奶白底）。
         val rects = listOf(596, 644, 692, 740).map { y ->
-            FrameRect(0, y - 586, 1862 - 1516, y - 586 + 40)
+            FrameRect(1522 - 1516, y - 586, 1884 - 1516, y - 586 + 40)
         }
         val verdicts = rects.map { VoteJudges.substatRowPending(mat, it) }
         assertEquals(listOf(false, false, false, false), verdicts)
