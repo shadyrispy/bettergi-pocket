@@ -1139,14 +1139,19 @@ internal suspend fun ScanEngine.readConstellation() {
                 val half = Math.max(1, profile.scale(roi, profile.scaleY) / 2)
                 var satSum = 0
                 var total = 0
-                var y = cy - half
+                // ★ 2026-10-11 性能：逐像素 `f.get(y,x)` 是每像素一次 JNI 调用（6 节点 × ~340px ≈
+                //   2000 次/帧，轮询 2~8 帧 ⇒ 每角色 4k~17k 次）。改**整行批量读**（一次 JNI 取一行，
+                //   行内下标采样），与 VoteJudges.countMatches / TemplateMatcher 的整行改法同源。
+                val rowBuf = ByteArray(3 * f.cols())
+                var y = (cy - half).coerceAtLeast(0)
                 while (y <= cy + half && y < f.rows()) {
-                    var x = cx - half
+                    f.get(y, 0, rowBuf)
+                    var x = (cx - half).coerceAtLeast(0)
                     while (x <= cx + half && x < f.cols()) {
-                        val px = f.get(y, x)   // BGR
-                        val b = px[0].toInt() and 0xFF
-                        val g = px[1].toInt() and 0xFF
-                        val r = px[2].toInt() and 0xFF
+                        val o = x * 3
+                        val b = rowBuf[o].toInt() and 0xFF
+                        val g = rowBuf[o + 1].toInt() and 0xFF
+                        val r = rowBuf[o + 2].toInt() and 0xFF
                         // ★ 简易饱和度 = max−min（0~255）：彩色图标高、白/灰/暗底低 ✓
                         satSum += maxOf(r, g, b) - minOf(r, g, b)
                         total++
