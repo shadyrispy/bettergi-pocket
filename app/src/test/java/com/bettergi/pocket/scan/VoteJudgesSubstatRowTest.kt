@@ -23,6 +23,8 @@ import java.io.File
  * ⚠️ 2026-10-10 #244 右缘又按 2560 基准摆回 2720（2660 只剩 1px 余量，见 profiles note）：
  *   长标签行的「（待」会重新进文本，但**进不了本判据的 dark 带**（后缀是中灰 150-215），
  *   下面两条用例的 rect 已按摆回后的右缘重画，判据结论不变。
+ * ★ 2026-10-11 左缘裁到次字起点（3200 x0 2238→2264、2244 x0 1522→1540）：裁掉的是行首圆点「·」，
+ *   它不在被判读的文本体内，两条用例的 rect 已跟着改（见各自注释），判据结论不变。
  *
  * GT 帧来源：小米 15 / 3200×1440 真机截图（熔铸者的观测 +0，第 4 条待激活），
  * 裁 subStats 面板区 (2230,780)-(3000,1060) 存为 `substats_pending_gt.jpg`。
@@ -92,9 +94,9 @@ class VoteJudgesSubstatRowTest {
         val mat = Imgcodecs.imread(f.absolutePath)
         assertTrue("GT 帧加载失败", !mat.empty())
         // 裁剪区 (2230,780) 起（宽 770 ⇒ 覆盖到原帧 x=3000）；profile 行带 y=794/858/922/986，高 54。
-        // 右缘按 2026-10-10 #244 摆回后的 profile 画：x[2238,2720] = 2560 基准 [1718,2200]+520。
+        // 左缘按 2026-10-11 左缘裁切后的 profile 画：x[2264,2720] = 2560 基准 [1744,2200]+520。
         val rects = listOf(794, 858, 922, 986).map { y ->
-            FrameRect(2238 - 2230, y - 780, 2720 - 2230, y - 780 + 54)
+            FrameRect(2264 - 2230, y - 780, 2720 - 2230, y - 780 + 54)
         }
         val verdicts = rects.map { VoteJudges.substatRowPending(mat, it) }
         assertNotNull(verdicts[0])
@@ -119,10 +121,10 @@ class VoteJudgesSubstatRowTest {
         val mat = Imgcodecs.imread(f.absolutePath)
         assertTrue("2244 GT 帧加载失败", !mat.empty())
         // 裁剪区 (1516,586) 起（宽 354 ⇒ 覆盖到原帧 x=1870）；profile 行带 y=596/644/692/740，高 40。
-        // 右缘按 #244 摆回后的 1884 写，裁片只到 1870 ⇒ 判据内部 coerceIn 截到 1870（差 14px，
-        // 那 14px 与已覆盖段同为奶白底）。
+        // 左/右缘按 2026-10-11 后的 profile 画：x[1540,1884]；裁片只到 1870 ⇒ 判据内部 coerceIn 截到 1870
+        // （右缘差 14px，那 14px 与已覆盖段同为奶白底；左缘 1540 在本裁片内，起点 24）。
         val rects = listOf(596, 644, 692, 740).map { y ->
-            FrameRect(1522 - 1516, y - 586, 1884 - 1516, y - 586 + 40)
+            FrameRect(1540 - 1516, y - 586, 1884 - 1516, y - 586 + 40)
         }
         val verdicts = rects.map { VoteJudges.substatRowPending(mat, it) }
         assertEquals(listOf(false, false, false, false), verdicts)

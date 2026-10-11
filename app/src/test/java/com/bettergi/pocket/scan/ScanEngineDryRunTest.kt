@@ -192,8 +192,8 @@ class ScanEngineDryRunTest {
 
         // 按格递增的唯一件名（模拟真实网格每件不同）；页切换时重置（模拟跨页同件重叠 → 去重测试）
         private val NAME_RECT = FrameRect(2230, 220, 2462, 270)   // 2026-10-09 ROI 瘦身定稿：只装 6 字，尾部由 NameMatcher 反向子串补
-        private val SUB0_RECT = FrameRect(2238, 794, 2720, 848)   // ★ 2026-10-10 #244：= 2560 基准 [1718,2200]+520（旧 [2268,2660] 右缘只剩 3px 余量）
-        private val SUB0_RECT_CRAFTED = FrameRect(2238, 857, 2720, 911)
+        private val SUB0_RECT = FrameRect(2264, 794, 2720, 848)   // ★ 2026-10-11 左缘裁到次字起点：= 2560 基准 [1744,2200]+520；行首圆点被裁、词条名完整保留
+        private val SUB0_RECT_CRAFTED = FrameRect(2264, 857, 2720, 911)
         // ★ A10：weapon_backpack 面板的 name/level ROI（profiles.json 3200 基坐标，calibrate 后不变）
         private val WEAPON_NAME_RECT = FrameRect(2231, 214, 2470, 273)
         private val WEAPON_LEVEL_RECT = FrameRect(2210, 709, 2455, 763)
@@ -223,12 +223,12 @@ class ScanEngineDryRunTest {
              *   与"每格 OCR 文本递增"的 mock 语义**自相矛盾**：真实里每张卡的面板就是不同的）。
              *   现在在面板指纹区域内画一个随点击数变化的红块 ⇒ 面板指纹闸门（PanelFingerprint）
              *   能正确区分"不同卡"；跨页重复格由**内容键**去重兜底（本 harness 的既有断言语义不变）。
-             *   位置 (2300..2328, 900..904) 落在指纹区（subStats x2238..2720 / y794..1040）内，
+             *   位置 (2300..2328, 900..904) 落在指纹区（subStats x2264..2720 / y794..1040）内，
              *   且避开全部像素判据区（锁 2811..2845、收藏 2900..2947、星带 y599..640、祝圣点 y703）。
              *   ⚠️ 2026-10-05 subStats ROI 收窄（2990→2660）后这里必须跟着挪：
              *   标记落在指纹区外 ⇒ 闸门永远等不到"面板已换"⇒ 本类 9 条用例各超时 180s。
-             *   2026-10-10 #244 又按 2560 基准把本档 ROI 摆回 [2238,2720]（2660 只剩 1px 余量、
-             *   且左缘把行首「·」裁在外面）⇒ 标记仍在区内、也仍在锁/收藏区之外，无需再挪。
+             *   2026-10-10 #244 按 2560 基准把本档 ROI 摆回 [2238,2720]；2026-10-11 左缘再裁到 [2264,2720]
+             *   ⇒ 标记仍在区内、也仍在锁/收藏区之外，无需再挪（标记左缘 2300 距 ROI 左缘 2264 有 36px）。
              */
             override suspend fun grabFresh(afterTimestampMs: Long, timeoutMs: Long): Mat {
                 // ★ A11：冻结服务 —— 第 k 格（k ∈ 1..freezeCells）visit 的第一次抓帧返回
@@ -375,21 +375,21 @@ class ScanEngineDryRunTest {
         // ★ 2026-10-09 ROI 瘦身同步：rect 对齐 profiles.json 新标定（slot/mainValue 槽已删，
         //    slotKey 由「晨光的明誓」经 artifactPieces 反查，mainKey 由「生命值"+slot=plume」…）
         //    ⚠️ 夹具件名与 slot 的对应关系由词典决定：晨光的明誓 → circlet。
-        // ★ 2026-10-10 #244：只有 subStats 六条随基准外扩（夹具与 profile 是**逐字相等**匹配，
+        // ★ 2026-10-11 左缘裁到次字起点：subStats 八条 x0 2238→2264（夹具与 profile 是**逐字相等**匹配，
         //    不改这里 ⇒ mock 返回空串）；name 槽保持 6 字定稿值不动。
         val base = mutableMapOf(
             FrameRect(2230, 220, 2462, 270) to "晨光的明誓",            // name（6字宽，定稿）
             FrameRect(2224, 444, 2340, 500) to "生命值",                // mainName（3字宽）
             FrameRect(2230, 716, 2340, 766) to levelText,              // level（未祝圣位置）
             FrameRect(2230, 779, 2340, 829) to levelText,              // level（crafted yShift+63 后）
-            FrameRect(2238, 794, 2720, 848) to "暴击率+5.8%",           // sub0（原位）
-            FrameRect(2238, 858, 2720, 912) to "生命值+717",            // sub1（原位）
-            FrameRect(2238, 922, 2720, 976) to "元素充能效率+12.4%",     // sub2（原位）
-            FrameRect(2238, 986, 2720, 1040) to "元素精通+23",           // sub3（原位）
-            FrameRect(2238, 857, 2720, 911) to "暴击率+5.8%",           // sub0（crafted yShift+63）
-            FrameRect(2238, 921, 2720, 975) to "生命值+717",            // sub1
-            FrameRect(2238, 985, 2720, 1039) to "元素充能效率+12.4%",    // sub2
-            FrameRect(2238, 1049, 2720, 1103) to "元素精通+23",          // sub3
+            FrameRect(2264, 794, 2720, 848) to "暴击率+5.8%",           // sub0（原位）
+            FrameRect(2264, 858, 2720, 912) to "生命值+717",            // sub1（原位）
+            FrameRect(2264, 922, 2720, 976) to "元素充能效率+12.4%",     // sub2（原位）
+            FrameRect(2264, 986, 2720, 1040) to "元素精通+23",           // sub3（原位）
+            FrameRect(2264, 857, 2720, 911) to "暴击率+5.8%",           // sub0（crafted yShift+63）
+            FrameRect(2264, 921, 2720, 975) to "生命值+717",            // sub1
+            FrameRect(2264, 985, 2720, 1039) to "元素充能效率+12.4%",    // sub2
+            FrameRect(2264, 1049, 2720, 1103) to "元素精通+23",          // sub3
         )
         if (withCountLine) base[FrameRect(2674, 63, 2874, 95)] = "圣遗物 1026/2400"
         // filterReset 的面板开合判据：标题「圣遗物筛选」位于 profiles.json 的
