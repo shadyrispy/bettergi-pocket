@@ -895,17 +895,25 @@ internal suspend fun ScanEngine.parseCharacterPanel(
     val frame = ctx?.acquire { freshFrame() } ?: freshFrame()
     val owned = ctx?.frame != null
     try {
-        val rects = listOf(
-            profile.rect("panels.char_profile.name"),
-            profile.rect("panels.char_profile.level"),
-            profile.rect("panels.char_profile.header"),
-            // ★ 2026-10-10（合并 assert 进同帧读，省 2 次 freshFrame+OCR）：原流程 parse 之前
-            //   有两个 assertScreen——各 freshFrame + 单矩形 OCR，且 header 与 parse 重复读。
-            //   合并后一帧读 5 矩形：[3]=bottomBar(属性页判据"提升指南") [4]=titleBar(元素判据)。
-            //   判定内联（onFail=continue 语义不变：未命中只打 W）。
-            profile.rect("panels.char_profile.bottomBar"),
-            profile.rect("screens._common.titleBar"),
-        )
+        // ★★ 2026-10-10 headerOnly 预读（交替序反序格）：**只读 header 一个矩形**——天赋页上
+        //   name/level 矩形是天赋名/天赋等级（脏值），bottomBar/titleBar 是属性页判据（天赋页无意义）
+        //   ⇒ 4 个矩形全是浪费的推理宽度。预读只需要 header 出名字判重。
+        //   正常格读 5 矩形：[0]=name [1]=level [2]=header [3]=bottomBar [4]=titleBar。
+        val rects = if (headerOnlyEffective) {
+            listOf(profile.rect("panels.char_profile.header"))
+        } else {
+            listOf(
+                profile.rect("panels.char_profile.name"),
+                profile.rect("panels.char_profile.level"),
+                profile.rect("panels.char_profile.header"),
+                // ★ 2026-10-10（合并 assert 进同帧读，省 2 次 freshFrame+OCR）：原流程 parse 之前
+                //   有两个 assertScreen——各 freshFrame + 单矩形 OCR，且 header 与 parse 的 header **重复读**。
+                //   合并后一帧读 5 矩形：[3]=bottomBar(属性页判据"提升指南") [4]=titleBar(元素判据)。
+                //   判定内联（onFail=continue 语义不变：未命中只打 W）。
+                profile.rect("panels.char_profile.bottomBar"),
+                profile.rect("screens._common.titleBar"),
+            )
+        }
         var texts = gateway.readRois(frame, rects)
         // 2026-09-10 诊断日志：name/level 在 app 内读空（离线 paddleocr 同源 ROI 能读）→ 打印原始输出与实际 ROI
         fun logRaw(tt: List<String>) = Log.d(
@@ -989,11 +997,29 @@ internal suspend fun ScanEngine.parseCharacterPanel(
                     ?.also { Log.i(TAG, "char: 显示名 '$rn' 未命中词典/昵称表（元素=$el lv=$lv）⇒ 判为旅行者 $it") }
         }
 
-        var parsed = parseFrame(texts)
-        var rawName = parsed.first
-        var level = parsed.second
-        var element = parsed.third
-        var key = resolveKey(rawName, level, element)
+        // ★ 2026-10-10 headerOnly 分支（交替序反序格预读）：texts 只有 1 个元素 = header。
+        //   从 header 剥「X元素/名字」出名字段（NameMatcher 反向子串层兜尾裁），直接 resolveKey。
+        //   不走 parseFrame（其 tt[0]/tt[1] 在单元素 texts 下会错位成 header 读数）。
+        var rawName: String
+        var level: Int
+        var element: String?
+        var key: String?
+        if (headerOnlyEffective) {
+            val headerText = StatParser.clean(texts.getOrElse(0) { "" })
+            val headerCjk = Regex("[\\u4e00-\\u9fa5/／]+").findAll(headerText).map { it.value }.joinToString("")
+            element = Regex("^(.+?)元素").find(headerCjk)?.groupValues?.getOrNull(1)
+            // 名字段 = 斜杠后段（「水元素/芭芭拉」⇒「芭芭拉」）；无斜杠 = 整段（防 OCR 丢斜杠）
+            rawName = headerCjk.substringAfter('/', headerCjk)
+            level = 0 // level 在天赋页读不到（level 矩形是属性页专属）——headerOnly 不采 level
+            key = resolveKey(rawName, level, element)
+            Log.i(TAG, "char: headerOnly 预读 header='$headerText' ⇒ name='$rawName' el=$element key=$key")
+        } else {
+            var parsed = parseFrame(texts)
+            rawName = parsed.first
+            level = parsed.second
+            element = parsed.third
+            key = resolveKey(rawName, level, element)
+        }
         // ★ 2026-09-17：**名称/等级未取到 ⇒ 重读**（时序性读失败；重读不改变已成功的解析结果）
         var nTry = 1
         // ★ 2026-09-17：把「等级读数可疑」也纳入重读条件 —— 实测 Yaoyao 的 `等级70/90` 被读成 `7`
@@ -1016,10 +1042,10 @@ internal suspend fun ScanEngine.parseCharacterPanel(
             }
             if (t2 != null) { texts = t2; logRaw(t2) }
             f2.release()
-            parsed = parseFrame(texts)
-            rawName = parsed.first
-            if (parsed.second > level) level = parsed.second   // 欠读方向确定 ⇒ 取 max
-            element = parsed.third
+            val p2 = parseFrame(texts)
+            rawName = p2.first
+            if (p2.second > level) level = p2.second   // 欠读方向确定 ⇒ 取 max
+            element = p2.third
             key = resolveKey(rawName, level, element)
             Log.i(TAG, "char: key/lv 可疑 ⇒ 重读 #$nTry name='$rawName' lv=$level el=$element ⇒ key=$key")
         }
