@@ -643,14 +643,34 @@ internal fun ScanEngine.parseChainAnchor(entry: String): String {
  * `identity == null` ⇒ 不介入（既不计也不重置）。返回 true = 应止扫。
  */
 internal suspend fun ScanEngine.dialog(step: JSONObject) {
-    if (ocr == null) return
-    val ref = step.getString("ref").removePrefix("$")
-    val obj = profile.rawObject(ref) ?: return
+    if (ocr == null) {
+        Log.e(TAG, "dialog '${step.optString("ref")}': OCR 未接入 ⇒ 既判不了弹窗、也点不掉确认框")
+        return
+    }
+    // ⚠️ #222：flow 词汇写 `dialogs.*`，profiles 却把它挂在 `screens.dialogs.*` 下 —— 必须过
+    // [ScreenProfile.normalizeFlowRef]（该归一函数此前**没有任何调用点**，等于没写）。
+    // 旧代码直接 rawObject("dialogs.equipConfirm") 恒 null ⇒ `?: return` **静默跳过**，
+    // 换装确认钮从来没被点过，而流程照收 Success（弹窗还盖在后面的复核读上）。
+    val flowRef = step.getString("ref")
+    val ref = profile.normalizeFlowRef(flowRef.removePrefix("$"))
+    val obj = profile.rawObject(ref)
+    if (obj == null) {
+        val registered = profile.rawObject("screens.dialogs")?.let { node ->
+            val names = mutableListOf<String>()
+            val iter = node.keys()
+            while (iter.hasNext()) names += iter.next()
+            names.joinToString(", ").ifEmpty { "（空对象）" }
+        } ?: "『screens.dialogs』节点本身也不存在"
+        throw ScanAbortedException(
+            "dialog 断链：flow 写的 ref='$flowRef' 归一为 profile 键 '$ref'，" +
+                "该键无节点（已注册的弹窗键：$registered）⇒ 确认钮无法点击，终止而非带病继续",
+        )
+    }
     // 1. 检测弹窗：**优先用 `expect` 正判据**（弹窗独有措辞）。
     // ⚠️ 2026-09-13 修：原来「ROI 非空即视为弹窗」**会误判** —— 实测 51 张**无弹窗**截图里有 6 张该 ROI 非空
     //    （武器背包读到 `Lv.90 Lv.90 Lv.20`、套装筛选弹窗读到 `纺月的夜歌 70`、野外读到 `LV`）
     //    ⇒ 会在**没有弹窗**时**盲点确认钮**（换装确认的 confirmClick）⇒ 误触。
-    //    真弹窗文案实测：`…已被<角色>装备，是否更换？`（登记于 profile `dialogs.equipConfirm.expect`）。
+    //    真弹窗文案实测：`…已被<角色>装备，是否更换？`（登记于 profile `screens.dialogs.equipConfirm.expect`）。
     //    未配 `expect`（step 与 profile 都缺）时退回旧的「非空」判据并告警（兼容既有流程）。
     val ocrGateway = ocr
     val textRect = profile.rect("$ref.text")
@@ -674,12 +694,17 @@ internal suspend fun ScanEngine.dialog(step: JSONObject) {
         return
     }
     Log.i(TAG, "dialog $ref 出现（OCR='$text' 命中 /${expect ?: "非空"}/）⇒ 点确认")
-    // 2. 弹窗在 → 按 confirmClick 坐标点确认（profiles.dialogs.equipConfirm.confirmClick = [x,y]）
-    obj.optJSONArray("confirmClick")?.let { c ->
-        val pt = profile.scalePoint(c.getInt(0), c.getInt(1))
-        actions.click(pt.x, pt.y)
-        Log.i(TAG, "dialog $ref confirmed at (${pt.x},${pt.y})")
+    // 2. 弹窗在 → 按 confirmClick 坐标点确认（profiles.screens.dialogs.equipConfirm.confirmClick = [x,y]）
+    val confirm = obj.optJSONArray("confirmClick")
+    if (confirm == null || confirm.length() < 2) {
+        // 判到弹窗却点不掉 = 和 #222 同一类静默失效（弹窗会盖住 foreach 末尾的复核读），必须响
+        throw ScanAbortedException(
+            "dialog '$ref' 判到弹窗（OCR='$text'）但 profile 无 confirmClick ⇒ 确认钮无法点击",
+        )
     }
+    val pt = profile.scalePoint(confirm.getInt(0), confirm.getInt(1))
+    actions.click(pt.x, pt.y)
+    Log.i(TAG, "dialog $ref confirmed at (${pt.x},${pt.y})")
 }
 
 /**
