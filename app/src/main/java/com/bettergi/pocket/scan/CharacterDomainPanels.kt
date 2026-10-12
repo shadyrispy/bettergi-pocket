@@ -1054,6 +1054,13 @@ internal suspend fun ScanEngine.parseCharacterPanel(
             //   对账侧会把它报成「多出一条」——这是**故意的**：宁可显式多一条待办
             //   （去管理器页补昵称，#105），也不要静默少两件。
             Log.w(TAG, "char: 显示名 '$rawName' 三档解析全未命中 ⇒ 按原文入库（lv=$level el=$element），请补昵称表")
+        } else if (!headerOnlyEffective && level <= 0) {
+            // 名字命中词典却读不出等级 ⇒ 重读打满后 level=0 会和真低等级件同形；出声（不改值）。
+            Log.w(
+                TAG,
+                "char: 角色名 '$rawName' 已命中但等级重读 $nTry 次仍读不出 ⇒ 回退 0" +
+                    "（字段=level 原文=「${texts.getOrElse(1) { "" }}」）",
+            )
         }
         if (headerOnlyEffective) {
             // 反序格预读：只暂存 key（dedupeSkip 判定用）；草案字段留给属性页 parse 覆写
@@ -1086,8 +1093,14 @@ internal suspend fun ScanEngine.parseCharacterPanel(
  * 步长 3px 抽样，避免逐像素遍历大 ROI。
  */
 internal suspend fun ScanEngine.readConstellation() {
-    val obj = profile.rawObject("panels.char_constellation") ?: return
-    val nodes = obj.optJSONArray("nodes") ?: return
+    val obj = profile.rawObject("panels.char_constellation")
+    val nodes = obj?.optJSONArray("nodes")
+    if (obj == null || nodes == null) {
+        // 未标定就直接 return ⇒ charConstellation 停在 resetCharDraft 给的 0 ⇒ 导出看起来像「C0」，
+        // 而 C0 是合法真值，读不到标定与读到 C0 完全同形。必须出声。
+        Log.w(TAG, "char: 命座页未标定（panels.char_constellation/nodes 缺失）⇒ 命座按 c0 入库（角色=${lastCharKey ?: "?"}）")
+        return
+    }
     val roi = obj.optInt("roi", 55)
     // ★ 2026-09-30 #124：饱和度阈值是**档位量**，允许 profile 用 `satMin` 覆盖（未声明的档位沿用基准值）。
     //   判据形式（逐节点绝对阈值 + 稳定轮询取 min）不变，变的只是每档 own 的数值。
@@ -1118,7 +1131,8 @@ internal suspend fun ScanEngine.readConstellation() {
     }
     val frame = try {
         freshFrame()
-    } catch (e: CancellationException) { throw e } catch (_: Exception) {
+    } catch (e: CancellationException) { throw e } catch (e: Exception) {
+        Log.w(TAG, "char: 命座取帧失败 ⇒ 无法采样，按 c0 入库（page=$curPageNo r${curCellRow}c$curCellCol 角色=${lastCharKey ?: "?"}）: ${e.message}")
         return
     }
     var lit = 0
@@ -1212,7 +1226,8 @@ internal suspend fun ScanEngine.readConstellation() {
             if (sat >= th) lit++
             if (PANEL_RAW_DUMP) Log.i(TAG, "char.constellation node#$i sat=$sat th=$th lit=${sat >= th}")
         }
-    } catch (e: CancellationException) { throw e } catch (_: Exception) {
+    } catch (e: CancellationException) { throw e } catch (e: Exception) {
+        Log.w(TAG, "char: 命座采样异常 ⇒ 计数可能不完整，按已采 lit=$lit 入库（角色=${lastCharKey ?: "?"}）: ${e.message}")
     } finally {
         frame.release()
     }
@@ -1430,6 +1445,15 @@ internal suspend fun ScanEngine.readTalent() {
                 }
             }
         }
+    }
+    // 战斗天赋真值恒 ≥1（GT 最小 1）⇒ 重读打满后仍是 0 = 这一行根本没读到，不是读到 0 级。
+    // applyConstellationTalentBonus 对 0 行只跳不减，导出会带一个 0，与真低天赋同形，必须出声。
+    if (charTalents.any { it <= 0 }) {
+        Log.w(
+            TAG,
+            "char: 天赋重读 $attempts 次后仍有未读出行 ⇒ 该行按 0 入库" +
+                " ｜ 取值=${charTalents.toList()} ｜ 原文=${texts.take(3).map { "'" + it + "'" }}",
+        )
     }
     // ── ★ 2026-10-01 #155：命座天赋加成改**数据驱动**（GOODScanner `adjust_talents` 同法）──
     //   旧实现是一张 GT 监督反推的手表（51 角色 ×「本账号当时那一档命座」），换个命座档就查不到 ⇒

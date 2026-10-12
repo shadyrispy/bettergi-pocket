@@ -221,9 +221,13 @@ class OnnxPaddleOcrService(
                     widths += scaledWidthFor(r.width, r.height)
                 }
             }
+            val labels = RecInferenceDump.labels()
             for (group in planRecGroups(widths, recBatchFixedMs)) {
                 val rects = group.map { rois[members[it]] }
-                val lines = runRecGroup(ws, mat, rects, group.map { widths[it] })
+                // 标签必须按**原始 rect 下标**切：组内行号 0..n 与调用内下标不是一回事
+                // （真机实测错过一次：合批的 4 行副词条被贴上 name/mainName/level/sub0）
+                val groupLabels = group.map { labels?.getOrNull(it).orEmpty() }
+                val lines = runRecGroup(ws, mat, rects, group.map { widths[it] }, groupLabels)
                 for (k in group.indices) {
                     val idx = members[group[k]]
                     val line = lines[k]
@@ -246,8 +250,14 @@ class OnnxPaddleOcrService(
      * 合批失败（ORT 返回 null）时**回退逐行**：一次批失败会连带整组读空，而旧语义是
      * "单槽失败 ⇒ 该槽空串、其余照常"；不回落的话一格 5 个槽一起变空，面板解析会当成读不到。
      */
-    private fun runRecGroup(ws: PreprocWorkspace, src: Mat, rects: List<IntRect>, widths: List<Int>): List<Line?> {
-        if (rects.size == 1) return listOf(recognizeLine(ws, src, rects[0]))
+    private fun runRecGroup(
+        ws: PreprocWorkspace,
+        src: Mat,
+        rects: List<IntRect>,
+        widths: List<Int>,
+        labels: List<String> = List(rects.size) { "" },
+    ): List<Line?> {
+        if (rects.size == 1) return listOf(recognizeLine(ws, src, rects[0], 0, labels[0]))
         val wmax = widths.max()
         val perRow = 3 * REC_H * wmax
         val need = rects.size * perRow
@@ -257,7 +267,7 @@ class OnnxPaddleOcrService(
         for (r in rects.indices) {
             if (!preprocessRecRow(ws, src, rects[r], dst, r * perRow, wmax)) {
                 // 某行预处理失败（越界/空）⇒ 整组退回逐行，语义与旧实现一致
-                return rects.map { recognizeLine(ws, src, it) }
+                return rects.mapIndexed { i, r -> recognizeLine(ws, src, r, i, labels[i]) }
             }
         }
         val t1 = System.nanoTime()
@@ -266,6 +276,7 @@ class OnnxPaddleOcrService(
         val batch = rects.size
         val done = engine.runRecInto(input, wmax, batch) { buf, n ->
             val t2 = System.nanoTime()
+            RecInferenceDump.noteInferNs(t2 - t1)
             if (n > 0 && n % (batch * MODEL_CLASS_COUNT) == 0) {
                 val steps = n / (batch * MODEL_CLASS_COUNT)
                 val rowLen = steps * MODEL_CLASS_COUNT
@@ -280,7 +291,31 @@ class OnnxPaddleOcrService(
             // 输出长度对不上 ⇒ 一个都不 append（也不记账），让下面的 size 校验把整组退回逐行
             Unit
         }
-        if (done == null || decoded.size != batch) return rects.map { recognizeLine(ws, src, it) }
+        if (done == null || decoded.size != batch) {
+            val call = RecInferenceDump.newCall()
+            if (call >= 0) {
+                RecInferenceDump.noteInferNs(System.nanoTime() - t1)
+                val err = engine.takeLastRunFailure() ?: "batch_run_null_or_output_mismatch"
+                for (r in rects.indices) {
+                    RecInferenceDump.recordRow(
+                        call, r, labels[r], rects[r], widths[r], wmax, batch, null, 0f, err,
+                        dst, r * perRow, wmax,
+                    )
+                }
+            }
+            return rects.mapIndexed { i, r -> recognizeLine(ws, src, r, i, labels[i]) }
+        }
+        val call = RecInferenceDump.newCall()
+        if (call >= 0) {
+            for (r in rects.indices) {
+                val line = decoded[r]
+                RecInferenceDump.recordRow(
+                    call, r, labels[r], rects[r], widths[r], wmax, batch,
+                    line?.text.orEmpty(), line?.score ?: 0f, null,
+                    dst, r * perRow, wmax,
+                )
+            }
+        }
         return decoded
     }
 
@@ -393,7 +428,7 @@ class OnnxPaddleOcrService(
      *  GC P0（工单 B）：logits（9 槽一轮 ≈10MB）免物化——CtcDecoder 直接顺序读 ORT 输出
      *  FloatBuffer（在张量 close 前消费完）；解码结果 Result 是不可变值对象，块外使用安全。
      *  判据与旧实现同口径：空输出/步数为 0 ⇒ null。 */
-    private fun recognizeLine(ws: PreprocWorkspace, src: Mat, rect: IntRect): Line? {
+    private fun recognizeLine(ws: PreprocWorkspace, src: Mat, rect: IntRect, slot: Int = 0, label: String = ""): Line? {
         // ★ 2026-10-05（P0 分段探针）：把一次 rec 拆成 pre（crop+resize+convertTo+split+3×JNI+3×copy）
         //   / run（建张量 + ORT session.run）/ dec（CTC 逐元素扫）三段记账，纯计数不改时序。
         //   回调入口时刻即 run 的终点（`runRecInto` 的契约：张量 close 前调用），故 run 不含解码。
@@ -404,12 +439,29 @@ class OnnxPaddleOcrService(
         val t1 = System.nanoTime()
         val decoded = engine.runRecInto(input, width) { buf, n ->
             val t2 = System.nanoTime()
+            RecInferenceDump.noteInferNs(t2 - t1)
             val steps = n / MODEL_CLASS_COUNT
             val r = if (n == 0 || steps <= 0) null
             else CtcDecoder.decode(buf, steps, MODEL_CLASS_COUNT, dict, declaredOutput = recOutputType)
             OcrStageProbe.add(t1 - t0, t2 - t1, System.nanoTime() - t2, width)
             r
-        } ?: return null
+        }
+        if (decoded == null) {
+            val call = RecInferenceDump.newCall()
+            if (call >= 0) {
+                RecInferenceDump.noteInferNs(System.nanoTime() - t1)
+                RecInferenceDump.recordRow(
+                    call, slot, label, rect, width, width, 1, null, 0f,
+                    engine.takeLastRunFailure() ?: "run_null_or_empty_output",
+                    ws.out, 0, width,
+                )
+            }
+            return null
+        }
+        val call = RecInferenceDump.newCall()
+        if (call >= 0) {
+            RecInferenceDump.recordRow(call, slot, label, rect, width, width, 1, decoded.text, decoded.confidence, null, ws.out, 0, width)
+        }
         return Line(rect, decoded.text, decoded.confidence)
     }
 

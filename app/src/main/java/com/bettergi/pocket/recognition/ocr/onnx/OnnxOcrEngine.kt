@@ -121,6 +121,14 @@ class OnnxOcrEngine(
     /** 诊断/单测观测：慢推理（成功但超阈值）累计次数 —— 只记指标，不参与降档（A8）。 */
     internal val slowInferCountTotal: Int get() = slowInferCount.get()
 
+    /**
+     * 仅供 [RecInferenceDump] 取证标注：最近一次 run 异常文本，[takeLastRunFailure] 取走即清空
+     * （避免读到陈旧失败）。并发两线程下可能被对方取走 —— 调试路径，接受。
+     */
+    private val lastRunFailure = java.util.concurrent.atomic.AtomicReference<String?>()
+
+    internal fun takeLastRunFailure(): String? = lastRunFailure.getAndSet(null)
+
     /** rec 模型文件路径（仅并行度探针 [OcrParallelProbe] 用来另建 N 个会话）。 */
     val recModelPath: String get() = recModel.absolutePath
 
@@ -383,6 +391,7 @@ class OnnxOcrEngine(
         } catch (e: Throwable) {
             // 不静默吞：NNAPI 在某些 ROM 上会中途崩，日志是唯一线索
             Log.e(TAG, "ORT run failed (tier=${tier.label}, input=$inputName, shape=${shape.toList()})", e)
+            lastRunFailure.set("${e.javaClass.simpleName}: ${e.message}")
             // 真失败（异常/无效输出）→ 唯一进入降档失败窗的入口（A8）
             consecutiveFailures.incrementAndGet()
             null
