@@ -181,6 +181,14 @@ class ScanEngineDryRunTest {
          * 传 (0,0) = 不裁（同步路径现状）。
          */
         val cropOrigin: Pair<Int, Int> = 0 to 0,
+        /**
+         * ★ #69 回归夹具：**逐格祝圣横幅状态**。非 null 时按 `cellIdx` 决定这一格的面板有没有
+         * 祝圣紫横幅（false = 抹掉合成帧里的三个采样点）⇒ `vote(artifact.panel.zhusheng)`
+         * 逐格读出 crafted 交替，才能暴露"生产者替下一格投票覆写了 vars.crafted"。
+         * 周期必须是 4（不能是 2）：pipeDepth=2 时生产者的领先量正好是周期的一半，
+         * 周期 2 会让串格读到的值**碰巧相同** ⇒ 用例空跑。
+         */
+        val craftedByCell: ((Int) -> Boolean)? = null,
     ) {
         var pageIndex = 0
             private set
@@ -249,6 +257,17 @@ class ScanEngineDryRunTest {
                 }
                 val m = pages[pageIndex].frame.clone()
                 val tick = clicks.size
+                // ★ #69 夹具：本格没有祝圣横幅 ⇒ 抹掉合成帧里的三个紫采样点（y703，
+                //   在面板指纹区 subStats(y794+) 之外 ⇒ 不影响闸门，只影响 panelZhusheng 判据）
+                if (craftedByCell != null && !craftedByCell(cellIdx)) {
+                    org.opencv.imgproc.Imgproc.rectangle(
+                        m,
+                        org.opencv.core.Point(2386.0, 699.0),
+                        org.opencv.core.Point(2414.0, 707.0),
+                        org.opencv.core.Scalar(255.0, 255.0, 255.0),
+                        -1,
+                    )
+                }
                 // ⚠️ harness 是**嵌套类**（非 inner）⇒ 拿不到外层测试类的 rect 辅助函数，直接调 Imgproc
                 org.opencv.imgproc.Imgproc.rectangle(
                     m,
@@ -470,6 +489,8 @@ class ScanEngineDryRunTest {
         nativePanelKey: String? = null,
         /** 原生 artifact 的 pageSkip 注入（对应 JSON 路径的 flowTransformer 注入 pageSkip）。 */
         nativePageSkipExpr: String? = null,
+        /** ★ #69 回归夹具：逐格祝圣横幅状态（见 [Harness.craftedByCell]）。 */
+        craftedByCell: ((Int) -> Boolean)? = null,
     ): RunResult {
         // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
@@ -500,6 +521,7 @@ class ScanEngineDryRunTest {
                 }
                 profile.panelCropRect(panelKey)?.let { it.left to it.top } ?: (0 to 0)
             },
+            craftedByCell = craftedByCell,
         )
         numberScript.forEach { h.numberScript.addLast(it) }
         // dedupe=false：dry-run 的 21 格 mock OCR 文本相同（人工场景），全量入库便于断言；
@@ -591,6 +613,47 @@ class ScanEngineDryRunTest {
         assertEquals("同步 ${a.size} 件 vs 管道 ${b.size} 件", a.size, b.size)
         assertEquals("逐件内容（含顺序）必须一致", a, b)
         assertEquals(sync.harness.finished, piped.harness.finished)
+    }
+
+    /**
+     * ★ #69 §16 根因回归：**逐格投票位不得串格**。
+     *
+     * 上面那条同序同值用例在真机缺陷面前是**空跑**的：合成帧每一格都画了祝圣紫横幅
+     * ⇒ `vars.crafted` 恒 true ⇒ 生产者领先几格覆写的都是同一个值 ⇒ 两个臂照样相等。
+     * 华为 2026-10-12 实测的就是这个字段被邻格覆写（design-docs/scan-pipeline-20261006.md §16）：
+     * 消费者按上一格 `crafted=false` 却读到下一格的 true ⇒ 错加 47px 祝圣 yShift ⇒
+     * 等级槽读到第一条副词条（`攻击力+16.3%`→`·攻式`）、副词条整体下移一行、末行读到套装名
+     * ⇒ `level=0` + 少一条副词条 ⇒ 内容键变 ⇒ 去重当成新件（57 vs 56 件）。
+     *
+     * 夹具 [`Harness.craftedByCell`] 按**周期 4** 交替横幅（不是周期 2：pipeDepth=2 时生产者
+     * 正好领先半周期，周期 2 会碰巧同值 ⇒ 又是一次空跑）。
+     * 断言用 `crafted`/`favorited` 两个字段 —— 后随副词条文本在平移/非平移两处槽位都喂了同一份
+     * mock 行，串格在"值"上不可见，只在**几何 + 这两位**上可见。
+     */
+    @Test
+    fun `S2b 管道化不得把逐格投票位串到别的格`() {
+        val craftedAt = { cell: Int -> cell % 4 < 2 }
+        fun run(pipe: Int) = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
+            pipeDepth = pipe,
+            forceCrop = true,
+            nativeFlow = "artifact",
+            craftedByCell = craftedAt,
+        )
+        fun facts(r: RunResult) = r.engine.results.map { (it.elixerCrafted to it.favorited) to it.level }
+
+        val sync = facts(run(0))
+        val piped = facts(run(2))
+        // 正对照①：夹具确实让两种祝圣态都出现过（否则"两臂相等"恒真）
+        assertTrue(
+            "夹具应同时出现 crafted=true/false 两格，实际=$sync",
+            sync.any { it.first.first } && sync.any { !it.first.first },
+        )
+        // 正对照②：同步臂的格数与两态配比（21 格 ⇒ 周期 4 里 11 真 / 10 假）
+        assertEquals(CELLS_PER_PAGE, sync.size)
+        assertEquals("同步臂 crafted 配比", 11, sync.count { it.first.first })
+        // ★ 主断言：管道臂**逐格**同值（串格时这里会红：管道臂的 crafted 是邻格的）
+        assertEquals("pipe=2 与 pipe=0 的逐格投票位/等级必须一致", sync, piped)
     }
 
     /**

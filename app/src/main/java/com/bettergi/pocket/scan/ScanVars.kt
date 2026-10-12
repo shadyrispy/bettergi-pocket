@@ -2,6 +2,51 @@ package com.bettergi.pocket.scan
 
 import org.json.JSONObject
 
+/**
+ * 本格「投票位」快照 —— `vote` 写、`parsePanel`/`emit` 读的那几个逐格判据位。
+ *
+ * **为什么流水线必须用它**：[ScanEngine.vars] 是全引擎**唯一一个** [ScanVars] 实例。
+ * `pipe>0` 时生产者在 click 之后紧接着为**下一格**跑 vote，会把这六个字段覆写进共享 vars，
+ * 而消费者此刻正在用**上一格**的这几个字段做几何与导出 —— 其中 `crafted` 直接决定
+ * 祝圣 `yShift`（2244 档 47px），而 level 与 4 条副词条的行位就靠它。
+ *
+ * 华为 2026-10-12 实测（design-docs/scan-pipeline-20261006.md §14.5）：串格后 6 件按 +47px
+ * 读 ⇒ `level=0`、首条副词条丢失、末行读到套装名（引擎自己的 `面板原文` 日志与离线重放
+ * 逐槽一致），因内容键改变被去重当成新件 ⇒ 导出多 1 件。
+ *
+ * 语义：`pipe>0` 时 `vote` 写这里而不是写 vars；`pipeSend` 把当前内容随 job 交给消费者，
+ * 消费者在解析开头 [applyTo] 回 vars ⇒ 这六个字段在 pipe 期间**只有消费者一个写者**。
+ * `pipe=0` 时 sink 恒等于 vars，同步路径行为零变化。
+ *
+ * ⚠️ 反方向的依赖没有随本快照消掉：pipe>0 时生产者在**下一格开头**读这六个字段
+ * （stopWhen 的 `rarity in 0..2`、ifMatch 的 locked/curLock）读到的是消费者最后装载的那格，
+ * 滞后 ≤ pipeDepth 格。artifact_scan 不受影响（2026-09-19 已撤 rarity 止扫，见 flow 的
+ * `note_noRarityStop`；无 ifMatch），**weapon_scan / lock / equip 这类还在用逐格 expr 的流程
+ * 不要把 pipe 打开** —— 滞后方向只会"晚一格才停"（不丢件），但写入类流程会点错钮。
+ */
+internal class CellVotes(
+    val crafted: Boolean,
+    val rarity: Int,
+    val locked: Boolean?,
+    val favorited: Boolean?,
+    val gridLocked: Boolean?,
+    val curLock: Boolean?,
+) {
+    companion object {
+        /** 从一个 vars 载体取这六个字段（生产者的暂存位是整只 [ScanVars]，见 [ScanEngine.pipePendingVars]）。 */
+        fun of(v: ScanVars): CellVotes = CellVotes(v.crafted, v.rarity, v.locked, v.favorited, v.gridLocked, v.curLock)
+    }
+
+    fun applyTo(v: ScanVars) {
+        v.crafted = crafted
+        v.rarity = rarity
+        v.locked = locked
+        v.favorited = favorited
+        v.gridLocked = gridLocked
+        v.curLock = curLock
+    }
+}
+
 /** 扫描会话变量（flow vars + visit 产物）。 */
 class ScanVars {
     var total: Int? = null

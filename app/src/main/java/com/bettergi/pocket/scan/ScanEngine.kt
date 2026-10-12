@@ -814,6 +814,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         val stopStep: JSONObject?,   // ★ S2b：本格 stopWhen 步（逐格步，判据要读本格 vars ⇒ 必须随 job）
         val panelKey: String,
         val idx: Int,                // 本格在 pageKeys/pageIdentities 的槽位（页末排水用）
+        val votes: CellVotes,        // ★ #69：本格投票位快照（生产者写 vars 会与消费者串格，见 CellVotes）
     ) {
         val cellKey: String get() = "$gridKey:$col:$row"
         // 消费者解析完成后回填（单消费者顺序执行，下一 job 解析前必已被生产者读取）：
@@ -832,6 +833,51 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     /** ★ S2b：本格 stopWhen 步（逐格步；生产者在下一格前非阻塞查 stopRequested）。 */
     internal var pipeStopStep: JSONObject? = null
     internal var pipeCellJobSent = false
+    /**
+     * ★ #69：本格投票位是否暂存在 [pipePendingVars]（`pipe>0` 的格开头为真，见 [CellVotes]；
+     * 走了 [pipeAdoptVotesInline] 就转假）。
+     * 若某格最终**没走管道**（`panel=char_profile` 的同步解析支），生产者在解析前把暂存值
+     * 回写 vars —— 该流程从不 send job ⇒ 没有消费者并发写 vars ⇒ 回写安全；
+     * 若两者同时出现（消费者已在跑）则不回写并记 W，宁可慢不可串格。
+     */
+    internal var pipeCellVotesStaged = false
+    /**
+     * 生产者的**投票暂存载体**（整只 [ScanVars]，只为让 [com.bettergi.pocket.scan.vote] 的
+     * `sink.crafted = …` 与同步路径同型）。只有 [CellVotes] 里那六个逐格字段会被写，
+     * 会话字段（plan/total/…）一律不碰 —— 交回与快照都只搬那六位。
+     */
+    internal val pipePendingVars = ScanVars()
+
+    /**
+     * visit 开头（每格一次）：`pipe>0` ⇒ 本格投票位暂存到 [pipePendingVars]，
+     * 由 [pipeSend] 随 job 交付消费者。`pipe=0` ⇒ 沿用共享 vars（同步路径零变化）。
+     */
+    internal fun pipeBeginCell() {
+        pipeCellVotesStaged = TimingOverrides.pipeDepth > 0
+    }
+
+    /**
+     * 本格**不走管道**（同步解析支，如 `panel=char_profile`）时把暂存投票位交回 vars，
+     * 使后续 stopWhen/emit 读到的仍是本格的值。
+     *
+     * ⚠️ 只在"没有消费者在跑"时交回：character_scan 全程不发 job ⇒ [pipeChannel] 恒 null。
+     * 若一条 flow 同时有角色面板与管道面板，这里会有活跃消费者正按它自己的格写 vars ⇒
+     * 两者互写就是本缺陷的原始形状，所以宁可不交回并记 W（可见退化，绝不静默串格）。
+     */
+    internal fun pipeAdoptVotesInline(gridKey: String?, col: Int, row: Int) {
+        if (!pipeCellVotesStaged) return
+        if (pipeChannel != null) {
+            Log.w(TAG, "pipe 投票位交回跳过：消费者在跑 grid=$gridKey col=$col row=$row（本格同步解析将读到滞后投票位）")
+            return
+        }
+        CellVotes.of(pipePendingVars).applyTo(vars)
+        pipeCellVotesStaged = false
+    }
+
+    /** 本格投票位的当前真值来源：暂存中取 [pipePendingVars]，否则取共享 vars（`pipe=0` 同步路径）。 */
+    internal fun currentCellVotes(): CellVotes =
+        CellVotes.of(if (pipeCellVotesStaged) pipePendingVars else vars)
+
     /**
      * ★ safetyGuard 降频缓存（②，2026-10-10 用户拍板）：守卫读「退出确认框」要一整帧 + 一次 OCR，
      * auto_equip 一次导航序列里 clickAt 前要跑 ~9 次 ⇒ 光守卫就 9 帧 + 9 OCR。
@@ -908,6 +954,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             parseStep = parseStep, emitStep = pipeEmitStep, stopStep = pipeStopStep,
             panelKey = panelKey,
             idx = idx,
+            votes = currentCellVotes(),
         )
         synchronized(pipeLock) { pipeInFlight++ }
         pipeCellJobSent = true
@@ -949,6 +996,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             return
         }
         try {
+            // ★ #69（§14.5 根因）：本格投票位随 job 进来 —— pipe>0 时生产者的 vote 写的是
+            //   暂存位（不是共享 vars），所以这里必须自己装载，否则读到的就是**上一格**的值。
+            //   华为实测：vars.crafted 串格 ⇒ 祝圣 yShift(47px@2244) 被错加/漏加在别的格上，
+            //   等级读成 0、首条副词条被顶掉、末行读到套装名 ⇒ 内容键变 ⇒ 去重当成新件。
+            job.votes.applyTo(vars)
             if (job.panelKey == "weapon_backpack") {
                 parseWeaponPanel(job.crop, gw, job.parseStep.optJSONObject("dict"), job.origin)
             } else {

@@ -845,6 +845,8 @@ internal suspend fun ScanEngine.runVisitBody(
         pipeEmitStep = pipeEmit
         pipeStopStep = pipeStop
         pipeCellJobSent = false
+        // ★ #69：本格投票位改暂存（生产者接着投下一格会覆写共享 vars，消费者正用本格做几何）
+        pipeBeginCell()
         // ★ ②safetyGuard 降频：跨格边界失效守卫缓存（与原 runVisit 同源）
         safetyGuardCacheValid = false
         body(ctx)
@@ -1156,6 +1158,8 @@ internal suspend fun ScanEngine.visitParsePanel(
         // ⚠️ 2026-09-10 修：角色 visit 在 click 与 parsePanel 之间有 navigate(属性) 复位步骤，
         // 而 ctx 缓存的是 **navigate 之前**的帧 → 复用会读到旧页（天赋页 → name ROI 读到天赋名）。
         // 故角色面板一律取新帧（每次多 1 次抓帧，代价可忽略）。
+        // ★ #69：本格不发 job ⇒ 暂存的投票位就地交回 vars，后随 stopWhen/emit 才读本格的值。
+        pipeAdoptVotesInline(gridKey, col, row)
         parseCharacterPanel(step, null)
     } else if (TimingOverrides.pipeDepth > 0) {
         // ★ S2b（#69）管道路径：parsePanel 的**头部段**（指纹闸/取证）在生产者完成，
@@ -1199,6 +1203,9 @@ internal suspend fun ScanEngine.visitStopWhen(step: JSONObject) {
     if (TimingOverrides.pipeDepth > 0 && pipeCellJobSent) {
         Log.d(TAG, "stopWhen: 由流水线消费者求值（本格 job）")
     } else {
+        if (TimingOverrides.pipeDepth > 0 && pipeCellVotesStaged) {
+            Log.d(TAG, "stopWhen: 在生产者求值（本格未发 job ⇒ 读消费者最后装载的投票位，滞后 ≤ pipeDepth 格）")
+        }
         stopWhen(step)
     }
 }
