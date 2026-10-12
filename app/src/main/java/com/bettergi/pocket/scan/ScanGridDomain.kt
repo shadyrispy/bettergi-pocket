@@ -688,7 +688,7 @@ internal suspend fun ScanEngine.pagedGridCore(
         //   ② `curPageIds` → `prevAllCellIds`（下一跳格前"上页那件已入库"安全阀）；
         //   ③ `pageKeys` → `prevAllCellKeys`（跨页重叠判据）。
         //   ⚠️ 这是一条**顺序约束**，不是 #69 那次超时的根因：排水原本也交回 21 件，挪前挪后
-        //   两轮 send/join 计数逐字节相同（真根因见 design-docs/scan-pipeline-20261006.md §13）。
+        //   两轮 send/join 计数逐字节相同（真根因见 dsl/docs/scan-pipeline-20261006.md §13）。
         //   留着是因为真机一格 ≈600ms，① 若先于 join 求值会**少计新增** ⇒ 回卷判据误动。
         //   pipe=0 时整块 no-op，同步路径行为不变。
         if (TimingOverrides.pipeDepth > 0) {

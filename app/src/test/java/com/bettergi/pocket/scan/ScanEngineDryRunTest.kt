@@ -486,7 +486,7 @@ class ScanEngineDryRunTest {
         /**
          * #69 口径修正：让**同步基线也开裁片**。不开的话 `pipeDepth>0` 一侧被强制 `crop=1`、
          * 另一侧 `crop=0` ⇒ "同序同值"同时在比「同步 vs 管道」和「不裁 vs 裁」两件事，
-         * 失败无法归因（实际就误读过一次，见 design-docs/scan-pipeline-20261006.md §13.2）。
+         * 失败无法归因（实际就误读过一次，见 dsl/docs/scan-pipeline-20261006.md §13.2）。
          */
         forceCrop: Boolean = false,
         /**
@@ -608,7 +608,7 @@ class ScanEngineDryRunTest {
      * 各跑一轮，断言 results 逐件相等、finished 相同、页数相同。
      * ★ 两臂都开 `crop=1`（`forceCrop`）：`pipeDepth>0` 会强制开裁片，基线若不开，这条就在
      *   同时比「同步 vs 管道」和「不裁 vs 裁」两件事 —— #69 那次因此把夹具 bug 误读成
-     *   "页末排水时机"问题，白跑两轮（design-docs/scan-pipeline-20261006.md §13.2）。
+     *   "页末排水时机"问题，白跑两轮（dsl/docs/scan-pipeline-20261006.md §13.2）。
      *   判据①（epoch 丢弃负对照 / 消费失败）由下面那条盯。
      */
     @Test
@@ -633,7 +633,7 @@ class ScanEngineDryRunTest {
      *
      * 上面那条同序同值用例在真机缺陷面前是**空跑**的：合成帧每一格都画了祝圣紫横幅
      * ⇒ `vars.crafted` 恒 true ⇒ 生产者领先几格覆写的都是同一个值 ⇒ 两个臂照样相等。
-     * 华为 2026-10-12 实测的就是这个字段被邻格覆写（design-docs/scan-pipeline-20261006.md §16）：
+     * 华为 2026-10-12 实测的就是这个字段被邻格覆写（dsl/docs/scan-pipeline-20261006.md §16）：
      * 消费者按上一格 `crafted=false` 却读到下一格的 true ⇒ 错加 47px 祝圣 yShift ⇒
      * 等级槽读到第一条副词条（`攻击力+16.3%`→`·攻式`）、副词条整体下移一行、末行读到套装名
      * ⇒ `level=0` + 少一条副词条 ⇒ 内容键变 ⇒ 去重当成新件（57 vs 56 件）。
