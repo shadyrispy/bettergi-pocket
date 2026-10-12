@@ -1176,6 +1176,37 @@ class ScanEngineDryRunTest {
         )
     }
 
+    /**
+     * #259：武器轮的星级必须**随 job 交付**，不能留在生产者那侧。
+     *
+     * `vote()` 的 `weapon.panel.starBand` 分支原本写 `vars.rarity` 而不是 `sink.rarity`
+     * （其余分支都走 sink）⇒ `pipe>0` 时快照取到的是 -1 哨兵，消费者开头 `applyTo(vars)`
+     * 又把 -1 盖回真值 ⇒ `parseWeaponPanel` 见 `rarity<0` 直接 return ⇒
+     * **BS 2244 实测 63 格全解析、0 件入库、`导出跳过（normal）：无已入库结果`**，
+     * 并且连带把跨页锚点的身份读成空（身份是 parse 末尾才写的）。
+     *
+     * 这条用例与上一条同夹具，只多开 `pipeDepth=2` ⇒ 旧实现下 `resultsWeapons` 会是 **0**
+     * 而不是 21，红得直接；它同时是"管道臂与同步臂入库件数必须相等"这条口径的武器侧落点。
+     */
+    @Test
+    fun `S2b 管道臂武器轮必须与同步臂同样入库`() {
+        val (engine, h) = runEngine(
+            listOf(Page(syntheticFrame(5), weaponLines(), CELLS_PER_PAGE)),
+            nativeFlow = "weapon",
+            weaponNames = weaponDictNames(),
+            pipeDepth = 2,
+        )
+        assertEquals("管道臂武器入库数应与同步臂相同（整页）", CELLS_PER_PAGE, engine.resultsWeapons.size)
+        assertTrue("武器轮不得产出圣遗物", engine.results.isEmpty())
+        assertEquals("completed", h.finished)
+        // 星级没随行交付的形态就是"每格都提前 return"⇒ 一条都不该有，但反过来全有才是修好的样子
+        assertTrue(
+            "每件都该有真实星级（>0），出现 -1 哨兵说明星级又留在生产者那侧了：" +
+                engine.resultsWeapons.map { it.rarity },
+            engine.resultsWeapons.all { it.rarity > 0 },
+        )
+    }
+
     // ── A11：面板指纹闸门等到新面板后必须**换帧解析**（旧代码解析仍用 ctx 旧帧 ⇒ 冻结格丢件）──
 
     /**
