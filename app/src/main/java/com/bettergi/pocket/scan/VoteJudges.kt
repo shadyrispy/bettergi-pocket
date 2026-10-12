@@ -63,8 +63,16 @@ object VoteJudges {
     val RED_LOCK = RgbPredicate(140, 255, 30, 140, 30, 140)
 
     /** 武器面板锁判据：`GOLD ∪ RED_LOCK` 任一命中（阈值同 `PANEL_LOCK_GOLD`）。 */
-    fun weaponLock(frame: Mat, profile: ScreenProfile): Result {
-        val rect = profile.rect("panels.weapon_backpack.lock")
+    /**
+     * 面板锁徽判据。★ #261：[origin] 是**裁片原点** —— 管道把 parse 搬到消费者后喂进来的是
+     * `job.crop`，而 `panels.weapon_backpack.lock` 是**全帧坐标** ⇒ 不平移就是对着错位置的像素
+     * 数金的/红的，恒判未锁（BS 实测：同步臂 63 件全 `lock=true`、管道臂全 `false`，
+     * 键序列与顺序完全一致，只差这一个字段）。
+     * 默认 `(0,0)` = 全帧，既有调用点行为零变化。
+     */
+    fun weaponLock(frame: Mat, profile: ScreenProfile, origin: FramePoint = FramePoint(0, 0)): Result {
+        val rect0 = profile.rect("panels.weapon_backpack.lock")
+        val rect = if (origin.x == 0 && origin.y == 0) rect0 else rect0.shiftedBy(-origin.x, -origin.y)
         val gold = countMatches(frame, rect, GOLD)
         val red = countMatches(frame, rect, RED_LOCK)
         val best = maxOf(gold, red)

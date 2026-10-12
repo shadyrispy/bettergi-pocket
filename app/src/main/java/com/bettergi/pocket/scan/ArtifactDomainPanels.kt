@@ -679,7 +679,7 @@ internal suspend fun ScanEngine.parseWeaponPanel(
         level = level,
         rarity = rarity,
         refine = refine,
-        lock = VoteJudges.weaponLock(frame, profile).matched,
+        lock = VoteJudges.weaponLock(frame, profile, origin).matched,
         location = location,
         ascension = ascension,
     )

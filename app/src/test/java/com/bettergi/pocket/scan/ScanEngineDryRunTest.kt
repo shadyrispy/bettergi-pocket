@@ -1190,20 +1190,33 @@ class ScanEngineDryRunTest {
      */
     @Test
     fun `S2b 管道臂武器轮必须与同步臂同样入库`() {
-        val (engine, h) = runEngine(
+        fun run(pipe: Int) = runEngine(
             listOf(Page(syntheticFrame(5), weaponLines(), CELLS_PER_PAGE)),
             nativeFlow = "weapon",
             weaponNames = weaponDictNames(),
-            pipeDepth = 2,
+            pipeDepth = pipe,
         )
-        assertEquals("管道臂武器入库数应与同步臂相同（整页）", CELLS_PER_PAGE, engine.resultsWeapons.size)
-        assertTrue("武器轮不得产出圣遗物", engine.results.isEmpty())
+        val (sync, h0) = run(0)
+        val (piped, h) = run(2)
+        assertEquals("同步臂口径", CELLS_PER_PAGE, sync.resultsWeapons.size)
+        assertEquals("管道臂武器入库数应与同步臂相同（整页）", CELLS_PER_PAGE, piped.resultsWeapons.size)
+        assertTrue("武器轮不得产出圣遗物", piped.results.isEmpty())
         assertEquals("completed", h.finished)
         // 星级没随行交付的形态就是"每格都提前 return"⇒ 一条都不该有，但反过来全有才是修好的样子
         assertTrue(
             "每件都该有真实星级（>0），出现 -1 哨兵说明星级又留在生产者那侧了：" +
-                engine.resultsWeapons.map { it.rarity },
-            engine.resultsWeapons.all { it.rarity > 0 },
+                piped.resultsWeapons.map { it.rarity },
+            piped.resultsWeapons.all { it.rarity > 0 },
+        )
+        // ★ #261：`lock` 是 parse 内部读**面板像素**算的（`weaponLock(frame, profile, origin)`）——
+        //   管道下 frame 是裁片，不走 origin 平移就恒 false（BS 实测一臂全 true、一臂全 false）。
+        //   这里比整条记录（键/等级/精炼/锁/位置），逐件同值才算过。
+        fun rec(w: com.bettergi.pocket.scan.GoodWeapon) =
+            listOf(w.key, w.level.toString(), w.refine.toString(), w.lock.toString(), w.location.orEmpty())
+        assertEquals(
+            "管道臂与同步臂的武器记录必须逐件相同（★ lock 曾是管道臂恒 false 的那一格）",
+            sync.resultsWeapons.map { rec(it) },
+            piped.resultsWeapons.map { rec(it) },
         )
     }
 
