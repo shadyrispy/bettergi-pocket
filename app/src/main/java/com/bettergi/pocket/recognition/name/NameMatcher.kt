@@ -16,8 +16,8 @@ import kotlin.math.abs
  * | 级 | 策略 | 典型场景 |
  * |---|---|---|
  * | 0 | 归一化（全角→半角、西里尔形近字→ASCII、剔标点） | OCR 输出全角/西里尔 |
- * | 1 | OCR 混淆替换（单条 / 全量组合）→ 精确 | 拉鸟玛→菈乌玛、海染碟→海染砗磲 |
- * | 2 | 精确 | 正常 |
+ * | 1 | 精确 | 正常 |
+ * | 2 | OCR 混淆替换（单条 / 全量组合）→ 查表 | 拉鸟玛→菈乌玛、海染碟→海染砗磲 |
  * | 3 | 正向子串取**最长**键（OCR 加噪声前后缀） | ·神里绫华 |
  * | 4 | 反向子串（OCR 截断） | 昔日宗室之→昔日宗室之仪 |
  * | 5 | 编辑距离 ≤ max(1, 名称长度 30%)，并列按视觉相似组打分 | 渝告之钟→谕告之钟 |
@@ -59,7 +59,9 @@ object NameMatcher {
      * 来源：GOODScanner fuzzy_match.rs（20260830 irminsul 移植同步）。
      */
     private val CONFUSIONS = listOf(
-        "茲" to "兹", "兹" to "茲",
+        // 只留「茲→兹」：全 780 个词典键里没有任何一个含「茲」⇒ 反方向「兹→茲」的替换结果
+        // 按构造永远查不中表（死分支）。死分支留着会让下一次诊断误以为"这条双向都有效"。
+        "茲" to "兹",
         "碟" to "磲",           // 海染砗磲 → 海染碟
         "蒙" to "曚", "朦" to "曚", // 曚云之月
         "稚" to "薙", "雉" to "薙", // 薙草之稻光
@@ -144,22 +146,26 @@ object NameMatcher {
         val cleaned = normalize(text)
         if (cleaned.isEmpty()) return null
 
-        // ── 1. OCR 混淆替换（单条）
+        // ── 1. 精确（★ 2026-10-12 GS 对齐 fuzzy_match.rs:109：精确必须排在混淆替换**之前**）
+        //   混淆替换是"读数不是任何合法名"时的抢救，不是"读数同时像两个合法名"时的裁判。
+        //   本词典实测（780 键全查）：目前没有任何合法名替换后会等于另一个合法名 ⇒ 本次改序
+        //   **零行为变化**；改的是"以后往词典里加名字"时不再可能重演上游的 魈→琴。
+        table[cleaned]?.let { return MatchResult(it, cleaned, Tier.EXACT, 1.0) }
+
+        // ── 2. OCR 混淆替换（单条）
         for ((from, to) in CONFUSIONS) {
             if (!cleaned.contains(from)) continue
             val alt = cleaned.replace(from, to)
             val hit = table[alt]
             if (hit != null) return MatchResult(hit, alt, Tier.CONFUSION, 1.0)
         }
-        // ── 1b. 混淆同时叠加（OCR 多字同时误读，如「拉鸟玛」→「菈乌玛」）
+        // ── 2b. 混淆同时叠加（OCR 多字同时误读，如「拉鸟玛」→「菈乌玛」）
         val combined = applyAllConfusions(cleaned)
         if (combined != cleaned) {
             val hit = table[combined]
             if (hit != null) return MatchResult(hit, combined, Tier.CONFUSION_COMBINED, 1.0)
         }
 
-        // ── 2. 精确
-        table[cleaned]?.let { return MatchResult(it, cleaned, Tier.EXACT, 1.0) }
         if (!allowFuzzy) return null
         if (cleaned.length < MIN_LEN_FOR_FUZZY) return null
 

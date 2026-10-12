@@ -389,4 +389,50 @@ class NameMatcherTest {
         assertNotNull(fuzzy)
         assertTrue("should not be exact: ${fuzzy!!.tier}", fuzzy.tier != NameMatcher.Tier.EXACT)
     }
+
+    /**
+     * ★ 2026-10-12 GS 对齐（`fuzzy_match.rs:109`）：**精确必须排在混淆替换之前**。
+     * 上游的 魈→琴 就是这么丢的：混淆表是"读数不是任何合法名"时的抢救，
+     * 一旦跑在精确之前，它就变成"读数同时像两个合法名"时的裁判。
+     * 这条用例合成出那个形状（本词典目前造不出来，见下一条），**改序前必红**。
+     */
+    @Test
+    fun `合法名不得被混淆替换改写成另一个合法名`() {
+        val table = linkedMapOf("玛拉妮" to "Mualani", "玛菈妮" to "BorrowedKey")
+        val hit = NameMatcher.match("玛拉妮", table)
+        assertEquals("读数本身是合法名 ⇒ 必须原样命中自己", "Mualani", hit?.key)
+        assertEquals(NameMatcher.Tier.EXACT, hit?.tier)
+    }
+
+    /**
+     * 上一条在**现行词典里造不出来**（实测 780 个键无一命中），所以本次改序零行为变化 ——
+     * 这条用例就是把"零行为变化"钉成不变式：**任何合法名，用原文查必须命中它自己**。
+     * 它同时覆盖混淆/子串/编辑距离/Dice 各层，因此以后往词典里加一个与既有名字
+     * "替换后相等"或"距离更近"的名字时，这里先响，而不是等到真机对账少一件。
+     *
+     * ⚠️ 例外（实测，见 #254）：`normalize` 会剥掉间隔号 `·` ⇒ 含 `·` 的名字（「奇偶·男性」/
+     *   「奇偶·女性」）**永远进不了 EXACT 层**，只能靠编辑距离以 1 的距离差险胜。
+     *   那是既有的识别面问题，不该由这条"不得被别的键截走"的闸来背 ⇒ 这里只要求
+     *   **不含 `·` 的名字必须 EXACT 自命中**，含 `·` 的只要求 key 命中自己。
+     */
+    @Test
+    fun `每个合法名用原文查都命中自己`() {
+        val n = names()
+        val tables = listOf(
+            "characters" to n.characters, "weapons" to n.weapons, "sets" to n.sets,
+            "pieces" to n.pieces, "slots" to n.slots,
+        )
+        val bad = ArrayList<String>()
+        for ((label, table) in tables) {
+            for ((name, key) in table) {
+                val hit = NameMatcher.match(name, table)
+                if (hit == null || hit.key != key) {
+                    bad += "$label:「$name」→ ${hit?.key}(${hit?.tier}) 期望 $key"
+                } else if ('·' !in name && hit.tier != NameMatcher.Tier.EXACT) {
+                    bad += "$label:「$name」tier=${hit.tier} 期望 EXACT（被更早/更晚的层截走）"
+                }
+            }
+        }
+        assertTrue("有合法名没命中自己：\n${bad.joinToString("\n")}", bad.isEmpty())
+    }
 }
