@@ -6,6 +6,7 @@ import com.bettergi.pocket.scan.ScanEngine
 import kotlinx.coroutines.CancellationException
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
 import com.bettergi.pocket.scan.assertScreen
+import com.bettergi.pocket.scan.clickChainEntry
 import com.bettergi.pocket.scan.dualStateButton
 import com.bettergi.pocket.scan.enterScreen
 import com.bettergi.pocket.scan.filterReset
@@ -132,7 +133,7 @@ internal object LockFlow {
 /**
  * artifact_lock 原生入口（spec §3.4）。步序 = 原 flow JSON 的 steps 逐条直调：
  * enterScreen×2 → dualStateButton → filterReset → setFilter → assertScreen
- * → pagedGridNative(pageSkip, scrollToTop, visitBody) → planSummary。
+ * → clicks(排序钮+确认，#255 按钮回顶) → pagedGridNative(pageSkip, visitBody) → planSummary。
  */
 internal suspend fun ScanEngine.runLockScanNative() {
     runPreamble()
@@ -166,8 +167,17 @@ private suspend fun ScanEngine.runLockStepsInner() {
     nativeStep("filterReset") { filterReset(LockFlow.FILTER_RESET) }
     nativeStep("setFilter") { setFilter(LockFlow.SET_FILTER) }
     nativeStep("assertScreen") { assertScreen(LockFlow.ASSERT_BACKPACK) }
+    // ★ #255 按钮回顶：点「1≡」开排序弹窗 → 点确认 ⇒ 游戏重排并把列表拉回顶部（BS 2244 现场验：
+    //   无选中项时确认不改排序规则，只回顶）。换掉的是 pagedGrid 的拖拽式 `scrollToTop` ——
+    //   那条判据是「连续两轮画面没变」，而 #144 实测它会**假阳性**：一次没生效的手势（被吞 / 帧源没更新）
+    //   就把整册判成"已在顶部"，之后从**未知行号**起步 ⇒ 不是慢，是静默漏件。
+    //   ⚠️ 3200 档没量过这个钮（无截图）⇒ 链项无字面坐标 ⇒ 打 W 跳过，那一档等于没回顶。
+    nativeStep("clicks") {
+        clickChainEntry("artifactSort")
+        clickChainEntry("sortPopupConfirm")
+    }
     nativeStep("pagedGrid") {
-        pagedGridNative(LockFlow.GRID, scrollToTop = true, pageSkipExpr = LockFlow.PAGE_SKIP_EXPR) { col, row, idx, prof ->
+        pagedGridNative(LockFlow.GRID, pageSkipExpr = LockFlow.PAGE_SKIP_EXPR) { col, row, idx, prof ->
             runVisitBody(LockFlow.GRID, col, row, idx, prof, pipeEmit = null, pipeStop = LockFlow.STOP_DUP) { ctx ->
                 // ① 止扫登记（阈值只作 snap/rosterFind 兜底；pagedGrid 内被引擎覆盖）
                 stopWhenRegisterDuplicateStreak(3, 2)

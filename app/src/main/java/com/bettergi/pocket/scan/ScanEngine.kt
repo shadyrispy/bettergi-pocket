@@ -1839,6 +1839,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             "weapon_tab" to "screens.weapon_backpack.tab",
             // 武器扫描开局归零：网格右下角「↑↓」排序方向钮（点两下强制重排+回顶）；缺该 profile 键⇒无字面坐标⇒安全跳过
             "weaponSort" to "screens.weapon_backpack.sort",
+            // ★ #255 圣遗物背包的「1≡」排序钮：点开「排序方式」弹窗，再点 `sortPopupConfirm` ⇒ 游戏重排并把列表拉回顶部。
+            //   2026-10-12 BS 2244 现场验：弹窗里**没有选中项**时点确认**不改排序规则**，只把视图回到顶
+            //   （回顶后首格=生之花「熔铸者的揣度」，与确认前的顺序一致；确认钮实测胶囊 (126,966)-(773,1043)）。
+            //   ⚠️ 只标了 2244/2560 两档：3200 没有 artifact_backpack 截图可量 ⇒ 该档缺键 ⇒ 链项无字面坐标
+            //   ⇒ `clickChainEntry` 打 W 后跳过（不猜坐标），代价是那一档等于没回顶。上 3200 前必须补量。
+            "artifactSort" to "screens.artifact_backpack.sortBtn",
             "tian" to "screens.char_interface.tianBtn",
             // 角色选择弹层收起钮：⚠️ 田在弹层态被弹层底栏覆盖，不能当开关用 → 必须点这个
             "弹层收起" to "zones.char_popup.collapse.rect",

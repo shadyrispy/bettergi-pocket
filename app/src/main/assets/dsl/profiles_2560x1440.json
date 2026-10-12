@@ -136,6 +136,20 @@
     "template": "shaixuan_357",
     "note": "2560 实测：背包底部漏斗图标中心 (300,1329)；旧值 [286,1035,353,1102] 点击命中卡片开详情，已纠正。"
    },
+   "sortBtn": {
+    "rect": [
+     349,
+     1294,
+     433,
+     1378
+    ],
+    "center": [
+     391,
+     1336
+    ],
+    "template": "template_paixu_1000053497_469_1294_553_1378.jpg",
+    "note": "★ #255 背包「1≡」排序钮（点开=「排序方式」弹窗，配合 dialogs.sortPopup.confirm 复位列表到顶）。"
+   },
    "fiveStarToggle": {
     "label": [
      1006,
