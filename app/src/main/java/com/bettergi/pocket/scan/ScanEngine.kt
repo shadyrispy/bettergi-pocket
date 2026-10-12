@@ -728,7 +728,15 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      */
     internal var dupPageStreak = 0
 
-    /** 断言回卷所需的连续整页零新增页数（flow `stopWhen.dupPageConfirm`，默认 2；=1 恢复旧的立即停行为）。 */
+    /**
+     * 断言回卷所需的连续整页零新增页数（flow `stopWhen.dupPageConfirm`，默认 2；=1 恢复旧的立即停行为）。
+     *
+     * ⚠️ #219：唯一赋值点是 [stopWhenRegisterDuplicateStreak]，由 [runVisitBody] 按 flow 的
+     * `stopWhen mode=duplicateStreak` 步登记（**本格判据求值之前**），五条 flow 都带该步 ⇒
+     * 逐格第一次求值起读到的就是 flow 的声明值。登记之前只有两处读它：pagedGrid 入口日志与
+     * page0 idx0 的格级门（后者要 `charDupStreak` 带满整页重复才走到，新建引擎不可能）。
+     * flow 未声明 `dupPageConfirm` 时保持本默认 2（`stopWhen` 的 `optInt(…, 2)`）。
+     */
     internal var dupPageConfirm = 2
 
     /** 本页是否已做过回卷判定（同一页 item 级 + 格级两处调用只记账一次）。每页开头复位。 */
