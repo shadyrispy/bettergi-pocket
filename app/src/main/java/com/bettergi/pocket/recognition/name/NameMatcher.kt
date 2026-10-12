@@ -118,6 +118,38 @@ object NameMatcher {
     private const val MIN_LEN_FOR_FUZZY = 2
 
     /**
+     * 词典键的**归一化精确索引**（#254）。[normalize] 会剥掉间隔号 `·`，而词典键里含它
+     * （「奇偶·男性」「奇偶·女性」）⇒ 只查 `table[cleaned]` 时这两个名字**永远进不了 EXACT 层**，
+     * 只能落到编辑距离、靠 1 的距离差险胜（词典里距离=1 的武器名对已有 28 对，再加一个近邻就并列）。
+     * 这里把词典键也过一遍**同一个**归一函数，两边同口径。
+     *
+     * 只归一精确层：**模糊层（子串/编辑距离/LCS/Dice）故意不动** —— 那些阈值是在 2615 样本上
+     * 按"键未归一"的现行行为标定的（见 [DICE_MIN] 上方的标定注释），一起改等于把标定作废。
+     *
+     * 两个不同键归一后相同 ⇒ 该归一键**整个丢弃**（宁可不命中也不误配，与"歧义层返回 null"同规则）；
+     * 原键仍走未归一的精确查表。实测现行五张匹配表共 750 个键（characters 123 / weapons 252 /
+     * sets 65 / pieces 305 / slots 5）：归一后**只有上面这 2 个变化、零碰撞**。
+     */
+    private val normIndexCache: MutableMap<Map<String, String>, Map<String, String>> =
+        java.util.Collections.synchronizedMap(java.util.WeakHashMap())
+
+    private fun normalizedIndex(table: Map<String, String>): Map<String, String> =
+        normIndexCache.getOrPut(table) {
+            val out = HashMap<String, String>(table.size * 2)
+            val ambiguous = HashSet<String>(0)
+            for (key in table.keys) {
+                val n = normalize(key)
+                if (n.isEmpty() || n in ambiguous) continue
+                val prev = out.put(n, key)
+                if (prev != null && prev != key) {
+                    out.remove(n)
+                    ambiguous += n
+                }
+            }
+            out
+        }
+
+    /**
      * 归一化：全角→半角、西里尔形近字→ASCII，只保留 CJK / 字母数字 / 「」 / %。
      * 必须在过滤**之前**做映射，否则全角/西里尔字符会被直接剔除。
      */
@@ -151,6 +183,9 @@ object NameMatcher {
         //   本词典实测（780 键全查）：目前没有任何合法名替换后会等于另一个合法名 ⇒ 本次改序
         //   **零行为变化**；改的是"以后往词典里加名字"时不再可能重演上游的 魈→琴。
         table[cleaned]?.let { return MatchResult(it, cleaned, Tier.EXACT, 1.0) }
+        normalizedIndex(table)[cleaned]?.let { key ->
+            return MatchResult(table.getValue(key), key, Tier.EXACT, 1.0)
+        }
 
         // ── 2. OCR 混淆替换（单条）
         for ((from, to) in CONFUSIONS) {

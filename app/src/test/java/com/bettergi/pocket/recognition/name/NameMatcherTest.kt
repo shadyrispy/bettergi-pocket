@@ -410,10 +410,10 @@ class NameMatcherTest {
      * 它同时覆盖混淆/子串/编辑距离/Dice 各层，因此以后往词典里加一个与既有名字
      * "替换后相等"或"距离更近"的名字时，这里先响，而不是等到真机对账少一件。
      *
-     * ⚠️ 例外（实测，见 #254）：`normalize` 会剥掉间隔号 `·` ⇒ 含 `·` 的名字（「奇偶·男性」/
-     *   「奇偶·女性」）**永远进不了 EXACT 层**，只能靠编辑距离以 1 的距离差险胜。
-     *   那是既有的识别面问题，不该由这条"不得被别的键截走"的闸来背 ⇒ 这里只要求
-     *   **不含 `·` 的名字必须 EXACT 自命中**，含 `·` 的只要求 key 命中自己。
+     * 含间隔号 `·` 的两个名字（「奇偶·男性」「奇偶·女性」）曾经**只能落到编辑距离**——
+     * `normalize` 剥掉 `·` 而词典键不剥 ⇒ 精确层按构造查不到自己（#254）。
+     * 现在词典键走同一个归一函数，所以这条断言**对所有键一视同仁**：任何合法名用原文查
+     * 都必须 EXACT 命中自己。改回"只查 table[cleaned]"的话，这两个名字会立刻红。
      */
     @Test
     fun `每个合法名用原文查都命中自己`() {
@@ -428,7 +428,7 @@ class NameMatcherTest {
                 val hit = NameMatcher.match(name, table)
                 if (hit == null || hit.key != key) {
                     bad += "$label:「$name」→ ${hit?.key}(${hit?.tier}) 期望 $key"
-                } else if ('·' !in name && hit.tier != NameMatcher.Tier.EXACT) {
+                } else if (hit.tier != NameMatcher.Tier.EXACT) {
                     bad += "$label:「$name」tier=${hit.tier} 期望 EXACT（被更早/更晚的层截走）"
                 }
             }
