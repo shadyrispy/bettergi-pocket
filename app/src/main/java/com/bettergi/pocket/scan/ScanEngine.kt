@@ -1071,6 +1071,38 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             out
         }
 
+    /**
+     * ★ #253：锚点早到交付（有界停等）。
+     *
+     * pipe>0 时生产者侧 `pageIdentities` 写的是从共享 vars 读到的竞态残留 ⇒ 跨页身份锚定
+     * 按构造恒不命中（真机实测多做 6.5% 功）。锚点只要本页 idx1/idx2 的身份，而此刻生产者
+     * 至多发出过本页前 3 格的 job ⇒ join 到在途清零的代价被积压深度封顶，且**每页只发生一次**
+     * （不是逐格）。**不摘取结果** —— pageKeys/curPageIds 的交付仍归页末 [pipeDrainResults]。
+     * 超时 / 未交付 ⇒ 对应格按「身份为空」处理，调用侧退回照常访问，绝不无限等。
+     */
+    internal suspend fun pipeAwaitAnchorIdentities(
+        page: Int,
+        idxs: IntArray,
+        budgetMs: Long = PAGE_WATCHDOG_MS,
+    ): Map<Int, String> {
+        if (pipeChannel == null) return emptyMap()
+        val until = clock() + budgetMs
+        while (synchronized(pipeLock) { pipeInFlight } > 0) {
+            if (clock() >= until) {
+                Log.w(
+                    TAG,
+                    "pipe 锚点早到交付：${budgetMs}ms 内在途 job 仍未清零（page=${page}）⇒ 未交付格按空身份处理，" +
+                        "锚定退回「照常访问」（消费者已死或取消未排空）",
+                )
+                return emptyMap()
+            }
+            delay(2)
+        }
+        return synchronized(pipeDoneLock) {
+            pipeDoneResults.filter { it.page == page && it.idx in idxs }
+                .associate { it.idx to (it.resultIdentity ?: "") }
+        }
+    }
 
     /** 取消（§6.1）：close 后消费者把缓冲 job 只释放裁片，不 emit/不记账。 */
     internal fun pipeCancel() {

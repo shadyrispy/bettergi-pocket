@@ -189,6 +189,12 @@ class ScanEngineDryRunTest {
          * 周期 2 会让串格读到的值**碰巧相同** ⇒ 用例空跑。
          */
         val craftedByCell: ((Int) -> Boolean)? = null,
+        /**
+         * ★ #253 夹具：**(页号, 页内格序) → 全局件号**。非 null 时面板名与 sub0 都改按件号派生
+         * ⇒ 夹具能造出「页 2 前若干格 ≡ 页 1 尾若干格」这种**真重叠**（现状按点击坐标派生，
+         * 页间同坐标 ⇒ 前进量恒 0，身份锚定只会给出被整行哨兵拒绝的 d）。null = 现状（按坐标）。
+         */
+        val pieceOf: ((pageIndex: Int, cellIdx: Int) -> Int)? = null,
     ) {
         var pageIndex = 0
             private set
@@ -320,7 +326,8 @@ class ScanEngineDryRunTest {
                 cellIdx = row * GRID_COLS + col
                 // #48：首格豁免夹具 —— 第一个格的点击**不**推进面板名（其余照旧）
                 if (firstCellNameStuck && clicks.size == entryClicks + 1) return true
-                lastNameCell = "晨光的明誓#${x * 10000 + y}"
+                lastNameCell = "晨光的明誓#" +
+                    (pieceOf?.invoke(pageIndex, cellIdx) ?: (x * 10000 + y))
                 return true
             }
 
@@ -355,7 +362,10 @@ class ScanEngineDryRunTest {
                     val st = frameOcrState[System.identityHashCode(frame)]
                     val stateCell = st?.first ?: cellIdx
                     val stateName = st?.second ?: lastNameCell
-                    val sub0 = "暴击率+%.1f%%".format(5.4 + stateCell * 0.1) // 每格一个不同值（$CELLS_PER_PAGE 格/页）
+                    // #253 夹具：pieceOf 模式下 sub0 跟着**件号**走（名字后缀即件号），
+                    // 同一件跨页读到同一身份；否则维持现状（按页内格序）。
+                    val sub0Idx = pieceOf?.let { stateName.substringAfterLast('#').toIntOrNull() } ?: stateCell
+                    val sub0 = "暴击率+%.1f%%".format(5.4 + sub0Idx * 0.1) // 每格一个不同值（$CELLS_PER_PAGE 格/页）
                     // ★ S1/S2b：裁片帧（宽 < 整帧）里的 rect 是**裁片坐标** ⇒ 平移回帧坐标再查表，
                     //   否则下面每一条具名 ROI 都匹配不上 ⇒ 全部读空（实测 pipe 轮 21 格 key 全 null）。
                     val rr = if (frame.cols() < fullFrameW) {
@@ -491,6 +501,8 @@ class ScanEngineDryRunTest {
         nativePageSkipExpr: String? = null,
         /** ★ #69 回归夹具：逐格祝圣横幅状态（见 [Harness.craftedByCell]）。 */
         craftedByCell: ((Int) -> Boolean)? = null,
+        /** ★ #253 夹具：件号映射（见 [Harness.pieceOf]），造「页 2 前若干格 ≡ 页 1 尾若干格」的真重叠。 */
+        pieceOf: ((Int, Int) -> Int)? = null,
     ): RunResult {
         // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
@@ -522,6 +534,7 @@ class ScanEngineDryRunTest {
                 profile.panelCropRect(panelKey)?.let { it.left to it.top } ?: (0 to 0)
             },
             craftedByCell = craftedByCell,
+            pieceOf = pieceOf,
         )
         numberScript.forEach { h.numberScript.addLast(it) }
         // dedupe=false：dry-run 的 21 格 mock OCR 文本相同（人工场景），全量入库便于断言；
@@ -720,6 +733,56 @@ class ScanEngineDryRunTest {
             assertEquals("pipe=$pipe", ENTER_CHAIN_CLICKS + 10, h.clicks.size)
             assertTrue("pipe=$pipe 应正常收尾（非异常）", h.finished != null)
         }
+    }
+
+    /**
+     * ★ #253：pipe>0 时跨页重叠的**身份锚定**必须与同步臂一样命中。
+     *
+     * 缺陷形状：锚点读的生产者侧 `pageIdentities` 在 pipe>0 下按构造拿不到身份（解析在消费者里）
+     * ⇒ 恒打「身份为空」⇒ 重叠格全部重点（真机实测每页多击数格 = +6.5% 功）。
+     *
+     * 夹具用 [Harness.pieceOf] 造出**真重叠**：页 2 的前 7 格 ≡ 页 1 的末 7 格（前进量 14）
+     * ⇒ 锚点应命中 d=14 并**不点击**跳掉 idx3..6 共 4 格（idx0..2 是锚点本身，照常访问）。
+     * ⚠️ 绝对点击数那条防「两臂一样烂」的空跑：修复前两臂若都不锚定，只比相等是绿的。
+     * ⚠️ 每格真实挂钟 ~0.66s ⇒ 只跑 2 页、只断计数，不断言任何时序量。
+     */
+    @Test
+    fun `S2b 管道臂跨页身份锚定与同步臂跳同一批格`() {
+        val pieceOf = { page: Int, cell: Int ->
+            when {
+                page == 0 -> cell
+                cell < GRID_COLS -> CELLS_PER_PAGE - GRID_COLS + cell // 页 2 前 7 格 ≡ 页 1 末 7 格
+                else -> CELLS_PER_PAGE + cell - GRID_COLS
+            }
+        }
+        fun run(pipe: Int) = runEngine(
+            listOf(
+                Page(syntheticFrame(5), pageLines("Lv.90"), 1026),
+                Page(syntheticFrame(5, page = 1), pageLines("Lv.90"), 1026),
+            ),
+            pipeDepth = pipe,
+            forceCrop = true,
+            nativeFlow = "artifact",
+            maxPages = 2,
+            pieceOf = pieceOf,
+        )
+        val sync = run(0)
+        val piped = run(2)
+        val skipped = GRID_COLS - 3 // idx3..6：重叠带（7 格）扣掉锚点三格 ⇒ 4 格
+        val expectedClicks = ENTER_CHAIN_CLICKS + 2 * CELLS_PER_PAGE - skipped
+        assertEquals(
+            "夹具前提：同步臂必须锚定命中并跳 $skipped 格（否则本用例是空跑）",
+            expectedClicks, sync.harness.clicks.size,
+        )
+        assertEquals(
+            "pipe=2 的做功必须与同步臂相同（锚定恒不命中时会多击 $skipped 格）",
+            expectedClicks, piped.harness.clicks.size,
+        )
+        assertEquals("两臂必须跳掉同一批格（点击坐标逐格相同）", sync.harness.clicks, piped.harness.clicks)
+        val a = sync.engine.results.map { it.setKey to it.slotKey to it.substats.map { s -> s.key to s.value } }
+        val b = piped.engine.results.map { it.setKey to it.slotKey to it.substats.map { s -> s.key to s.value } }
+        assertEquals("两臂入库逐件同序同值", a, b)
+        assertEquals(sync.harness.finished, piped.harness.finished)
     }
 
     // ---- 入库去重（Q2 决策）：两页同件 → 第二次出现跳过 ----

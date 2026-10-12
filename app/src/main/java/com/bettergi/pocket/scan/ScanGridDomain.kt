@@ -339,6 +339,10 @@ internal suspend fun ScanEngine.pagedGridCore(
         val pageIdentities = ArrayList<String>(cols * traverseRows)
         /** 每格：点击后面板是否**出现过**（指纹变化过）⇒ 区分"点击没生效"与"读了但错"。 */
         val pageAppeared = ArrayList<Boolean?>(cols * traverseRows)
+        // ★ #253：idx1/idx2 是否走了管道 —— 走了管道的格生产者写进 pageIdentities 的是竞态残留，
+        //   锚点必须改从消费者回填的 job 结果取（见 pipeAwaitAnchorIdentities）。
+        var anchorPiped1 = false
+        var anchorPiped2 = false
         if (pageNo == 0) rowCheckPrevKeys = emptyList()
         if (skip) {
             Log.i(TAG, "pagedGrid[$gridKey]: pageSkip 命中（pageMinLevel=$pageMinLevel）第 $pageNo 页整页跳过")
@@ -520,6 +524,10 @@ internal suspend fun ScanEngine.pagedGridCore(
                     pageKeys += (lastCellKey ?: "")
                     pageIdentities += (lastCellIdentity ?: "")
                     pageAppeared += lastPanelAppeared
+                    // pipeCellJobSent 只在本格 visitBody 内被 pipeSend 置真（copiedFrom 格不走 visit，
+                    // 读到的是上一格的残值 ⇒ 必须与 copiedFrom 一起判）
+                    if (idx == 1) anchorPiped1 = copiedFrom == null && pipeCellJobSent
+                    else if (idx == 2) anchorPiped2 = copiedFrom == null && pipeCellJobSent
                     // ★★ 2026-09-20 C'：**身份锚定对齐**（读完 idx1、idx2 即可定对齐）★★
                     //   依据（真机身份串结构，两轮一致）：新页 idx1、idx2 ≡ 上页 idx15、idx16（逐位相同）
                     //   ⇒ 对齐偏移 d = j-1（本页 idx m ≡ 上页 idx d+m）⇒ 重叠格（d+m ≤ 20）可**复制上页身份**跳过。
@@ -542,6 +550,27 @@ internal suspend fun ScanEngine.pagedGridCore(
                         anchoredD == null && pageIdentities.size == OVERLAP_ANCHOR_COUNT + 1
                     ) {
                         val prev = prevAllCellIds!!
+                        // ★ #253：pipe>0 时这两个槽的 producer 值不可信 ⇒ 有界早 join 后按消费者回填
+                        //   覆写走管道的格；未交付（过期/取消丢弃或超时）⇒ 置空按今天的兜底走。
+                        //   代价每页一次、被积压深度封顶（见 pipeAwaitAnchorIdentities 的 KDoc）。
+                        if (TimingOverrides.pipeDepth > 0) {
+                            val early = pipeAwaitAnchorIdentities(pageNo, intArrayOf(1, 2))
+                            fun adoptAnchorId(k: Int, piped: Boolean) {
+                                if (!piped) return
+                                val id = early[k]
+                                if (id == null) {
+                                    pageIdentities[k] = ""
+                                    Log.i(
+                                        TAG,
+                                        "身份锚定：page=$pageNo idx$k 走了管道但 job 未交付（丢弃或超时）⇒ 按空身份处理",
+                                    )
+                                } else {
+                                    pageIdentities[k] = id
+                                }
+                            }
+                            adoptAnchorId(1, anchorPiped1)
+                            adoptAnchorId(2, anchorPiped2)
+                        }
                         val i1 = pageIdentities.getOrNull(1).orEmpty()
                         val i2 = pageIdentities.getOrNull(2).orEmpty()
                         if (i1.isEmpty() || i2.isEmpty()) {
