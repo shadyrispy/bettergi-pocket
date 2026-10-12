@@ -430,26 +430,34 @@ object VoteJudges {
     fun gridThumb(frame: Mat, profile: ScreenProfile, gridKey: String): ByteArray? {
         val roi = gridRoiBounds(frame, profile, gridKey) ?: return null
         val sub = frame.submat(roi[1], roi[3], roi[0], roi[2])
-        val thumb = Mat()
-        Imgproc.resize(sub, thumb, Size(24.0, 16.0), 0.0, 0.0, Imgproc.INTER_AREA)
-        sub.release()
-        val out = ByteArray(thumb.rows() * thumb.cols() * 3)
-        // ★ P3（2026-10-01）性能改：24×16=384 次逐点 `thumb.get(y,x,buf)` JNI（settle 轮询每 120ms 一次）
-        //   ⇒ 改为**整行**读（countMatches 同手法），BGR→RGB 量化口径不变 ⇒ 输出逐位一致。
-        val rowBuf = ByteArray(thumb.cols() * 3)
-        var i = 0
-        for (y in 0 until thumb.rows()) {
-            thumb.get(y, 0, rowBuf)
-            var o = 0
-            for (x in 0 until thumb.cols()) {
-                out[i++] = ((rowBuf[o + 2].toInt() and 0xFF) shr 4).toByte() // R
-                out[i++] = ((rowBuf[o + 1].toInt() and 0xFF) shr 4).toByte() // G
-                out[i++] = ((rowBuf[o].toInt() and 0xFF) shr 4).toByte() // B
-                o += 3
+        return try {
+            val thumb = Mat()
+            try {
+                Imgproc.resize(sub, thumb, Size(24.0, 16.0), 0.0, 0.0, Imgproc.INTER_AREA)
+                val out = ByteArray(thumb.rows() * thumb.cols() * 3)
+                // ★ P3（2026-10-01）性能改：24×16=384 次逐点 `thumb.get(y,x,buf)` JNI（settle 轮询每 120ms 一次）
+                //   ⇒ 改为**整行**读（countMatches 同手法），BGR→RGB 量化口径不变 ⇒ 输出逐位一致。
+                val rowBuf = ByteArray(thumb.cols() * 3)
+                var i = 0
+                for (y in 0 until thumb.rows()) {
+                    thumb.get(y, 0, rowBuf)
+                    var o = 0
+                    for (x in 0 until thumb.cols()) {
+                        out[i++] = ((rowBuf[o + 2].toInt() and 0xFF) shr 4).toByte() // R
+                        out[i++] = ((rowBuf[o + 1].toInt() and 0xFF) shr 4).toByte() // G
+                        out[i++] = ((rowBuf[o].toInt() and 0xFF) shr 4).toByte() // B
+                        o += 3
+                    }
+                }
+                out
+            } finally {
+                // #225：`resize` 抛 CvException 时原来连 `thumb` 都不会释放，
+                // 而这条在 settle 轮询里每 120ms 跑一次 ⇒ 一次故障就是一串泄漏。
+                thumb.release()
             }
+        } finally {
+            sub.release()
         }
-        thumb.release()
-        return out
     }
 
     /**
@@ -462,20 +470,28 @@ object VoteJudges {
      */
     fun screenThumb(frame: Mat): ByteArray? = runCatching {
         val thumb = Mat()
-        Imgproc.resize(frame, thumb, Size(32.0, 18.0), 0.0, 0.0, Imgproc.INTER_AREA)
-        val out = ByteArray(thumb.rows() * thumb.cols() * 3)
-        val buf = ByteArray(3)
-        var i = 0
-        for (y in 0 until thumb.rows()) {
-            for (x in 0 until thumb.cols()) {
-                thumb.get(y, x, buf)
-                out[i++] = ((buf[2].toInt() and 0xFF) shr 4).toByte() // R
-                out[i++] = ((buf[1].toInt() and 0xFF) shr 4).toByte() // G
-                out[i++] = ((buf[0].toInt() and 0xFF) shr 4).toByte() // B
+        try {
+            Imgproc.resize(frame, thumb, Size(32.0, 18.0), 0.0, 0.0, Imgproc.INTER_AREA)
+            val out = ByteArray(thumb.rows() * thumb.cols() * 3)
+            val buf = ByteArray(3)
+            var i = 0
+            for (y in 0 until thumb.rows()) {
+                for (x in 0 until thumb.cols()) {
+                    thumb.get(y, x, buf)
+                    out[i++] = ((buf[2].toInt() and 0xFF) shr 4).toByte() // R
+                    out[i++] = ((buf[1].toInt() and 0xFF) shr 4).toByte() // G
+                    out[i++] = ((buf[0].toInt() and 0xFF) shr 4).toByte() // B
+                }
             }
+            out
+        } finally {
+            // #225：release 原先在 runCatching 块内且**排在读循环之后** ⇒ 中途抛 CvException
+            // 就泄一个 native Mat，而调用方只看到一个 null（returnToHome 的"点击有没有进展"
+            // 判据）—— 泄漏和"画面真没变"在下游同形。
+            thumb.release()
         }
-        thumb.release()
-        out
+    }.onFailure {
+        Log.w("BetterGI.Vote", "screenThumb 读失败 ⇒ 进度判据按「无读数」处理（returnToHome 会退回盲点计数）", it)
     }.getOrNull()
 
 /**

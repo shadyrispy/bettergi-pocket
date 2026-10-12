@@ -1420,7 +1420,14 @@ internal suspend fun ScanEngine.awaitGridStable(
                 prevThumb = thumb
             }
         }
-    } catch (e: CancellationException) { throw e } catch (e: Exception) {
+    } catch (e: CancellationException) {
+        // #225：取消路径原来直接 rethrow ⇒ :1415 已抓到的那帧没人 `release()`。
+        // 这不是 native 泄漏（`acquireLatestBgr` 是**引用计数出借**，outstanding++），
+        // 漏 dec 的后果是**永久钉住一个池槽**：BGR_POOL_MAX=4 用尽后 poller 退化成
+        // 逐帧新建-即弃（变慢，不是每次吃 13.8MB），且没有任何日志会报出来。
+        latest?.release()
+        throw e
+    } catch (e: Exception) {
         latest?.release()
         throw e
     }
