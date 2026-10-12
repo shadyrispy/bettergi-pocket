@@ -33,6 +33,25 @@ object OcrStageProbe {
         widthPx.addAndGet(width.toLong())
     }
 
+    /**
+     * #251 合批记账：一次 `session.run` 覆盖 [rows] 行、每行输入宽 [width]。
+     *
+     * 口径与 [add] 严格可比：`calls` 记**行数**（不是 run 次数）、`widthPx` 记 `rows × width`
+     * （模型确实算了这么多列）、三段记**整批的真实耗时**。于是合批省下的固定项表现为
+     * `perPx[run]` 变低——这正是要看的那个量。
+     * ⚠️ 不记就会重演 2026-10-12 那次误读：批路径不记账时"开批"臂的 `Σw/格`、`run/格`
+     *   与"关批"臂看起来**完全相同**（474 行掉到 231 行被记成了"少做一半的功"），
+     *   差点把生效的优化判成没生效。
+     */
+    fun addBatch(rows: Int, width: Int, pre: Long, run: Long, dec: Long) {
+        if (rows <= 0) return
+        calls.addAndGet(rows.toLong())
+        widthPx.addAndGet(rows.toLong() * width)
+        preNanos.addAndGet(pre)
+        runNanos.addAndGet(run)
+        decNanos.addAndGet(dec)
+    }
+
     fun reset() {
         calls.set(0); preNanos.set(0); runNanos.set(0); decNanos.set(0); widthPx.set(0)
     }
