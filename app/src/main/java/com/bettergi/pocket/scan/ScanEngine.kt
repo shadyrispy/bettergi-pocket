@@ -977,6 +977,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     private var pipeConsumerJob: Job? = null
     private var pipeNextId = 0
     private var pipeInFlight = 0
+    /**
+     * 消费者**已处理**的 job 累计数（丢弃与解析都算一条），只在 [pipeLock] 下读写。
+     * 它是 [pipeAwaitAnchorIdentities] 的活性信号：那条停等要判的是"消费者还活着吗"，
+     * 而活性的定义是"有 job 被处理完"，不是"过了多少毫秒"（见 #260 后半的说明）。
+     */
+    private var pipeDoneCount = 0L
     private var pipeCancelled = false
     private var pipePageNo = 0
     internal var pipeEmitStep: JSONObject? = null
@@ -1129,13 +1135,14 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             if (pipeCancelled || stale) {
                 Log.d(TAG, "pipe job #${job.id} ${if (stale) "过期丢弃" else "取消丢弃"}")
                 PerfProbe.addPipeDiscard()
-                synchronized(pipeLock) { pipeInFlight--; pipeReturnJob(job) }
+                synchronized(pipeLock) { pipeInFlight--; pipeDoneCount++; pipeReturnJob(job) }
                 continue
             }
             val jobBefore = engineCellCount()
             pipeProcess(job)
             synchronized(pipeLock) {
                 pipeInFlight--
+                pipeDoneCount++
                 // 消费者解析完成 ⇒ 回填本格结果（页末排水按 idx 序写 pageKeys，§3.3）
                 job.resultKey = lastCellKey
                 job.resultIdentity = lastCellIdentity
@@ -1207,7 +1214,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         while (true) {
             val n = synchronized(pipeLock) { pipeInFlight }
             if (n == 0) break
-            delay(2)
+            delay(PIPE_POLL_MS)
         }
         // 只等齐，不清空 —— 清空由 [pipeDrainResults] 在排水后做（否则调用方读到空）
     }
@@ -1235,26 +1242,41 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      * 按构造恒不命中（真机实测多做 6.5% 功）。锚点只要本页 idx1/idx2 的身份，而此刻生产者
      * 至多发出过本页前 3 格的 job ⇒ join 到在途清零的代价被积压深度封顶，且**每页只发生一次**
      * （不是逐格）。**不摘取结果** —— pageKeys/curPageIds 的交付仍归页末 [pipeDrainResults]。
-     * 超时 / 未交付 ⇒ 对应格按「身份为空」处理，调用侧退回照常访问，绝不无限等。
+     * 无进展到上限 / 未交付 ⇒ 对应格按「身份为空」处理，调用侧退回照常访问，绝不无限等。
+     *
+     * ★ 交付完整性论证（2026-10-13 复核 #260）：走到"在途已归零"那一步时，每个已发送 job 的结果
+     * **必然已在** [pipeDoneResults] 里 —— 消费者把 `pipeInFlight--` 与回填结果放在同一段
+     * [pipeLock] 内，而本函数读在途数也在同一段锁里 ⇒ 不存在"已归零但尚未回填"的中间态。
+     * 提前 return（无进展到上限）按空身份处理，语义与旧超时分支逐字相同。
      */
     internal suspend fun pipeAwaitAnchorIdentities(
         page: Int,
         idxs: IntArray,
-        budgetMs: Long = PAGE_WATCHDOG_MS,
+        idlePolls: Long = PIPE_ANCHOR_IDLE_POLLS,
     ): Map<Int, String> {
         if (pipeChannel == null) return emptyMap()
-        val until = clock() + budgetMs
-        while (synchronized(pipeLock) { pipeInFlight } > 0) {
-            if (clock() >= until) {
+        var idle = 0L
+        var prevDone = synchronized(pipeLock) { pipeDoneCount }
+        while (true) {
+            val (inFlight, done) = synchronized(pipeLock) { pipeInFlight to pipeDoneCount }
+            if (inFlight == 0) break
+            // 消费者处理完过任何一个 job（含丢弃）⇒ 它活着，预算重新给满。
+            // 正常路径就是靠这条退出：在途深度 ≤ pipeDepth+锚点那 3 格，不会一直"无进展"。
+            if (done != prevDone) {
+                prevDone = done
+                idle = 0
+            } else if (++idle >= idlePolls) {
                 Log.w(
                     TAG,
-                    "pipe 锚点早到交付：${budgetMs}ms 内在途 job 仍未清零（page=${page}）⇒ 未交付格按空身份处理，" +
-                        "锚定退回「照常访问」（消费者已死或取消未排空）",
+                    "pipe 锚点早到交付：连续 ${idlePolls} 次轮询（每次 >=${PIPE_POLL_MS}ms）消费者没有处理完任何 job" +
+                        "（page=${page}，在途 ${inFlight}）⇒ 未交付格按空身份处理，锚定退回「照常访问」" +
+                        "（消费者被 Error 打死或取消未排空；注意这条**不是**超时，机器越忙只会等得越久）",
                 )
                 return emptyMap()
             }
-            delay(2)
+            delay(PIPE_POLL_MS)
         }
+        // 在途已归零 ⇒ 本页不会有未交付的格，直接取即可，不需要额外的"等齐 idx 集"分支。
         return synchronized(pipeDoneLock) {
             pipeDoneResults.filter { it.page == page && it.idx in idxs }
                 .associate { it.idx to (it.resultIdentity ?: "") }
@@ -1281,6 +1303,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             pipeCancelled = false
             pipeNextId = 0
             pipeInFlight = 0
+            pipeDoneCount = 0
             pipePageNo = 0
             pipeSentEpoch.clear()
         }
@@ -1395,6 +1418,31 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   （game_controller.rs:666）；BS 实测就绪门+settle 占每格 68%（508ms 里 345ms）。
         //   语义不变：超时仍是「按原样解析」，只是不再先白等 6 秒。
         const val PANEL_CHANGE_WAIT_MAX_MS = 400L
+
+        // ── 管道停等的打点与上限（#260 后半，2026-10-13）──
+        /** 在途 job 归零的轮询间隔（[pipeJoinPage] 与 [pipeAwaitAnchorIdentities] 共用）。 */
+        const val PIPE_POLL_MS = 2L
+        /**
+         * [pipeAwaitAnchorIdentities] 的放弃条件：**连续这么多次轮询消费者没有处理完任何一个 job**。
+         *
+         * ★ 为什么不再按墙钟（旧值＝[PAGE_WATCHDOG_MS] 90s 的 `clock() + budget`）：
+         * 那条预算量的是"这台机器多久能跑完 ≤[TimingOverrides.pipeDepth] 个 job"，也就是**机器负载**，
+         * 而不是"消费者是否还活着"。后果有两头：
+         * - 干跑：满载复跑（load 12）实测被打满 ⇒ 锚定退回「照常访问」⇒ 管道臂比同步臂**多击一整条
+         *   重叠带**（43→50），单测红的是机器而不是语义（当时的处置是给 `panchor` 一个大值把它失效，
+         *   见 §16.20 之前的记录 —— 那是掩码不是修）。
+         * - 真机：慢机（华为钳频那两轮 rec 单价 338ms）同样可能在 90s 内跑不完 2~3 个 job ⇒
+         *   **静默降级成"每页多击数格"**，只有一条 W 日志。
+         *
+         * 按"没有进展的轮询次数"计就没有这个毛病：`kotlinx.coroutines.delay` 的契约是
+         * **"for at least the given time"**（只会晚于、不会早于请求时长），
+         * 所以 N 次轮询的真实时长随负载**只增不减** —— 机器越忙，这条越宽松，原理上不可能因为忙
+         * 而误判消费者已死。真正确死/Error 杀掉协程时，进展恒 0 ⇒ 仍然会在有限次轮询后收手。
+         * 名义时长 45_000 × 2ms ≈ 90s，与旧预算同量级（"90s 里一个 job 都没处理完"＝死了）；
+         * 消费者**活着**时本函数照旧在"在途归零"那一刻返回，不会因为换了判据而多等一步。
+         * 真机上"消费者真的不干活"由页级看门狗（[PAGE_WATCHDOG_MS]，按格间进展判挂死）中止整轮兜住。
+         */
+        const val PIPE_ANCHOR_IDLE_POLLS = 45_000L
 
         // ── ★ 就绪信号直采（2026-09-12，取代上面的「抓帧 + OCR」轮询）──
         /**

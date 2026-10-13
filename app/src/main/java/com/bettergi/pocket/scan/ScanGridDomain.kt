@@ -20,6 +20,7 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.GRID_TOP_STABLE_ROUNDS
 import com.bettergi.pocket.scan.ScanEngine.Companion.MAX_SCROLL_TOP_ROUNDS
 import com.bettergi.pocket.scan.ScanEngine.Companion.OVERLAP_ANCHOR_COUNT
 import com.bettergi.pocket.scan.ScanEngine.Companion.PAGE_WATCHDOG_MS
+import com.bettergi.pocket.scan.ScanEngine.Companion.PIPE_ANCHOR_IDLE_POLLS
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_FP_GATE_ENABLED
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_CHANGE_WINDOW_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_FRAME_TIMEOUT_MS
@@ -567,17 +568,18 @@ internal suspend fun ScanEngine.pagedGridCore(
                     ) {
                         val prev = prevAllCellIds!!
                         // ★ #253：pipe>0 时这两个槽的 producer 值不可信 ⇒ 有界早 join 后按消费者回填
-                        //   覆写走管道的格；未交付（过期/取消丢弃或超时）⇒ 置空按今天的兜底走。
+                        //   覆写走管道的格；未交付（过期/取消丢弃，或消费者连续无进展）⇒ 置空按今天的兜底走。
                         //   代价每页一次、被积压深度封顶（见 pipeAwaitAnchorIdentities 的 KDoc）。
                         if (TimingOverrides.pipeDepth > 0) {
-                            // ★ #260：预算可覆盖。真机上它防"消费者被饿死"，而在 JVM 干跑里它量的是
-                            //   这台机器有多忙 —— 满载时被填满就会让管道臂多击一整条重叠带（43→50），
-                            //   夹具又把内容挂在点击序号上 ⇒ 四条 S2b 用例同时红。
+                            // ★ #260 后半：这条停等不再是墙钟预算，而是"消费者有没有处理完 job"
+                            //   （论证见 pipeAwaitAnchorIdentities 的 KDoc）—— 机器越忙只会等得越久，
+                            //   所以干跑不再需要 panchor 把它遮掉；本旋钮只留给真机实验。
                             val early = pipeAwaitAnchorIdentities(
                                 pageNo,
                                 intArrayOf(1, 2),
-                                budgetMs =
-                                    if (TimingOverrides.pipeAnchorMs > 0) TimingOverrides.pipeAnchorMs else PAGE_WATCHDOG_MS,
+                                idlePolls =
+                                    if (TimingOverrides.pipeAnchorIdlePolls > 0) TimingOverrides.pipeAnchorIdlePolls
+                                    else PIPE_ANCHOR_IDLE_POLLS,
                             )
                             fun adoptAnchorId(k: Int, piped: Boolean) {
                                 if (!piped) return

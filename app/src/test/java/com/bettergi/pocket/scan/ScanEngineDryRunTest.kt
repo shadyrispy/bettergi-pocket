@@ -7,6 +7,7 @@ import com.bettergi.pocket.scan.flows.runArtifactScanNative
 import com.bettergi.pocket.scan.flows.runArtifactSteps
 import com.bettergi.pocket.scan.flows.runWeaponScanNative
 import com.bettergi.pocket.scan.forEachPlanItem
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -229,6 +230,18 @@ class ScanEngineDryRunTest {
 
         // readNumber 可编程脚本（onZero 重试等按次序变化场景）；空则回退页静态值
         val numberScript = ArrayDeque<Int?>()
+
+        /**
+         * ★ #260 后半：把"消费者正在干活但这一格慢"做成**定点**注入 —— 只有帧身份等于
+         * [slowReadAt] = (页, 页内格序) 的**第一次** OCR 读取挂起 [slowReadMs] 毫秒。
+         * 其余读取一律照旧。
+         * ⚠️ 为什么必须定点而不是"每次都慢"：全线放慢会饿到格间就绪门
+         * （`PANEL_CHANGE_WAIT_MAX_MS` 400ms 内读不到签名变化 ⇒ 判"点击被吞"⇒ 同坐标重发一次），
+         * 实测全量并发跑下锚定臂因此多 1 击（43→44），量的又是套件并发度而不是本用例的语义。
+         */
+        var slowReadMs: Long = 0L
+        var slowReadAt: Pair<Int, Int>? = null
+        private var slowReadFired = false
 
         // ── A11 冻结注入状态 ──
         /** 帧身份 → 该帧被抓时的 (格序, 面板名)。OCR 夹具据此回放"这一帧里显示的是哪一格"。 */
@@ -498,6 +511,16 @@ class ScanEngineDryRunTest {
                 //   这一行代码把 #260 的后半（夹具身份模型耦合点击序列）与 §16.16(c) 里
                 //   「一次多击 ⇒ 后面所有格读数整体平移」这条机理**断开**。
                 val band = readIdentityBand(frame)
+                // ★ #260 后半的**定点**注入：只把"这一页这一格"的第一次读取挂慢（见 [Harness.slowReadMs]）
+                run {
+                    val target = slowReadAt
+                    if (slowReadMs > 0L && !slowReadFired && target != null &&
+                        band?.first == target.first && band?.second == target.second
+                    ) {
+                        slowReadFired = true
+                        delay(slowReadMs)
+                    }
+                }
                 return rects.mapNotNull { r ->
                     // ⚠️ 2026-09-11 修：原为 ${nameCounter++}（**每次读取**都变），而引擎
                     //    visit 的「面板已稳定」判据要求 `名字已变 && 连续两次读数一致` —— 每次读都变
@@ -663,6 +686,9 @@ class ScanEngineDryRunTest {
         pieceOf: ((Int, Int) -> Int)? = null,
         /** ★ #260 注入器：第 N 次格点击的抓帧完成后，夹具替引擎多点一格（见 [Harness.strayClickAfterVisit]）。 */
         strayClickAfterVisit: Int = 0,
+        /** ★ #260 后半：把 (页, 页内格序) = [slowReadAt] 的第一次 OCR 挂慢 [slowReadMs] 毫秒。null/0 = 不注入。 */
+        slowReadMs: Long = 0L,
+        slowReadAt: Pair<Int, Int>? = null,
     ): RunResult {
         // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
@@ -698,6 +724,8 @@ class ScanEngineDryRunTest {
             strayClickAfterVisit = strayClickAfterVisit,
         )
         numberScript.forEach { h.numberScript.addLast(it) }
+        h.slowReadMs = slowReadMs
+        h.slowReadAt = slowReadAt
         // dedupe=false：dry-run 的 21 格 mock OCR 文本相同（人工场景），全量入库便于断言；
         // 真机每件内容不同，生产默认 true。
         // clock 注入真实时间：JVM 单测 SystemClock 被 returnDefaultValues 恒 0，会让 settle 轮询死循环
@@ -725,19 +753,17 @@ class ScanEngineDryRunTest {
         val prevPipe = TimingOverrides.pipeDepth
         val prevCrop = TimingOverrides.panelCrop
         val prevExplicit = TimingOverrides.pipeExplicit
-        val prevAnchor = TimingOverrides.pipeAnchorMs
         TimingOverrides.pipeDepth = pipeDepth
         // ★ A③（#69 流程默认）：`ScanEngine.run()` 现在会按 flowName 给 artifact/weapon 填默认深度，
         //   把手就是 `pipeExplicit`。干跑里本用例集比的正是**传进来的那两档**（0 vs 2），
         //   所以必须声明成"显式给过"，否则 JSON 路径（nativeFlow=null，直接 engine.run()）的用例会
         //   被静默升成管道臂 —— 断言的还是同步期望，红法是随机的（#260 那类墙钟敏感假象的温床）。
         TimingOverrides.pipeExplicit = true
-        // ★ #260：锚点早到交付的预算在干跑里**等于不限**。它防的是真机消费者被饿死，
-        //   而在 JVM 里它量的是机器负载：满载复跑（load 12）实测被打满 ⇒ 管道臂多击一整条
-        //   重叠带（`expected 43 but was 50`），而夹具把 sub0 挂在**点击序号**上（[:367] `stateCell`），
-        //   一次多击就把后面所有格的读数整体平移 ⇒ 四条 S2b 用例同时红。
-        //   外层 `withTimeout(ENGINE_RUN_TIMEOUT_MS)` 仍然兜住真挂死，所以这里放宽不会把故障藏起来。
-        TimingOverrides.pipeAnchorMs = 600_000L
+        // ★ #260 后半（2026-10-13）：这里**不再设 `panchor`**。锚点早到交付那条停等原来按墙钟计，
+        //   满载复跑（load 12）实测会把预算烧光 ⇒ 管道臂多击一整条重叠带（`expected 43 but was 50`），
+        //   当时是靠"测试里给一个等于不限的预算"遮掉的。现在它的上限改成"消费者连续多少轮询没有
+        //   处理完任何 job"（ScanEngine.PIPE_ANCHOR_IDLE_POLLS 的 KDoc），负载只会让真实等待变长，
+        //   所以干跑与真机用同一个默认值即可 —— 空载/满载两遍复跑是本条的验收。
         if (pipeDepth > 0 || forceCrop) TimingOverrides.panelCrop = true
         try {
             runBlocking {
@@ -771,7 +797,6 @@ class ScanEngineDryRunTest {
             TimingOverrides.pipeDepth = prevPipe
             TimingOverrides.panelCrop = prevCrop
             TimingOverrides.pipeExplicit = prevExplicit
-            TimingOverrides.pipeAnchorMs = prevAnchor
         }
         return RunResult(engine, h)
 
@@ -914,8 +939,10 @@ class ScanEngineDryRunTest {
             //   所以恢复 `== 10`，并把两条"少件只可能出自这里"的计数器一起断言，让红的时候直接归因：
             //   - `pipeDiscard` = 有过期/取消丢弃（纪元打标或重访语义错）；
             //   - `pipeFail` = 消费者抛异常被 catch 吞掉。
-            //   满载跑曾见 `was 8`，那是 #253 锚点预算被打满导致**点击数变少**（前置探针多烧了几次）
-            //   ⇒ 已经由 `panchor` 旋钮在干跑里失效，不是取消语义的锅。
+            //   满载跑曾见 `was 8`，那是 #253 锚点预算被打满导致点击数变少（前置探针多烧了几次）。
+            //   #260 后半起那条预算不再是墙钟（改成"消费者有没有处理完 job"），干跑也不再设 `panchor`
+            //   ⇒ 若这里再红且日志出现「锚点早到交付：连续 … 轮询没有处理完任何 job」，
+            //   那就是消费者**真的**停了，不是机器忙。
             assertEquals("pipe=$pipe：只应入库已点过的 10 格（少了就是真丢件，不是「给了余量」）", 10, engine.results.size)
             assertEquals("pipe=$pipe：有过期/取消丢弃 ⇒ 纪元打标或重访语义错", 0L, PerfProbe.pipeDiscardCount())
             assertEquals("pipe=$pipe：消费者抛异常被吞 ⇒ 少件的唯一另一条路", 0L, PerfProbe.pipeFailCount())
@@ -971,6 +998,104 @@ class ScanEngineDryRunTest {
         val b = piped.engine.results.map { it.setKey to it.slotKey to it.substats.map { s -> s.key to s.value } }
         assertEquals("两臂入库逐件同序同值", a, b)
         assertEquals(sync.harness.finished, piped.harness.finished)
+    }
+
+    /**
+     * ★ #260 后半的语义钉：锚点早到交付那条停等的放弃条件是"消费者有没有干活"，不是墙钟。
+     *
+     * 注入 = **定点**把页 2 第 0 格的第一次 OCR 挂慢 600ms（[runEngine] 的 `slowReadMs/slowReadAt`），
+     * 作用是让"锚点问的那一刻在途必然 >0"变成确定事件，其余读取全速。两臂只差
+     * `TimingOverrides.pipeAnchorIdlePolls`：
+     * - **0（＝生产默认 45_000 次 ≈ 90s）** ⇒ 600ms 后那格处理完 ⇒ 有进展 ⇒ 不等满 ⇒
+     *   锚定照常命中 ⇒ 页 2 不重访重叠带（做功与同步臂相同 = 43 击）；
+     * - **1** ⇒ 进停等后第一次轮询看不到进展就收手 ⇒ 锚定退回「照常访问」⇒
+     *   页 2 重访整条重叠带（43+4=47 击，正是历史上 load 12 那个 `43 vs 50` 的同形）。
+     *
+     * ⚠️ 为什么"定点"而不是"每次都慢"：全线放慢会饿到**格间就绪门**（400ms 内读不到签名变化 ⇒
+     * 判点击被吞 ⇒ 同坐标重发），实测把锚定臂的绝对点击数从 43 抬成 44 —— 那量的又是套件并发度、
+     * 不是本用例的语义（第一版这条在全量里就是这么红的）。断言因此**同时**钉总数与
+     * "带内格的重数"，后者保证差值出自那条重叠带而不是随机多按了一下。
+     *
+     * ⚠️ 本用例不区分新旧规则（600ms 的单格延迟在旧的 90s 墙钟下同样不会烧穿预算）；
+     * 新旧之差靠"进展计数随负载只松不紧"这个契约撑（`delay` 只会晚不会早，论证见
+     * `ScanEngine.PIPE_ANCHOR_IDLE_POLLS` 的 KDoc），实证是空载/满载两遍全量
+     * （dsl/docs/scan-pipeline-20261006.md §16.22，执行件 `dsl/dev/dryrun_load_ab.sh`）。
+     */
+    @Test
+    fun `S2b 锚点停等按进展而不是墙钟决定放弃`() {
+        val pieceOf = { page: Int, cell: Int ->
+            when {
+                page == 0 -> cell
+                cell < GRID_COLS -> CELLS_PER_PAGE - GRID_COLS + cell
+                else -> CELLS_PER_PAGE + cell - GRID_COLS
+            }
+        }
+        fun run() = runEngine(
+            listOf(
+                Page(syntheticFrame(5), pageLines("Lv.90"), 1026),
+                Page(syntheticFrame(5, page = 1), pageLines("Lv.90"), 1026),
+            ),
+            pipeDepth = 2,
+            forceCrop = true,
+            nativeFlow = "artifact",
+            maxPages = 2,
+            pieceOf = pieceOf,
+            // 定点注入：页 2（索引 1）第 0 格的第一次 OCR 挂 600ms ⇒ 锚点问的那一刻在途必不为 0，
+            // 而其余读取全速（"每次都慢"会饿到格间就绪门 ⇒ 多击一发，实测 43→44 就是这么来的）
+            slowReadMs = 600L,
+            slowReadAt = 1 to 0,
+        )
+        // 格序 → 格心坐标：与引擎/夹具同一套网格几何
+        fun center(cell: Int): Pair<Int, Int> {
+            val col = cell % GRID_COLS
+            val row = (cell / GRID_COLS).coerceIn(0, GRID_TRAVERSE_ROWS - 1)
+            return (CARD_ORIGIN[0] + col * CARD_PITCH[0] + 100) to (CARD_ORIGIN[1] + row * CARD_PITCH[1] + 130)
+        }
+        val band = (3 until GRID_COLS).toList()      // idx3..6：夹具造出的重叠带里"应被锚定跳掉"的那几格
+        val anchorCell = 0                            // idx0：锚点本身，两臂都必须点（页 1 一次 + 页 2 一次）
+        val prev = TimingOverrides.pipeAnchorIdlePolls
+        try {
+            TimingOverrides.pipeAnchorIdlePolls = 0L
+            val alive = run()
+            TimingOverrides.pipeAnchorIdlePolls = 1L
+            val givenUp = run()
+            val mult = { clicks: List<Pair<Int, Int>>, c: Pair<Int, Int> -> clicks.count { it == c } }
+            val expected = ENTER_CHAIN_CLICKS + 2 * CELLS_PER_PAGE - band.size
+            assertEquals(
+                "默认上限：锚定命中 ⇒ 做功与同步臂相同（$expected 击）",
+                expected, alive.harness.clicks.size,
+            )
+            assertEquals(
+                "上限=1：放弃锚定 ⇒ 整条重叠带被重访（$expected+${band.size} 击）",
+                expected + band.size, givenUp.harness.clicks.size,
+            )
+            // 对照：非带格的重数两臂必须相同 ⇒ 下面的差值不是"整臂都多按了几下"
+            assertEquals(
+                "对照格（锚点 idx0）重数必须相同，否则差值解释不成立",
+                mult(alive.harness.clicks, center(anchorCell)),
+                mult(givenUp.harness.clicks, center(anchorCell)),
+            )
+            for (idx in band) {
+                val c = center(idx)
+                assertEquals(
+                    "带内格 idx$idx：放弃锚定后页 2 必须重访这一次（默认臂=$c 重数 " +
+                        "${mult(alive.harness.clicks, c)}）",
+                    mult(alive.harness.clicks, c) + 1,
+                    mult(givenUp.harness.clicks, c),
+                )
+            }
+            assertEquals(
+                "整轮做功之差必须正好是那条重叠带（${band.size} 格）",
+                alive.harness.clicks.size + band.size, givenUp.harness.clicks.size,
+            )
+            // 件数不受影响：跳过的是"同一件的第二面"，去重本来就不入库
+            assertEquals(
+                "两臂入库件数必须相同（锚定只省点击，不改内容）",
+                alive.engine.results.size, givenUp.engine.results.size,
+            )
+        } finally {
+            TimingOverrides.pipeAnchorIdlePolls = prev
+        }
     }
 
     /**

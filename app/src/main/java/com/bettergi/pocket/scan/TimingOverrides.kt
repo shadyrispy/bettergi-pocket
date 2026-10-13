@@ -51,16 +51,18 @@ object TimingOverrides {
     var pipeExplicit: Boolean = false
 
     /**
-     * ★ #260：管道"锚点早到交付"（#253）那次有界停等的预算，0 = 用 `PAGE_WATCHDOG_MS`(90s)。
+     * ★ #260：管道"锚点早到交付"（#253）那次停等的**无进展轮询次数**上限，
+     * 0 = 用 [ScanEngine.PIPE_ANCHOR_IDLE_POLLS]（45_000 次 × 2ms ≈ 90s 名义）。
      *
-     * 为什么要做成可覆盖：这个预算防的是**真机消费者被饿死**，而干跑单测里它是
-     * "当前这台机器有多忙"的度量 —— 满载复跑实测（load 12，8 个 busy 进程）：
-     * 预算被打满 ⇒ 锚定退回"照常访问" ⇒ 管道臂比同步臂**多击 7 格**
-     * （`expected 43 but was 50`），而夹具把内容挂在**点击序号**上 ⇒ 一次多击
-     * 就把后面所有格的读数整体平移 ⇒ 四条 S2b 用例同时红。
-     * 给一个"测试里等于不限"的值，让预算只在真机上生效；外层 `withTimeout` 仍兜住真挂死。
+     * 这里曾经是**墙钟预算**（90s），而干跑里它量的是"这台机器有多忙"：满载复跑（load 12，
+     * 8 个 busy 进程）实测被打满 ⇒ 锚定退回"照常访问" ⇒ 管道臂比同步臂**多击一整条重叠带**
+     * （`expected 43 but was 50`）。当时的处置是给干跑设一个大值把它失效 —— 那是掩码，
+     * 真机侧的静默降级（慢机 90s 内跑不完 2~3 个 job ⇒ 每页白多击数格）还在。
+     * 现在上限改按"消费者有没有处理完 job"计（论证见 [ScanEngine.PIPE_ANCHOR_IDLE_POLLS]），
+     * 负载只会让真实时长变长、不会变短，所以干跑不再需要任何覆盖值；本旋钮只留给
+     * 真机上"想更早收手"的实验。
      */
-    var pipeAnchorMs: Long = 0L
+    var pipeAnchorIdlePolls: Long = 0L
 
     /** 签名轮询步长（仅 [panelSigEnabled] 时生效）。默认 40ms —— 实测面板内容 133ms 就绪（中位）。 */
     var panelSigPollMs: Long = ScanEngine.PANEL_SIG_POLL_MS
@@ -163,7 +165,7 @@ object TimingOverrides {
         panelCrop = DEFAULT_PANEL_CROP
         pipeDepth = DEFAULT_PIPE_DEPTH
         pipeExplicit = false
-        pipeAnchorMs = 0L
+        pipeAnchorIdlePolls = 0L
         panelSigPollMs = DEFAULT_PANEL_SIG_POLL_MS
         panelSigBand = DEFAULT_PANEL_SIG_BAND
         panelSigSamples = DEFAULT_PANEL_SIG_SAMPLES
@@ -283,7 +285,8 @@ object TimingOverrides {
                         if (pipeDepth > 0) panelCrop = true
                     }
                     // #260：锚点早到交付的预算（干跑给大值，真机留默认 90s）
-                    "panchor" -> pipeAnchorMs = v.coerceAtLeast(0L)
+                    // #260 后半：锚点停等的"无进展轮询次数"上限（原为墙钟预算，干跑不再需要覆盖）
+                    "panchor" -> pipeAnchorIdlePolls = v.coerceAtLeast(0L)
                     "sigpoll" -> panelSigPollMs = v.coerceAtLeast(5L)
                     "sigband" -> panelSigBand = v != 0L
                     "sigsamples" -> panelSigSamples = v.toInt().coerceIn(1, 6)
