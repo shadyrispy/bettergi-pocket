@@ -1333,6 +1333,17 @@ internal suspend fun ScanEngine.revisitFailedCells(
                 curCellCol = col
                 curCellIdx = idx
                 visitBody(this, col, row, idx, prof)
+                // ★ #270：管道臂必须**先 join 再取结果**，理由有三条，缺一条都会静默出错：
+                //   ① 本页的排干（`pipeDrainResults`）在格循环末尾就已经跑过了，重访 job 是那之后
+                //      才发出的 ⇒ 没有任何排水点会把它们交付进 `pageKeys`，唯一交付路径就是这里
+                //      直读 `lastCellKey`；不 join 就读到的是**上一格**的残值，把邻件身份写进本格槽位。
+                //   ② 下面紧跟着 `lastCellKey = null`：不 join 就可能在消费者**正要把本格结果写进
+                //      这两个字段**的时刻把它清空 ⇒ 那一格变成「未交付」，与 #257 同一类丢件。
+                //   ③ `recovered` 看的是 results 增量，而 results 只在消费者里增长 ⇒ 不 join 则
+                //      管道臂**恒为 0**（「定点重访 0/N 救回」在管道臂上是按构造成立的假现象）。
+                //   join 在 `curCellIdx = -1` **之前**（与空读格回读 [ScanGridDomain] 同序）：
+                //   emit 用活字段 `curCellIdx` 落 `curPageIds`，先复位会把救回件记到别的槽位。
+                if (TimingOverrides.pipeDepth > 0) pipeJoinPage()
                 curCellIdx = -1
                 val k = lastCellKey
                 val id = lastCellIdentity
@@ -1446,9 +1457,16 @@ internal suspend fun ScanEngine.vote(
  * [stopWhen] 的 mode=duplicateStreak 分支与原生 visitBody 都走这里（单一事实源）。
  */
 internal fun ScanEngine.stopWhenRegisterDuplicateStreak(streak: Int, dupPageConfirm: Int) {
+    val confirm = dupPageConfirm.coerceIn(1, 5)
+    // ★ #219：同值重复登记**不打日志**。本函数在同步臂是**逐格**被 visit 体调用的
+    //   （`runVisitBody` 的 pipe 分支反而有 `if (changed)` 守卫）⇒ 不打这个补丁的话
+    //   真机日志里每格一行"stopWhen 登记"，把"值真的变了"这件事淹掉；而且流水线臂
+    //   现在也会在流程开头先登记一次（见各 flow 的 `pagedGridNative` 之前），
+    //   同一轮里出现两次同值登记是常态。
+    if (charDupStreakLimit == streak && this.dupPageConfirm == confirm) return
     charDupStreakLimit = streak
     // 页级确认页数（默认 2）：`1` = 恢复旧的「首次整页重复即停」行为
-    this.dupPageConfirm = dupPageConfirm.coerceIn(1, 5)
+    this.dupPageConfirm = confirm
     Log.i(
         TAG,
         "stopWhen 登记 mode=duplicateStreak streak=$charDupStreakLimit dupPageConfirm=${this.dupPageConfirm}" +

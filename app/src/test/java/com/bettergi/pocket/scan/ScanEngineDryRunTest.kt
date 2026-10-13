@@ -1087,6 +1087,32 @@ class ScanEngineDryRunTest {
 
     // ---- 健壮性：onZero 重进重试 / anchor 断言失败终止 ----
 
+    /**
+     * ★ #219：dup 参数在本轮**就是 flow 声明的值**（artifact = (3,1)、weapon = (3,1)）。
+     *
+     * 为什么钉"值"而不是钉"时机"：判据（`dupRollbackConfirmed`，每页只判一次、`dupPageDecided` 闩住）
+     * 是**在格循环里**读的，而各 flow 现在把登记写在 `pagedGridNative(...)` **前一行**（源码里可见），
+     * 时机由此在构造上成立；干跑里没有"第 0 格 visit 之前"的注入点可以采样，所以这里只能钉住
+     * "两条流程的声明值确实落到了引擎字段上"（配合 `stopWhenRegisterDuplicateStreak` 的同值静默守卫，
+     * 流程体内那次重复调用不会把它改回去）。若哪天有人删掉流程开头的登记，这条会红在"登记彻底消失"上，
+     * 而"登记晚了"仍只能靠读源码 —— 这条限制写在注释里，别当它覆盖了时机。
+     */
+    @Test
+    fun `artifact 与 weapon 轮的页级确认数等于 flow 声明值`() {
+        // ⚠️ 两条 flow 的夹具不同源：weapon 的入口锚点读「背包/武器」+「武器 n/n」计数行，
+        //    拿 artifact 的 pageLines 去驱动 weapon 会先在 assertAnchor 抛 ScanAbortedException
+        //    （首版就是这么红的），红在夹具上而不是 #219 上。
+        for ((flow, lines) in listOf("artifact" to pageLines("Lv.90"), "weapon" to weaponLines())) {
+            val (engine, _) = runEngine(
+                listOf(Page(syntheticFrame(5), lines, CELLS_PER_PAGE)),
+                nativeFlow = flow,
+                maxPages = 1,
+            )
+            assertEquals("$flow：页级确认数必须是流程声明的 1", 1, engine.dupPageConfirm)
+            assertEquals("$flow：连续重复阈值同样是流程声明值", 3, engine.charDupStreakLimit)
+        }
+    }
+
     /** readCount 读到 0 → 重跑入口链重进界面 → 再读一次 → total=1026。 */
     @Test
     fun `readCount onZero reopens screen and retries`() {

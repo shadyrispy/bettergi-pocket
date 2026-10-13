@@ -188,7 +188,10 @@ internal suspend fun ScanEngine.pagedGridCore(
     Log.i(
         TAG,
         "pagedGrid[$gridKey]: 回卷阈值 = 一页+一行 $cols×($traverseRows+1) = $dupLimitEffective" +
-            "，页级确认（flow `stopWhen.dupPageConfirm` 在本页之后才登记，此处打印恒为默认 2）；" +
+            // ★ #219：这里以前写「flow 的 dupPageConfirm 在本页之后才登记，此处打印恒为默认 2」——
+            //   各 flow 现在**进 pagedGrid 之前**就登记（`stopWhenRegisterDuplicateStreak`，同值重复登记静默），
+            //   所以这行报的就是本轮真正生效的页级确认数；`0` 只可能出现在没登记的流程（如标定流）上。
+            "，页级确认 dupPageConfirm=$dupPageConfirm（flow 声明的值，进格循环前已登记）；" +
             "收尾主判据 = 已入库 ≥ 计数器，兜底 = 回卷 / 素材标识，硬闸 = 总滑动 ${TimingOverrides.maxTotalSwipes}",
     )
 

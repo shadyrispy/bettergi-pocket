@@ -818,11 +818,14 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     /**
      * 断言回卷所需的连续整页零新增页数（flow `stopWhen.dupPageConfirm`，默认 2；=1 恢复旧的立即停行为）。
      *
-     * ⚠️ #219：唯一赋值点是 [stopWhenRegisterDuplicateStreak]，由 [runVisitBody] 按 flow 的
-     * `stopWhen mode=duplicateStreak` 步登记（**本格判据求值之前**），五条 flow 都带该步 ⇒
-     * 逐格第一次求值起读到的就是 flow 的声明值。登记之前只有两处读它：pagedGrid 入口日志与
-     * page0 idx0 的格级门（后者要 `charDupStreak` 带满整页重复才走到，新建引擎不可能）。
-     * flow 未声明 `dupPageConfirm` 时保持本默认 2（`stopWhen` 的 `optInt(…, 2)`）。
+     * ⚠️ #219：唯一赋值点是 [stopWhenRegisterDuplicateStreak]。**五条原生 flow 现在各自在
+     * `pagedGridNative(...)` 之前登记一次**（Artifact 3/1、Weapon 3/1、Lock 3/2、Character 3/2、
+     * Equip 3/2）⇒ 格循环第一次读它时就已经是 flow 声明的值；流程体内保留的同值登记被守卫
+     * 静默跳过（同步臂此前是**逐格**重复登记并逐格打日志，把"值真的变了"淹掉）。
+     * 为什么值得提前：判据在**格循环里**读（`dupRollbackConfirmed` 每页只判一次，`dupPageDecided` 闩住），
+     * 而 page0 的第一读发生在第 0 格 visit 体之前 —— 旧写法下那里读到默认 2，flow 声明 1 意图
+     * "一次命中即停"的流程要多耗一整页才停（并让入口日志报假值）。
+     * flow 未声明 `dupPageConfirm` 时保持本默认 2（`stopWhen` 的 `optInt(…, 2)`；标定流即此档）。
      */
     internal var dupPageConfirm = 2
 

@@ -140,6 +140,10 @@ internal suspend fun ScanEngine.runCharacterScanNative() {
 internal suspend fun ScanEngine.runCharacterSteps() {
     nativeStep("enterScreen") { enterScreen(CharacterFlow.ENTER_CHAR) }
     nativeStep("pagedGrid") {
+        // ★ #219：dup 参数在**进 pagedGrid 之前**登记一次。判据（页级确认 dupPageConfirm）在
+        //   格循环里就被读，而流程体内的那次登记要到第 0 格 visit 才生效 ⇒ 从页 0 起算的值
+        //   才是流程真正声明的那个（流程体内保留同值登记，由守卫静默跳过）。
+        stopWhenRegisterDuplicateStreak(3, 2)
         pagedGridNative(CharacterFlow.GRID, scrollToTop = true) { col, row, idx, prof ->
             runVisitBody(CharacterFlow.GRID, col, row, idx, prof, CharacterFlow.EMIT_CHAR, CharacterFlow.STOP_DUP) { ctx ->
                 // ★ 交替页签序（GS scanner.rs:1770-1822 对齐，2026-10-10 双源名字方案）：

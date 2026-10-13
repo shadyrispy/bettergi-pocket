@@ -177,6 +177,10 @@ private suspend fun ScanEngine.runLockStepsInner() {
         clickChainEntry("sortPopupConfirm")
     }
     nativeStep("pagedGrid") {
+        // ★ #219：dup 参数在**进 pagedGrid 之前**登记一次。判据（页级确认 dupPageConfirm）在
+        //   格循环里就被读，而流程体内的那次登记要到第 0 格 visit 才生效 ⇒ 从页 0 起算的值
+        //   才是流程真正声明的那个（流程体内保留同值登记，由守卫静默跳过）。
+        stopWhenRegisterDuplicateStreak(3, 2)
         pagedGridNative(LockFlow.GRID, pageSkipExpr = LockFlow.PAGE_SKIP_EXPR) { col, row, idx, prof ->
             runVisitBody(LockFlow.GRID, col, row, idx, prof, pipeEmit = null, pipeStop = LockFlow.STOP_DUP) { ctx ->
                 // ① 止扫登记（阈值只作 snap/rosterFind 兜底；pagedGrid 内被引擎覆盖）

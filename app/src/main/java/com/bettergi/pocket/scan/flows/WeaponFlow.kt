@@ -113,6 +113,10 @@ internal suspend fun ScanEngine.runWeaponSteps() {
     }
     nativeStep("readCount") { readCount(WeaponFlow.READ_COUNT) }
     nativeStep("pagedGrid") {
+        // ★ #219：dup 参数在**进 pagedGrid 之前**登记一次。判据（页级确认 dupPageConfirm）在
+        //   格循环里就被读，而流程体内的那次登记要到第 0 格 visit 才生效 ⇒ 从页 0 起算的值
+        //   才是流程真正声明的那个（流程体内保留同值登记，由守卫静默跳过）。
+        stopWhenRegisterDuplicateStreak(WeaponFlow.STOP_DUP_STREAK, WeaponFlow.STOP_DUP_PAGE_CONFIRM)
         pagedGridNative(WeaponFlow.GRID) { col, row, idx, prof ->
             runVisitBody(WeaponFlow.GRID, col, row, idx, prof, WeaponFlow.EMIT, WeaponFlow.STOP_DUP) { ctx ->
                 // ① 止扫登记（留在生产者；§12.1：登记是纯 vars 写，无帧依赖）

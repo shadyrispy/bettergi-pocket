@@ -937,9 +937,9 @@ internal suspend fun ScanEngine.parseArtifactPanel(
         return
     }
     // §14 dict.subStats：OCR 数值吸附到标准档位（rollTable），使导出值与游戏内一致
-    dict?.optString("subStats")?.takeIf { it.isNotEmpty() }?.let { subDict ->
-        substats = snapSubstats(substats, rarity, subDict)
-    }
+    // ★ #269：词典键提到局部变量，下方 roll 重裁链（:1007 附近）用的是**同一个吸附**。
+    val subDictKey = dict?.optString("subStats")?.takeIf { it.isNotEmpty() }
+    subDictKey?.let { substats = snapSubstats(substats, rarity, it) }
 
     // ★ A1'（2026-09-16）：把单件名规范化为**词典标准名**，供去重键使用（见内容键注释）。
     //   只影响"入键用的名字"，不改变 setKey 反推本身；词典未命中/未注入词典时回落原始名。
@@ -1012,7 +1012,16 @@ internal suspend fun ScanEngine.parseArtifactPanel(
                 if (t.isBlank()) continue
                 val line = if (VoteJudges.substatRowPending(frame, subRects[i]) == true && !t.contains("待激活")) "$t（待激活）" else t
                 val parsed = StatParser.parse(line, names) ?: continue
-                val cand = RollSolver.In(parsed.key, parsed.value, parsed.inactive)
+                // ★ #269：重裁候选必须过**和首读同一个**档位吸附，否则两个候选口径不同：
+                //   首读那条在 :941 已被 `snapSubstats` 吸到 rollTable 格点（容差 SNAP_TOL=0.06），
+                //   而这里原先直接把 `StatParser.parse` 的原值包成候选。solver 侧的匹配容差是
+                //   `RollTable.canReach` 的 `|shown − value| < 0.02`（RollTable.kt:170），
+                //   表内 combos 命中则要求显示值逐字相等 ⇒ 落在 0.02…0.06 这段的重读值
+                //   （正是吸附本来要吃掉的那段抖动）**用它仍无解** ⇒ 重裁白跑两批多 ROI 重读。
+                //   副作用是有意的：吸附后与首读同值 ⇒ 那条本就是同一个读数，不该再计成「新候选」
+                //   （下方 :1010 的 <0.01 去重门槛会把它吸收掉，`重裁-新候选` 计数会因此下降）。
+                val snapped = subDictKey?.let { snapSubstats(listOf(parsed), rarity, it).first() } ?: parsed
+                val cand = RollSolver.In(snapped.key, snapped.value, snapped.inactive)
                 if (candidates[i].none { it.key == cand.key && Math.abs(it.value - cand.value) < 0.01 }) {
                     candidates[i].add(cand)
                     anyNew = true
