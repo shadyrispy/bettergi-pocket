@@ -403,7 +403,7 @@ internal suspend fun ScanEngine.filterReset(step: JSONObject) {
  *      / `retries`（默认 3）/ `onFail`（`back`|`abort`|`continue`，默认 `continue`）。
  */
 /**
- * **命座页确认 + 读数**（2026-09-13 新增；GOODScanner 移植，见 `topics/09-reference-goodscanner.md`）。
+ * **命座页确认 + 读数**（2026-09-13 新增；GOODScanner 移植，上游 clone 在 `genshin-scanner/GOODScanner/`）。
  *
  * 为什么需要：角色界面三个页签**左上标题完全相同**（`<元素>/<角色名>`）⇒ 界面级判据区分不了页签；
  * 而属性/天赋页有底部按钮文本可用、**命座页底部为空**（无正判据）。本步用**节点环亮度**补上这个缺口。
