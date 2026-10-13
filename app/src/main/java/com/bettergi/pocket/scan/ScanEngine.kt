@@ -876,7 +876,14 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     internal var charConstellation = 0
     internal val charTalents = MutableList(3) { 0 }
 
-    /** 当前角色的词典 key（供 `readTalent` 查词典 c3/c5 减命座加成）。 */
+    /**
+     * ★ #281：本格是否已经扣过命座天赋加成（`resetCharDraft` 复位）。
+     * 扣减点从 `readTalent` 挪到入库时点之后，**幂等就不能再靠调用顺序保证** ——
+     * 重复扣与漏扣在导出里都长得像合法等级（静默），所以宁可用一个布尔位钉住。
+     */
+    internal var talentBonusApplied = false
+
+    /** 当前角色的词典 key（供入库时的 `applyTalentBonusForEmit` 查词典 c3/c5 减命座加成）。 */
     internal var lastCharKey: String? = null
 
     /**

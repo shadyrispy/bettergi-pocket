@@ -926,11 +926,18 @@ internal suspend fun ScanEngine.parseCharacterPanel(
         // ★ 2026-10-10 assert 内联（原 assertScreen×2 → 同帧判定）：onFail=continue 语义不变，
         //   未命中只打 W（不打断流程——与原 assertScreen 的 retries 重试不同，这里同一帧内
         //   不再重试：parse 的名称重读循环本身就会再拿新帧，届时 bottomBar/titleBar 一并重判）。
+        // ★ #281（2026-10-14）：**headerOnly 预读必须跳过这两条判定**。预读只取 1 条矩形
+        //   （`texts` 只有下标 0），而这里按下标 3/4 取 ⇒ 恒得空串 ⇒ **每格必打两条 W**。
+        //   它不是"页判据没命中"的信息，是恒假分支里的噪声，而且噪声大到会被当成判别信号：
+        //   当晚就是这 48~51 条/轮的 `属性页判据未命中` 被拿去和"天赋漏扣"做了 2×2
+        //   （`dsl/docs/talent-plus3-20261014.md`），它真正的含义只是"这一格走的是反序相位"。
         run {
-            val attrOk = Regex("提升指南|升指南").containsMatchIn(texts.getOrElse(3) { "" })
-            val elOk = Regex("元素").containsMatchIn(texts.getOrElse(4) { "" })
-            if (!attrOk) Log.w(TAG, "char: 属性页判据未命中（bottomBar='${texts.getOrElse(3) { "" }}'）⇒ 继续")
-            if (!elOk) Log.w(TAG, "char: 元素判据未命中（titleBar='${texts.getOrElse(4) { "" }}'）⇒ 继续")
+            if (!headerOnlyEffective) {
+                val attrOk = Regex("提升指南|升指南").containsMatchIn(texts.getOrElse(3) { "" })
+                val elOk = Regex("元素").containsMatchIn(texts.getOrElse(4) { "" })
+                if (!attrOk) Log.w(TAG, "char: 属性页判据未命中（bottomBar='${texts.getOrElse(3) { "" }}'）⇒ 继续")
+                if (!elOk) Log.w(TAG, "char: 元素判据未命中（titleBar='${texts.getOrElse(4) { "" }}'）⇒ 继续")
+            }
         }
 
         /**
@@ -1493,12 +1500,39 @@ internal suspend fun ScanEngine.readTalent() {
                 " ｜ 取值=${charTalents.toList()} ｜ 原文=${texts.take(3).map { "'" + it + "'" }}",
         )
     }
-    // ── ★ 2026-10-01 #155：命座天赋加成改**数据驱动**（GOODScanner `adjust_talents` 同法）──
-    //   旧实现是一张 GT 监督反推的手表（51 角色 ×「本账号当时那一档命座」），换个命座档就查不到 ⇒
-    //   落进 `c≥3⇒E / c≥5⇒Q` 的近似规则。而词典里 `c3`/`c5` 一直就有（120/123 角色齐全，此前被
-    //   中间那层 re-encode 丢掉），且**绫华 / 莫娜 / 琴…方向正好相反**（c3=Q、c5=E）⇒ 近似规则两头都减错，
-    //   表现就是 #155 的「成片少减 3」。手表 51 条里 50 条与本规则逐位一致，唯一差异是 Tartaglia
-    //   的普攻 +1（与命座无关，旧表把它塞进 c=0 那一格 ⇒ 达达利亚一旦有命座就丢掉这个 +1）。
+    // ★ #281（2026-10-14）：**这里不再扣命座加成**。
+    //   旧实现把 `applyConstellationTalentBonus` 放在 readTalent 末尾，读的是一旁的
+    //   `charConstellation` —— 而交替页签序的**反序格**是「天赋页开局 ⇒ 先读天赋 ⇒ 才去命座页」，
+    //   那一刻 c 还是 0 ⇒ 一分不减 ⇒ 导出带上面板的 +3。BS 全量实测（四臂 373 行、
+    //   `dsl/docs/talent-plus3-20261014.md` 的 2×2）：漏扣 99 行里 c@talent **全部为 0**、
+    //   扣对 108 行里命座**全部先读到**，零反例；而面板值本身**跨臂从不冲突**
+    //   ⇒ "天赋读数在抛硬币"是假的，真相是**同一角色走哪个方向就决定了减不减加成**，
+    //   轮间的正/反相位随判重跳过的位置漂 ⇒ 看起来像随机。
+    //   扣减点改到 `emitCharacter`（那时 c 已经是本格终值），**零额外点击/抓帧**。
+    // 诊断：这一行仍然只报**面板原值**（#274 的判据就是数它的条数 vs 件数，别改这个前缀）。
+    Log.i(
+        TAG,
+        "char: 天赋等级 ${charTalents.toList()}（面板原值，未扣加成） ｜ 原文=${texts.take(3).map { "'" + it + "'" }} " +
+            "｜ ROI=${rects.take(3).joinToString { "(${it.left},${it.top},${it.right},${it.bottom})" }}",
+    )
+}
+
+/**
+ * 入库前扣掉命座对天赋行的加成（#155 的数据驱动规则 + #281 的时点修正）。
+ *
+ * **为什么必须在 emit 时点做**：交替页签序下反序格是「先天赋、后命座」，
+ * 放在 readTalent 里就会拿到 `charConstellation==0` 而整批漏扣（机制与实测账见
+ * [applyConstellationTalentBonus] 上方 readTalent 里那段注释，以及
+ * `dsl/docs/talent-plus3-20261014.md`）。而两条访问顺序里 `charConstellation` 在
+ * **emit 之前**都已经落终值 ⇒ 扣减只能放在 emit 这一侧，两条顺序才共用同一个 c。
+ *
+ * 幂等：由 [ScanEngine.talentBonusApplied] 守住"本格只扣一次"，`resetCharDraft` 复位。
+ * 漏扣/重复扣都是**静默**的（导出仍是合法等级数字），所以宁可多一个布尔位也不能靠调用顺序。
+ */
+internal fun ScanEngine.applyTalentBonusForEmit() {
+    if (talentBonusApplied) return
+    talentBonusApplied = true
+    if (charTalents.all { it <= 0 }) return // 没读过天赋（判重跳过格就是这一支）⇒ 无可扣，别打日志刷计数
     val c = charConstellation
     // 旅行者的 GOOD 键带元素后缀（TravelerDendro…），而词典只有一个 `Traveler` 条目 ⇒ 归一到基名再查。
     val dictKey = lastCharKey?.let { k -> if (TRAVELER_BY_ELEMENT.containsValue(k)) "Traveler" else k }
@@ -1506,20 +1540,18 @@ internal suspend fun ScanEngine.readTalent() {
     if (dictKey != null && attrs == null) {
         Log.w(TAG, "char: 词典里没有角色 $dictKey ⇒ 命座加成无从可查，天赋按面板原值入库")
     }
+    val panel = charTalents.toList()
     val (bonus, suspicious) = applyConstellationTalentBonus(charTalents, dictKey, attrs, c)
     if (suspicious) {
         Log.w(
             TAG,
-            "char: $dictKey c=$c 该减加成的天赋行读数 <4（面板原值=${texts.take(3).map { "'" + it + "'" }}）" +
-                "⇒ 疑似命座误读，导出可能偏 3",
+            "char: $dictKey c=$c 该减加成的天赋行读数 <4（面板原值=$panel）⇒ 疑似命座误读，导出可能偏 3",
         )
     }
-    // 诊断：实测我方天赋 = GT + 3（恒差，非命座加成 ✗）⇒ 打印 OCR 原文与 ROI 定位
     Log.i(
         TAG,
-        "char: 天赋等级 ${charTalents.toList()} ｜ 原文=${texts.take(3).map { "'" + it + "'" }} " +
-            "｜ bonus=${bonus.toList()} key=$dictKey c=$c attrs(c3,c5)=${attrs?.c3}/${attrs?.c5} " +
-            "｜ ROI=${rects.take(3).joinToString { "(${it.left},${it.top},${it.right},${it.bottom})" }}",
+        "char: 天赋扣加成 面板=$panel ⇒ 入库=${charTalents.toList()} ｜ bonus=${bonus.toList()} " +
+            "key=$dictKey c=$c attrs(c3,c5)=${attrs?.c3}/${attrs?.c5}",
     )
 }
 

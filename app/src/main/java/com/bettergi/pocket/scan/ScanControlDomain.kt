@@ -107,6 +107,11 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
         Log.w(TAG, "emit GoodCharacter: 草稿为空（char_profile 未解析），跳过")
         return
     }
+    // ★ #281（2026-10-14）：命座天赋加成的扣减点从 `readTalent` 挪到这里。
+    //   交替页签序的反序格是「天赋页开局 ⇒ 先读天赋 ⇒ 才去命座页」，在 readTalent 里读
+    //   `charConstellation` 恒得 0 ⇒ 整批漏扣 +3（BS 四臂 2×2 零反例，见
+    //   `dsl/docs/talent-plus3-20261014.md`）。到这里**两条顺序的 c 都已落终值** ⇒ 同一个口径。
+    applyTalentBonusForEmit()
     val c = GoodCharacter(
         key = charKey,
         name = charName,
@@ -115,9 +120,10 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
         constellation = charConstellation,
         // ascension：由 `parseCharacterPanel` 算好（优先面板等级上限 Lv.X/Y 的 Y，缺失按 level 分层）
         ascension = lastCharAscension,
-        // ★ 2026-09-30 #155：面板显示的是**含命座加成**的值，GT/GOOD 要基础值 ⇒ 减法在 `readTalent`
-        //   里做（`applyConstellationTalentBonus`，查字典 c3/c5 是哪一行 + 旅行者那条特例），
-        //   这里拿到的已经是基础值。旧的"c≥3⇒skill、c≥5⇒burst"近似规则连同那张 GT 反推的手表一起删了。
+        // ★ 2026-09-30 #155：面板显示的是**含命座加成**的值，GT/GOOD 要基础值 ⇒ 减法由
+        //   `applyTalentBonusForEmit`（查字典 c3/c5 是哪一行 + 旅行者/达达利亚两条特例）在
+        //   紧上方完成，这里拿到的已经是基础值。旧的"c≥3⇒skill、c≥5⇒burst"近似规则
+        //   连同那张 GT 反推的手表一起删了。
         talents = charTalents.toList(),
     )
     // ── 连续重复角色判据（2026-09-11 用户定：连续 3 个重复 = 遍历完）──
@@ -174,6 +180,7 @@ internal fun ScanEngine.resetCharDraft() {
     charElement = null
     charConstellation = 0
     for (i in charTalents.indices) charTalents[i] = 0
+    talentBonusApplied = false // #281：本格还没扣过加成（扣减点在 emit，见 applyTalentBonusForEmit）
 }
 
 /** 计划中目标的**最低稀有度**（稀有度止扫判据）。计划为空或无 rarity 字段返回 null ⇒ 判据不生效。 */
