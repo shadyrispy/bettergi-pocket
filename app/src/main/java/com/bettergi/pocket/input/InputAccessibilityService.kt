@@ -185,7 +185,17 @@ class InputAccessibilityService : AccessibilityService() {
         private val recoverHandler = Handler(Looper.getMainLooper())
         private var recoverCheck: Runnable? = null
 
-        private val TRANSIENT_PACKAGES = setOf(
+        /**
+         * 「系统弹层不该把闸门误关掉」的那份名单（[onAccessibilityEvent] 用它改写 [overlayHeldBy]
+         * 而不动 [lastAppPackage]）。
+         *
+         * ★ #250（2026-10-13）改成 internal 给服务侧复用，理由是**实测**：华为 EML-AL00 上投影授权
+         * 页真弹出来时，占着 `mCurrentFocus` 的窗口记录是
+         * `ty=SYSTEM_ALERT appop=SYSTEM_ALERT_WINDOW package=com.android.systemui` —— 就是本名单里
+         * 那一位。判「授权页弹没弹」必须把这类包认成"页面在前台"，不能当成外来 app 抢前台（见
+         * `service/TriggerForegroundService` 的 `CaptureConsentProbe`）。
+         */
+        internal val TRANSIENT_PACKAGES = setOf(
             "android",
             "com.android.systemui",
             "com.android.settings",
