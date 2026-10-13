@@ -3,6 +3,8 @@ package com.bettergi.pocket.scan
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -272,5 +274,134 @@ class FixtureRoiCouplingTest {
         // ② craftedByCell 抹除块 (2386,699,2414,707)：合成帧独有（抹掉祝圣紫点）——
         //    覆盖关系在 `zhusheng sample point painting…` 用例里断言。
         // ③ 指纹标记 (2300,900)-(2328,904)：合成帧独有 —— 包含关系在 `fingerprint marker…` 用例里断言。
+        // ④ #260 帧身份条 (2332,905)-(2402,911)：合成帧独有 —— 包含/避开关系在
+        //    `identityBandLivesInsideThePanelCropAndTouchesNoPixelJudge` 用例里断言。
+    }
+
+    /** 两矩形是否不相交（[a,b] = 左/上/右(不含)/下(不含)）。 */
+    private fun disjoint(a: List<Int>, b: List<Int>): Boolean =
+        a[2] <= b[0] || a[0] >= b[2] || a[3] <= b[1] || a[1] >= b[3]
+
+    /** 同一条矩形在祝圣帧上的位置（整体下移 yShift）也要一起避——干跑会把 ROI 平移后读。 */
+    private fun shifted(r: List<Int>, yShift: Int): List<Int> = listOf(r[0], r[1] + yShift, r[2], r[3] + yShift)
+
+    /**
+     * ★ #260 帧身份条（夹具 `ScanEngineDryRunTest.Harness` 的 `BAND_*` 常量组）与 profile 的耦合。
+     *
+     * 条必须**整条落在两个面板的裁片并集里**：解析读的是裁片（同步臂 `panelCropBuf`、管道臂
+     * `job.crop`），条一出裁片 ⇒ `readIdentityBand` 恒 null ⇒ 夹具**静默**退回「按点击进度派生
+     * 内容」那条老路——#260 白修而且不会红（这正是本类存在的理由：把静默漂移变成构建期红）。
+     *
+     * 反向必须**避开全部像素判据区**（星带逐格 / equipped 饱和门 / 锁 / 收藏 / 祝圣采样点 /
+     * banner 稀有度 / 武器 refine），否则夹具自己改掉干跑的投票。
+     *
+     * 唯一允许压字的地方是 `panels.artifact_backpack.subStats` 行带（条正是靠它进裁片）——
+     * 而墨色是**纯黑**：`VoteJudges.substatRowPending` 只数中性色 lum∈[90,150) 与 [150,215)，
+     * 黑(0) 与白(255) 都不入账 ⇒ 副词条三态判据逐位不变。末段用真 Mat 复核这条，并给一块**同面积
+     * 深灰**做正对照 ⇒ 谁把墨色改成灰，这里当场红（不是空跑）。
+     */
+    @Test
+    fun identityBandLivesInsideThePanelCropAndTouchesNoPixelJudge() {
+        nu.pattern.OpenCV.loadLocally()
+        val root = profileJson()
+        val profile = ScreenProfile(root).also { it.calibrate(3200, 1440) }
+        val yShift = root.optInt("zhushengYShiftFrame", 63)
+        // 包络手抄自夹具：12 槽 × 步距 6、槽宽 4 ⇒ 右缘 2332+11×6+4=2402；高 905..910（含）⇒ 记为不含 911
+        val band = listOf(2332, 905, 2402, 911)
+
+        for (key in listOf("artifact_backpack", "weapon_backpack")) {
+            val crop = profile.panelCropRect(key)
+            assertTrue("panels.$key 裁片并集为空（身份条无处可画）", crop != null)
+            assertTrue(
+                "身份条 $band 必须整条落在 panels.$key 的裁片并集 $crop 内" +
+                    "（出裁片 ⇒ 读侧静默回落到点击进度，#260 白修）",
+                crop!!.left <= band[0] && crop.top <= band[1] &&
+                    crop.right >= band[2] && crop.bottom >= band[3],
+            )
+        }
+
+        // —— 必须避开的像素判据区（全部由 profile 推导，含祝圣 +yShift 变体）——
+        val mustAvoid = LinkedHashMap<String, List<Int>>()
+        for (path in listOf(
+            "panels.artifact_backpack.banner",
+            "panels.artifact_backpack.equipped",
+            "panels.artifact_backpack.level",
+            "panels.weapon_backpack.equipped",
+            "panels.weapon_backpack.level",
+            "panels.weapon_backpack.refine",
+            "panels.weapon_backpack.slot",
+            "zones.artifact.panel.lock.rect",
+            "zones.artifact.panel.astral.rect",
+        )) {
+            val r = intsAt(root, path) ?: continue
+            mustAvoid[path] = r
+            mustAvoid["$path(+yShift)"] = shifted(r, yShift)
+        }
+        for (key in listOf("artifact_backpack", "weapon_backpack")) {
+            val band0 = nodeAt(root, "panels.$key.starBand") as? JSONObject ?: continue
+            val y = band0.getJSONArray("y")
+            val cell = band0.optInt("cell", 46)
+            for (i in 0 until 5) {
+                val x0 = band0.getInt("x0") + i * band0.getInt("pitch")
+                mustAvoid["panels.$key.starBand[$i]"] = listOf(x0, y.getInt(0), x0 + cell, y.getInt(1))
+            }
+        }
+        val pts = nodeAt(root, "zones.artifact.panel.zhusheng.points") as JSONArray
+        for (i in 0 until pts.length()) {
+            val p = pts.getJSONArray(i)
+            // 生产按 ±8 取样（ScreenProfile.panelCropRect 同口径），夹具只画 5×5 ⇒ 用 ±8 从严
+            mustAvoid["zones.artifact.panel.zhusheng.points[$i]±8"] =
+                listOf(p.getInt(0) - 8, p.getInt(1) - 8, p.getInt(0) + 8, p.getInt(1) + 8)
+        }
+        val hit = mustAvoid.entries.filter { (_, r) -> !disjoint(band, r) }
+            .joinToString("; ") { "${it.key}=${it.value}" }
+        assertTrue("身份条 $band 与像素判据区相交（会改掉干跑投票）：$hit", hit.isEmpty())
+
+        // —— 反向：条确实压在 subStats 行带上（这就是它进裁片的通道）——
+        val sub1 = intsAt(root, "panels.artifact_backpack.subStats[1]")!!
+        assertTrue(
+            "身份条 $band 必须整条落在 subStats[1] $sub1 行带内（ROI 收窄/挪位时先在这里红）",
+            band[0] >= sub1[0] && band[1] >= sub1[1] && band[2] <= sub1[2] && band[3] <= sub1[3],
+        )
+
+        // —— 墨色复核：纯黑不得进 substatRowPending 的账；同面积深灰必须进（正对照）——
+        // ⚠️ 只开**一行**大的 Mat（456×54 = 74KB），不开整帧（3200×1440 = 13.8MB）：
+        //    判据按整行宽取像素，行带外的像素它本来也不看 ⇒ 断言强度不变，
+        //    但本类原先零 native 依赖，多留 13.8MB live 会把测试 worker 的收尾压进
+        //    OpenCV 静态对象的析构竞态（实测 SIGABRT / exit 134，见 §16.16(c) 落地记录）。
+        val rowW = sub1[2] - sub1[0]
+        val rowH = sub1[3] - sub1[1]
+        val m = org.opencv.core.Mat(rowH, rowW, org.opencv.core.CvType.CV_8UC3, org.opencv.core.Scalar(255.0, 255.0, 255.0))
+        try {
+            // 帧坐标 → 行内局部坐标（条画在行带里，判据读的就是这一行）
+            val bx0 = band[0] - sub1[0]
+            val by0 = band[1] - sub1[1]
+            val bx1 = band[2] - sub1[0] - 1
+            val by1 = band[3] - sub1[1] - 1
+            org.opencv.imgproc.Imgproc.rectangle(
+                m,
+                org.opencv.core.Point(bx0.toDouble(), by0.toDouble()),
+                org.opencv.core.Point(bx1.toDouble(), by1.toDouble()),
+                org.opencv.core.Scalar(0.0, 0.0, 0.0),
+                -1,
+            )
+            assertNull(
+                "纯黑身份条被 substatRowPending 数进账了（三态判据会跟着夹具自己变）",
+                VoteJudges.substatRowPending(m, FrameRect(0, 0, rowW, rowH)),
+            )
+            org.opencv.imgproc.Imgproc.rectangle(
+                m,
+                org.opencv.core.Point(bx0.toDouble(), by0.toDouble()),
+                org.opencv.core.Point(bx1.toDouble(), by1.toDouble()),
+                org.opencv.core.Scalar(120.0, 120.0, 120.0),
+                -1,
+            )
+            assertNotNull(
+                "正对照失效：同面积深灰也读不出文字 ⇒ 上面那条 assertNull 是空跑",
+                VoteJudges.substatRowPending(m, FrameRect(0, 0, rowW, rowH)),
+            )
+        } finally {
+            m.release()
+        }
     }
 }
