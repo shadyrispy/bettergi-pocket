@@ -1285,6 +1285,38 @@ internal suspend fun ScanEngine.charPanelLooksWrongPage(): Boolean {
     }
 }
 
+/**
+ * 面板当前**是不是已经停在属性页**（#233 单2 给正序格用的正向页判据）。
+ *
+ * 判据 = `panels.char_profile.bottomBar` 读到「提升指南」。选它而不是选像素判稳，有两个理由：
+ * 1. **像素判稳这条路已经实测证伪过**（`ScanNavigationDomain.navigate` 的 KDoc 记着 2026-09-12
+ *    三轮：严格判据在切换动画期打满 700ms 零收益，放宽到 12 块才开始判稳但**丢件** 10→8）。
+ *    那条注释自己指的出路就是「要重做必须先换更结构化的信号（如目标页做一次 OCR 判定）」——本函数就是它。
+ * 2. 三页的宽底部条文本**互斥**（本档 profiles note：属性页 `提升指南`+`上限突破` / 天赋页 `天赋演示` /
+ *    命座页 空）⇒ 读到「提升指南」是"在属性页"的**正向证明**，不是"没读到别的"的推断。
+ *
+ * ⚠️ 只在能证明时才省：OCR 网关缺失、取帧失败、读空、抛异常 **一律回 false**（= 照今天的盲导航）。
+ *   这条闸门的失败方向被刻意做成"退回旧行为"，所以计数恒 0 才是异常信号（见 [ScanEngine.navRedundantSkipped]）。
+ */
+internal suspend fun ScanEngine.characterOnAttributesPage(): Boolean {
+    val g = ocr ?: return false
+    val f = runCatchingCancellable { settleFrame() }.getOrNull() ?: return false
+    return try {
+        val t = try {
+            g.readRois(f, listOf(profile.rect("panels.char_profile.bottomBar"))).firstOrNull().orEmpty()
+        } catch (e: OcrUnavailableException) {
+            throw e
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            ""
+        }
+        Regex("提升指南|升指南").containsMatchIn(t)
+    } finally {
+        f.release()
+    }
+}
+
 /** 天赋：3 个战斗天赋等级 OCR（panels.char_talent.lvRois）。 */
 internal suspend fun ScanEngine.readTalent() {
     // ★ #274：三条 early return 原先**一声不吭** ⇒ "整步没走"与"走了但立刻退出"在日志里长得一样

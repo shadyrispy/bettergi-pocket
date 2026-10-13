@@ -244,6 +244,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   ⇒ 同进程连跑两轮时第二轮的 `scan finished` 摘要会把上一轮的数一起算进去。
         dupRevisits = 0; dupRevisitRecovered = 0; pageFreezeAbandoned = 0; swallowedClickRetries = 0
         clickGiveups = 0; weaponStaleDropped = 0
+        navRedundantSkipped = 0 // #233 单2：冗余复位导航的跳过计数（与上面同一批观察量同点复位）
         // ★ #241（2026-10-13）：重裁链三计数同点复位 —— 不给复位点就会重演 2026-09-24 那次
         //   「第二轮摘要把上一轮的观察数一起报」（同 :239-240 的教训）。
         recropAttempts = 0; recropNewCandidates = 0; recropRescued = 0
@@ -371,7 +372,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 (if (settleFrameTimeouts > 0) {
                     "判稳无新帧=${settleFrameTimeouts}次(用缓存帧 ${settleStaleFramesUsed}次) "
                 } else "") +
-                "perCell=${perCell}ms perPage=${perPage}ms | waits nav=${tmNavMs} panel=${tmPanelMs} settle=${tmSettleMs}",
+                "perCell=${perCell}ms perPage=${perPage}ms | waits nav=${tmNavMs} panel=${tmPanelMs} settle=${tmSettleMs} " +
+                    // ★ #233 单2：**无条件**打印（不走"非 0 才打"那条惯例）—— 这一条是 A/B 的
+                    //   机制判据，恒 0 意味着页判据从没命中过（故障而非"没优化到"），
+                    //   条件式打印会把"没省"和"没打这行"糊成同一件事。
+                    "| 正序复位导航 跳过=${navRedundantSkipped}格",
         )
         // 只读性能探针：click/swipe 真实注入耗时 + OCR 网关耗时（分量实测，供
         // dsl/verify/_audit/IMAGE-PATH-COST.md §8 决策）。**独立一行**，避免打乱既有日志正则。
@@ -427,13 +432,10 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     internal val sigCardCur = ByteArray(SIG_LEN_MAX)
 
     internal var charName = ""
-    /**
-     * 最近一次**成功入库**的角色名。⚠️ `charName` 在 `emitCharacter` 末尾会被清空（重置草稿），
-     * 而 flow 顺序是 `emit` → `stopWhen` ⇒ 止扫判据若读 `charName` 会**恒为空、永不触发**
-     * （2026-09-11 实测：`name == roster[0]` 从未生效，10 角色那次实为 `reachedEnd` 收尾）。
-     * 本字段不清空，专门供止扫判据求值。
-     */
-    internal var lastCharName = ""
+    // ★ #233 单2④（2026-10-14 删）：这里原本有个**不清空**的 `lastCharName`，专门喂给
+    //   `stopWhen` 的 `name == roster[0]` 特判（`emit` 会清 `charName`，那条判据直接读它会恒空）。
+    //   判据本身已随分支一起删（角色流改用 mode=duplicateStreak，见 CharDupJudge），字段留着就是
+    //   一个"只有人写、没人读"的变量 ⇒ 下一轮诊断会以为角色轮还有"回绕即停"这条路。
     /** 连续「已入库过的角色」个数（回卷/遍历完判据）；由 stopWhen mode=duplicateStreak 启用。 */
     internal var charDupStreak = 0
     internal var charDupStreakLimit = 0
@@ -583,6 +585,18 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     internal var swallowedClickRetries: Int = 0
     /** 点击打满重发上限、本格将读到陈旧面板的次数（= 一件静默丢失的机会）。 */
     internal var clickGiveups: Int = 0
+
+    /**
+     * ★ #233 单2（2026-10-14）：本轮**判定已在属性页 ⇒ 省掉那次复位导航**的格数（随 run 复位）。
+     *
+     * 为什么单独记一个数：正序格的 `navigate(属性)` 是按构造冗余的（进正序格的前提就是面板已在
+     * 属性页），但它今天**每格都点**。改成先做一次正向页判定之后，"省了多少"只能从这个计数看，
+     * 因为 `waits nav=` 只反映总时长、说不出是不是同一件事在少。
+     * ⚠️ 计数恒 0 = 判据从来没命中 ⇒ 那不是"没优化成"，那是页判据读不出来（ROI 漂了/词典外文本），
+     *   要当故障查（同 [[feedback-verify-action-by-reread-state]]：走了另一条路要能读出来）。
+     */
+    internal var navRedundantSkipped: Int = 0
+
 
     internal var lastWeaponIdentity: String? = null
     internal var weaponSameRun: Int = 0

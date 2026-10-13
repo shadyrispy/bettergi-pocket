@@ -1553,25 +1553,15 @@ internal fun ScanEngine.stopWhen(step: JSONObject) {
         Log.d(TAG, "stopWhen skipped: rarity not judged yet (-1 sentinel)")
         return
     }
-    // §14 复核：character_scan 的 `name == roster[0]`（首名重现=遍历完）。
-    // Expr 仅支持数值、不支持下标/字符串比较，且 tokenize 遇 '[' 会抛 EvalException → 特判。
-    // 语义：当前角色草稿名 == 首个已入库角色名（且已入库 ≥1 条）→ 绕回起点，停止。
-    if (expr.contains("roster[0]")) {
-        val first = resultsCharacters.firstOrNull()?.name
-        // ⚠️ 取 charName.ifEmpty{lastCharName}：`emitCharacter` 末尾清空草稿，
-        //    而本步在 emit 之后 ⇒ 只看 charName 会恒为空、判据静默失效（2026-09-11 修）。
-        val cur = charName.ifEmpty { lastCharName }
-        // ⚠️⚠️ 必须要求**已入库 ≥2**：本步在 emit 之后求值时，`lastCharName` 就是刚入库那个，
-        //    只有 1 条时「首名 == 末名」恒成立 ⇒ 会在第 1 件就误判「绕回起点」而**立即停扫**
-        //    （2026-09-12 真机实测：`stopWhen (首名重现) 当前=YaeMiko 首名=YaeMiko 已入库=1`）。
-        //    character_scan 现已改用 `mode=duplicateStreak`，本分支仅为兼容旧 flow 而保留。
-        if (resultsCharacters.size >= 2 && !first.isNullOrEmpty() && cur == first) {
-            vars.stopRequested = true
-            vars.stopReason = "stopWhen"
-            Log.i(TAG, "stopWhen triggered (首名重现): 当前=$cur 首名=$first 已入库=${resultsCharacters.size}")
-        }
-        return
-    }
+    // ★ #233 单2④（2026-10-14 删）：这里原本有一条 `expr.contains("roster[0]")` 特判
+    //   （首名重现=遍历完），注释写着"仅为兼容旧 flow 而保留"。核过的结论是**它按构造走不到**：
+    //   `stopWhen(step)` 只有 `visitStopWhen`（EquipFlow / LockFlow）和 pipe 消费者两个调用方，
+    //   而 character_scan 不在 `PIPE_DEFAULT_BY_FLOW` 里、其原生体直接调 `stopWhenRegisterDuplicateStreak`；
+    //   Kotlin 与 dsl/json 双侧 grep 都没有任何地方再声明含 `roster[0]` 的表达式
+    //   （`rosterFind` 是另一个原语，别把它当这条判据的引用）。
+    //   留着它的代价不是性能，是**下一次诊断会被它骗**：看代码会以为角色轮有"回绕即停"这条路，
+    //   而实际收尾一直是 duplicateStreak / reachedEnd（2026-09-11 那次 10 角色就是 reachedEnd 收尾）。
+    //   判据失效的机制本身仍记在 CharDupJudge KDoc（`emit` 在 `stopWhen` 之前 ⇒ 读草稿名恒空）。
     val scope = step.optString("scope", "page")
     // 兜底：坏表达式（未定义变量/语法越界）不得炸掉整个流程——记 warn 后按未命中处理
     // ★ 2026-09-18：函数式写法（max(plan.level) / min(plan.rarity)）Expr 不支持 ⇒ 与 pageSkip

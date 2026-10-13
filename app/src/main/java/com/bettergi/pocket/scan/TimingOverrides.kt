@@ -187,6 +187,7 @@ object TimingOverrides {
         pipeAnchorIdlePolls = 0L
         weaponPanelDelayMs = 0L
         panelRefreshMs = -1L
+        navSkipRedundant = true
         panelSigPollMs = DEFAULT_PANEL_SIG_POLL_MS
         panelSigBand = DEFAULT_PANEL_SIG_BAND
         panelSigSamples = DEFAULT_PANEL_SIG_SAMPLES
@@ -262,6 +263,18 @@ object TimingOverrides {
     var duplicateCellSkipWait: Boolean = false
 
     /**
+     * ★ #233 单2（2026-10-14，默认 **开**）：角色正序格「复位到属性页」那一跳，先用一次正向页判定
+     * 证明已经在属性页，判到就**不点也不等**（省 1 击 + `nav` 那一档）。
+     * `--es timing "navskip=0"` 回退到今天的盲导航（A/B 与回滚用）。
+     *
+     * 与 [duplicateCellSkipWait] 的区别要说清：那条靠"卡格指纹没变"推断"面板还是上一件"，实测会
+     *   抓到上一件的面板而**静默漏格**（已改回默认不跳）；本条靠**目标页自己的文本**做正向证明
+     *   （bottomBar「提升指南」，三页互斥），且这一跳**根本不需要等页面切换** —— 它省的是"点了一下
+     *   同一个已经亮着的页签"之后的动画等待，不是"页面还没到就不等"。判不到一律照旧导航。
+     */
+    var navSkipRedundant: Boolean = true
+
+    /**
      * 入口幂等（开链前先短轮询锚点，命中即跳过入口链）。默认 **开**；
      * 干跑测试关掉它，因为测试夹具的合成帧会让锚点直接命中、从而不再记录入口链的点击（点击计数断言会变）。
      */
@@ -273,6 +286,7 @@ object TimingOverrides {
         anchorBudgetMs = 0L
         overlapSkip = true
         duplicateCellSkipWait = false
+        navSkipRedundant = true
         entryIdempotent = true
         panelSettleMs = 0L
         if (!spec.isNullOrBlank()) {
@@ -297,6 +311,8 @@ object TimingOverrides {
                     "sstable" -> settleStableMs = v
                     // ★ 就绪信号直采 A/B 开关：sig=0 回退为固定 delay(PANEL_REFRESH_MS)（见字段 KDoc）
                     "sig" -> panelSigEnabled = v != 0L
+                    // #233 单2：navskip=0 ⇒ 正序格照旧盲点一次复位页签（A/B 基线臂）
+                    "navskip" -> navSkipRedundant = v != 0L
                     // S1 裁片开关（#69）：crop=1 时解析读裁片
                     "crop" -> panelCrop = v != 0L
                     // S2b 流水线深度（#69）：0=同步；1..8=消费者队列深度（>0 强制 crop=1）
@@ -344,7 +360,9 @@ object TimingOverrides {
             "sig=${if (panelSigEnabled) 1 else 0},crop=${if (panelCrop) 1 else 0},pipe=$pipeDepth,sigpoll=$panelSigPollMs," +
             "sigband=${if (panelSigBand) 1 else 0},sigsamples=$panelSigSamples,sigconfirm=${if (panelSigConfirm) 1 else 0}," +
             "siggate=${if (panelSigGateCached) 1 else 0},phi=${if (phiApply) 1 else 0}," +
-            "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0},panel=$panelSettleMs," +
+            "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0}," +
+            "navskip=${if (navSkipRedundant) 1 else 0},dupskip=${if (duplicateCellSkipWait) 1 else 0}," +
+            "panel=$panelSettleMs," +
             "wpdelay=$weaponPanelDelayMs,prefresh=$panelRefreshMs," +
             "advdist=$advanceDistPx,advextra=$advanceExtraPx," +
             "skiplimit=$pageSkipLimit,swipecap=$maxTotalSwipes," +

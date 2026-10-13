@@ -3,7 +3,9 @@ package com.bettergi.pocket.scan.flows
 import android.util.Log
 import com.bettergi.pocket.scan.ScanEngine
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
+import com.bettergi.pocket.scan.TimingOverrides
 import com.bettergi.pocket.scan.assertScreen
+import com.bettergi.pocket.scan.characterOnAttributesPage
 import com.bettergi.pocket.scan.enterScreen
 import com.bettergi.pocket.scan.navigate
 import com.bettergi.pocket.scan.pagedGridNative
@@ -161,8 +163,27 @@ internal suspend fun ScanEngine.runCharacterSteps() {
                     // ── 正序格 ──
                     // ① 点头像
                     visitClick(CharacterFlow.CLICK_CELL, CharacterFlow.GRID, col, row, idx, ctx, prof)
-                    // ② navigate 复位属性页（上一格结束在天赋页 ⇒ name/header ROI 需回属性页语境）
-                    navigate(CharacterFlow.NAV_ATTRIBUTES)
+                    // ② 复位属性页 —— ★ #233 单2：这一跳**按构造就是多余的**。
+                    //   能走进正序分支就意味着 `reverse==false`，而 reverse=false 只有三种来路：
+                    //   刚 enterScreen（落点就是属性页）／上一格是跳过格（跳过时不翻页）／
+                    //   上一格是反序格且其尾步就是 `navigate(NAV_ATTRIBUTES)`。点头像不换页 ⇒
+                    //   面板此刻已经在属性页，今天的实现仍要点一下 + 等 `nav=700ms`。
+                    //   实测对得上：302 次页签点击 = 3×48(正序全格) + 2×48(反序全格) + 1×62(跳过格)，
+                    //   其中正序格的 48+59=107 次复位就是本跳；107×700ms ≈ 全轮 515.6s 的 14.5%。
+                    //   改成先做一次**正向页判定**（[characterOnAttributesPage]，见其 KDoc 为什么用
+                    //   OCR 而不是像素判稳）：判到就不点不等，判不到照旧导航 ⇒ 自愈能力不变，
+                    //   代价是每格多 1 张帧 + 1 次矩形 OCR（BS ≈ 60ms，换 700ms + 1 击）。
+                    //   ⚠️ 读时序没有被压缩：省掉导航后 parse 落在「点击 + 550ms 面板等待 + 本判定」
+                    //   之后，比反序格那条**已经在生产上跑通的**「点击 + 550ms 就 parse」还晚一拍。
+                    if (TimingOverrides.navSkipRedundant && characterOnAttributesPage()) {
+                        navRedundantSkipped++
+                        Log.i(
+                            TAG,
+                            "visit cell($col,$row) idx=$idx 已在属性页 ⇒ 省一次复位导航（-1 击 -${TimingOverrides.navSettleMs}ms）",
+                        )
+                    } else {
+                        navigate(CharacterFlow.NAV_ATTRIBUTES)
+                    }
                     // ③ parse（assert 属性/元素判据内联同帧）
                     visitParsePanel(CharacterFlow.PARSE_CHAR, CharacterFlow.GRID, col, row, idx, ctx, prof)
                     // ④ dedupeSkip（header 名字判重；key==null 不跳过照旧）

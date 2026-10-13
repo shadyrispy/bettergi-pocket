@@ -133,7 +133,6 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
     //   一眼可见，不用去翻逐条 Log.w。
     val seenKeys = seenCharKeys()
     val dup = characterAlreadySeen(c.key)
-    lastCharName = c.name
     noteDupAndMaybeStop(c.key, seenKeys)
     if (dup) {
         // ⚠️ 不入库：角色侧无 dedupe（`dedupe` 只作用于圣遗物），重复件入库会污染导出。
@@ -167,7 +166,7 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
     resetCharDraft()
 }
 
-/** 重置角色草稿（不清 `lastCharName`：它供止扫判据使用）。 */
+/** 重置角色草稿。 */
 internal fun ScanEngine.resetCharDraft() {
     charName = ""
     charKey = null
