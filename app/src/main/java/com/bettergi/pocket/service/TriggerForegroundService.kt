@@ -148,6 +148,10 @@ class TriggerForegroundService : Service() {
                 NoticeCenter.warn("屏幕共享已停止，可能被其他录制应用占用")
             }
         }
+        // ★ #183：面板那颗「共享屏幕」药丸显示**现状**，权威值只有本进程这个活的 controller 知道。
+        //   用探针而不是镜像：`isRunning()` 那三件（projection/virtualDisplay/imageReader）被系统单方面
+        //   收走时会立刻变 false，抄一份布尔迟早与真值分叉（#183 当年就是为躲这个才搁着的）。
+        settingsRepository.captureRunningProbe = { captureController.isRunning() }
         genshinLauncher = GenshinLauncher(applicationContext)
         // 「退出 / 开始导出」由无障碍进程经设置桥回调（METHOD_STOP / METHOD_SHARE_GOOD），
         // 因此这里不再需要 onExit / onShareGoodRequested 回调。
@@ -683,6 +687,9 @@ class TriggerForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        // #183：主进程还要活着（Provider 会被 :a11y 的读唤起来）时，探针必须换成"一律 false" ——
+        // 服务都没了就不该再回答"投影开着"，那是 #183 要治的同一个病。
+        settingsRepository.captureRunningProbe = { false }
         settingsRepository.removeListener(settingsListener)
         shutdown()
         super.onDestroy()

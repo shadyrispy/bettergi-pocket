@@ -71,7 +71,13 @@ class SettingsBridgeProvider : ContentProvider() {
             )
         }
         // 抓包开关 2026-10-03 迁到管理器页（与主进程同进程，直接起服务 + 订阅 CaptureSession.ui）
-        // ⇒ 这里不再有 capture_start / capture_stop / capture_snapshot 三条 method。
+        // ⇒ 这里不再有 capture_start / capture_stop 两条 method。
+        // ★ #183（2026-10-13 用户定口径）：面板「共享屏幕」那颗药丸显示**现状**，
+        //   所以"投影现在开着没"这条读必须回到跨进程读法（当年随抓包开关一起被删掉过，
+        //   留得 A32 那段注释里的"capture 快照读取"指着一个已不存在的调用点 —— 现在它又成立了）。
+        METHOD_CAPTURE_STATE -> Bundle().apply {
+            putBoolean(KEY_VALUE, repo()?.captureRunning() == true)
+        }
         // 识别日志镜像：日志缓冲在主进程，无障碍进程的日志窗按需拉一份
         METHOD_LOG_SNAPSHOT -> Bundle().apply {
             putStringArray(
@@ -161,6 +167,8 @@ class SettingsBridgeProvider : ContentProvider() {
         const val METHOD_STOP = "overlay_stop"
         const val METHOD_LOG_APPEND = "log_append"
         const val METHOD_LOG_SNAPSHOT = "log_snapshot"
+        /** #183：无障碍面板问"投影现在到底开着没"（药丸开关显示现状，不显示意图）。 */
+        const val METHOD_CAPTURE_STATE = "capture_state"
 
         /** 供 `:a11y` 侧直接构建 URI（避免两侧各写一遍字符串）。 */
         fun uri(context: Context): Uri = TriggerSettingsRepository.settingsUri(context)

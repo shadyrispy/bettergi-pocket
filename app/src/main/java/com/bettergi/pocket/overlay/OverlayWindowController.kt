@@ -184,6 +184,17 @@ class OverlayWindowController(
     internal val idleFadeRunnable = Runnable { fadeBubble(IDLE_ALPHA) }
     private var a11yWarningReady = false
     private val refreshA11ySoon = Runnable { refreshStatus() }
+    /**
+     * ★ #183：药丸改成"现状"之后，"用户点了授权、弹窗回来那一刻"没有任何事件会把面板刷新
+     * （`screenShareEnabled` 早就写过、不会再 notify）⇒ 只能自己隔一会儿再问一次主进程。
+     * 有界：只有**用户刚动过药丸**才开这个追（置 [captureAwaitPolls]），且一等到"意图与现状一致"
+     * 就停；上限 [CAPTURE_AWAIT_MAX_POLLS] 次 × [CAPTURE_AWAIT_POLL_MS]ms，不会一直空转 IPC。
+     */
+    private var captureAwaitPolls = 0
+    private val captureAwaitTask = Runnable {
+        captureAwaitPolls -= 1
+        refreshStatus()
+    }
     private val refreshA11yLater = Runnable {
         a11yWarningReady = true
         refreshStatus()
@@ -206,7 +217,9 @@ class OverlayWindowController(
     private val settingsListener: (TriggerSettings) -> Unit = { settings ->
         updatingUi = true
         try {
-            switchEnabled?.isChecked = settings.screenShareEnabled
+            // ★ #183（2026-10-13 定口径）：**不**再把 `screenShareEnabled`（用户意图）写给药丸开关 ——
+            //   那颗开关现在只反映投影现状，由 refreshStatus() 统一刷。
+            //   意图仍然承重：applyFeatureEnabled 用它决定下级行的可用性、服务用它决定起不起扫描。
             switchAutoSkip?.isChecked = settings.autoSkipEnabled
             switchQuickSkip?.isChecked = settings.quickSkipDialogueEnabled
             switchAutoPick?.isChecked = settings.autoPickEnabled
@@ -349,7 +362,16 @@ class OverlayWindowController(
 
         enabledSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (updatingUi) return@setOnCheckedChangeListener
-            settingsRepository.setScreenShareEnabled(isChecked)
+            // ★ #183：药丸现在显示**现状** ⇒「意图已开、投影没起来」（#250 那种被吞态）在界面上就是"关着"。
+            //   用户再点一次是想重试，而 `true→true` 写设置是 no-op（主进程 settingsListener 不触发
+            //   ⇒ 永远不会再发起授权），所以这一跳必须显式 false→true 把重试发出去。
+            if (isChecked && settingsRepository.get().screenShareEnabled && !settingsRepository.captureRunning()) {
+                settingsRepository.setScreenShareEnabled(false)
+                settingsRepository.setScreenShareEnabled(true)
+            } else {
+                settingsRepository.setScreenShareEnabled(isChecked)
+            }
+            if (isChecked) captureAwaitPolls = CAPTURE_AWAIT_MAX_POLLS
         }
         autoSkipSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (updatingUi) return@setOnCheckedChangeListener
@@ -593,6 +615,8 @@ class OverlayWindowController(
         statusText = null
         chatBadge = null
         params = null
+        mainHandler.removeCallbacks(captureAwaitTask)
+        captureAwaitPolls = 0
         switchEnabled = null
         switchAutoSkip = null
         switchQuickSkip = null
@@ -704,6 +728,10 @@ class OverlayWindowController(
 
         if (value) {
             refreshLaunchHint()
+            // ★ #183：展开即重读投影现状。药丸改成"现状"之后，"面板没展开时投影起来了/掉了"
+            //   没有任何事件会推到这里（授权回来不 notify 设置），不重读就会一直显示展开前那一刻的旧值
+            //   —— 22:59 实测就是这么露出来的：`captureRunning=true` 而面板还写着「等待授权」、药丸灰着。
+            refreshStatus()
             mainHandler.removeCallbacks(idleFadeRunnable)
             panel.alpha = 0f
             panel.scaleX = 0.84f
@@ -914,14 +942,33 @@ class OverlayWindowController(
     }
 
     private fun refreshStatus() {
-        val enabled = settingsRepository.get().screenShareEnabled
+        val wantsShare = settingsRepository.get().screenShareEnabled
+        // ★ #183（2026-10-13 定口径）：药丸开关与状态行都看**投影现状**（`captureRunning()`），
+        //   用户意图只用来多说一句"为什么还没起来"。取不到现状 ⇒ false（宁可不亮，不亮着骗人）。
+        val capturing = settingsRepository.captureRunning()
+        val awaitingAuth = wantsShare && !capturing
         val talking = isTalking()
         val a11yDisconnected = a11yWarningReady &&
             inputGate.isDisconnected(themedContext)
+        switchEnabled?.let { sw ->
+            if (sw.isChecked != capturing) {
+                // 程序性改 checked 也会走 OnCheckedChangeListener ⇒ 必须临时置 updatingUi，
+                // 否则"刷状态 ⇒ 写设置 ⇒ 服务再发起一轮授权"会自己把自己点着。
+                // ⚠️ 保存/恢复而不是直接置 false：本函数也会在 settingsListener 置位期间被调用。
+                val prev = updatingUi
+                updatingUi = true
+                try {
+                    sw.isChecked = capturing
+                } finally {
+                    updatingUi = prev
+                }
+            }
+        }
         val colorRes = when {
             a11yDisconnected -> R.color.overlay_status_warn
             talking -> R.color.overlay_status_on
-            enabled -> R.color.overlay_status_on
+            capturing -> R.color.overlay_status_on
+            awaitingAuth -> R.color.overlay_status_warn
             else -> R.color.overlay_status_off
         }
         val color = ContextCompat.getColor(themedContext, colorRes)
@@ -932,16 +979,26 @@ class OverlayWindowController(
         statusText?.text = when {
             a11yDisconnected -> "无障碍异常"
             talking -> "正在对话中"
-            enabled -> "已启动"
+            capturing -> "已启动"
+            awaitingAuth -> "等待授权"
             else -> "未启动"
         }
         statusText?.setTextColor(
             when {
                 a11yDisconnected -> ContextCompat.getColor(themedContext, R.color.overlay_status_warn)
-                talking || enabled -> ContextCompat.getColor(themedContext, R.color.overlay_status_on)
+                talking || capturing -> ContextCompat.getColor(themedContext, R.color.overlay_status_on)
                 else -> ContextCompat.getColor(themedContext, R.color.overlay_text_muted)
             },
         )
+        // ★ #183：意图与现状**不一致**时自我重绘。授权回来那一刻没有任何事件会 notify 到面板，
+        //   而"意图"这条缓存还会滞后（ContentObserver 是异步的），所以**不能**拿 awaitingAuth 当
+        //   续期条件 —— 23:13 实测就是这么停在「未启动 + 药丸灰」的：那一跳 wantsShare 还没跟上，
+        //   awaitingAuth=false ⇒ 不再重绘 ⇒ 投影明明起来了（`capture started; running=true`）面板却说没开。
+        //   改成"两边不一致就继续追"，一致即停（最多 CAPTURE_AWAIT_MAX_POLLS 次，不会空转）。
+        mainHandler.removeCallbacks(captureAwaitTask)
+        if (expanded && captureAwaitPolls > 0 && wantsShare != capturing) {
+            mainHandler.postDelayed(captureAwaitTask, CAPTURE_AWAIT_POLL_MS)
+        }
         logTitle?.text = if (talking) "正在对话中" else "识别日志"
         val badge = chatBadge
         if (badge != null) {
@@ -967,6 +1024,9 @@ class OverlayWindowController(
     internal companion object {
         internal const val TAG_OVERLAY = "BetterGI.Overlay"
         private const val PREFS_NAME = "overlay_window"
+        /** #183：等待授权时的重绘间隔与次数上限（40 × 1.2s ≈ 48s，够盖住弹窗出现+用户点允许）。 */
+        private const val CAPTURE_AWAIT_POLL_MS = 1_200L
+        private const val CAPTURE_AWAIT_MAX_POLLS = 40
         internal const val KEY_Y = "y"
         internal const val KEY_LOG_X = "log_x"
         internal const val KEY_LOG_Y = "log_y"
