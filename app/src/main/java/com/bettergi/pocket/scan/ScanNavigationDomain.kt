@@ -221,12 +221,20 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
                     return
                 }
                 Log.w(TAG, "returnToHome: 返回钮与 BACK 均无进展 ⇒ 试一次「点任意处进入」(${tap.first},${tap.second})（标题屏常态）")
-                // ⚠️ **不走 clickAt**：它按 `profile.scalePoint` 把坐标从 base 再放大到帧坐标，
-                //    而这里算出来的已经是**帧坐标**（`f.cols()/f.rows()`）。base==frame 的档位
-                //    （2244/2560 两份 profile）碰巧 scale=1 看不出来，落到回退基线
-                //    `profiles.json`（base 3200×1440）的设备上会偏到 (37%w, 67%h) —— 那一带是卡片/页签，
-                //    正是要避免的误点。守卫照过（它判的是"能不能点"，与坐标无关）。
-                if (safetyGuard()) actions.click(tap.first, tap.second)
+                // ⚠️ **走 `tap`（零位移 stroke）而不是 `click`**：华为游戏面把带位移的 stroke 读成**拖拽**，
+                //   标题屏那一试就此被吞。2026-10-13 实测（同一台机、同一屏）：
+                //   `adb shell input tap`（带默认位移）没能关掉「确认退出游戏」框，
+                //   而 `input swipe x y x y 60`（同点零位移）一次成功 —— 与 `ActionGateway.tap` 的
+                //   KDoc 记的是同一件事（char_popup 卡片对 2px 微滑识别为拖拽，equip18/19）。
+                //   本函数早前还试过 `clickAt`，那还额外踩了 base→frame 二次缩放（见下）。
+                if (safetyGuard()) actions.tap(tap.first, tap.second) else {
+                    // ★ 复核（2026-10-13）：守卫**拒了**这一步（它已经置过 `stopReason="safety"` 并发过通知），
+                    //   这里必须当场收手 —— 否则会白等满 30s、然后报一句"仍未到主界面"（假话）、
+                    //   把 stopReason 从 safety 覆写成 returnHomeStuck、再发第二条通知。
+                    //   归属错了的日志比没有日志更坏：事后看 stopReason 会去查归位，而真因是安全闸。
+                    Log.w(TAG, "returnToHome: 安全闸拒绝「点任意处进入」⇒ 停手（成因见 safetyGuard 自己的日志）")
+                    return
+                }
                 // ★ 这一试之后**轮询等进主界面**，不等就是白点：华为实测标题屏 → 世界的加载
                 //   远大于 `RETURN_HOME_SETTLE_MS`，08:38 那一轮就是"点打了、下一轮立刻被
                 //   『盲点 3 次』那条闸截住 ⇒ 仍然 returnHomeStuck"。
@@ -249,6 +257,12 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
                 }
                 if (entered) {
                     Log.i(TAG, "returnToHome: 「点任意处进入」后到达主界面（标题屏已恢复）")
+                    return
+                }
+                // ★ 复核（2026-10-13）：等窗还没走完就跳出循环 = 有别人喊停（看门狗/前台丢失/用户按停），
+                //   那不是"标题屏没救回来"。同样不许覆写 stopReason、不许发误导通知。
+                if (vars.stopRequested && clock() < until) {
+                    Log.w(TAG, "returnToHome: 等进主界面期间被外部停手（stopReason=${vars.stopReason}）⇒ 不再改判")
                     return
                 }
                 Log.e(TAG, "returnToHome: 「点任意处进入」后 ${TITLE_ENTER_WAIT_MS}ms 内仍未到主界面 ⇒ 停手")

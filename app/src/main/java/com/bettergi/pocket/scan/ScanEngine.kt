@@ -169,8 +169,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     }
 
     suspend fun run() {
-        runPreamble()
+        // ★ 复核（2026-10-13）：**先定深度再跑前导** —— `runPreamble` 会打一行本轮生效的
+        //   `timing: … pipe=N …`（canonical 摘要），而 `applyFlowPipeDefault` 以前在它之后跑 ⇒
+        //   摘要里报的是"命令里给的"深度，不是**实际生效**的（例如白名单流程被显式 pipe=2 拉回 0 时，
+        //   摘要仍写 pipe=2）。归因时这行是被当作事实读的，不能报一个本轮没用的值。
         applyFlowPipeDefault()
+        runPreamble()
         // ★ simple 分支（spec §1/§4，2026-10-07）：DSL 运行时已下线 —— 按 flowName 分派到
         //   原生步序（weapon/artifact/character/lock/equip + 两条标定流；dict/vars/步序常量
         //   已由 scan/flows/* 携带）。未知名字回落 artifact_scan（与 ScriptRunner 同口径）。
@@ -240,6 +244,9 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   ⇒ 同进程连跑两轮时第二轮的 `scan finished` 摘要会把上一轮的数一起算进去。
         dupRevisits = 0; dupRevisitRecovered = 0; pageFreezeAbandoned = 0; swallowedClickRetries = 0
         clickGiveups = 0; weaponStaleDropped = 0
+        // ★ #241（2026-10-13）：重裁链三计数同点复位 —— 不给复位点就会重演 2026-09-24 那次
+        //   「第二轮摘要把上一轮的观察数一起报」（同 :239-240 的教训）。
+        recropAttempts = 0; recropNewCandidates = 0; recropRescued = 0
         weaponOverlapRepeats = 0; weaponIdentityRuns.clear(); lastEmittedWeaponIdentity = null
         unknownSetPieces = 0; charUnresolved = 0
         // ★ #265：随 run 复位，与其它观察量同一处。这个量只在 visit 第 ② 步被读，而那时**本格还没投票**
@@ -336,6 +343,13 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 // ★ P0-B（2026-10-08）：solver 不可解率观测 —— >0 ⇒ 有件按"原样导出"走（roll 未解出），
                 //   持续 >0 就是补图像级重试链的依据（GS 对齐 P0-2，见 simple-conversion-spec §3.6）。
                 (if (RollSolver.missCount > 0) "roll未解=${RollSolver.missCount}件 " else "") +
+                // ★ #241（2026-10-13）：重裁抢救链三口径，紧挨 roll未解 放（两者同解「读失败」这一个问题）：
+                //   进链件数/重读新增候选（去重后）/重裁解出件数。链没进（正常轮）整段不打 ——
+                //   同 roll未解 的条件式零噪声；`抢救>0` 才证明链在兜底在救人，`重裁-抢救` 的差
+                //   就是链跑了却没救回的件数，`新候选≈0` 则说明重读根本没读出东西。
+                (if (recropAttempts > 0) {
+                    "重裁 n=${recropAttempts}/新候选 ${recropNewCandidates}/抢救 ${recropRescued} "
+                } else "") +
                 // ★ #156：身份未解析的位数（照常入库、导出无 key）。>0 就说明昵称表又漏人了，
                 //   对账侧会同时报"多 N 条未解析 + 缺 N 个真角色"。
                 "未解析身份=${charUnresolved}位 " +
@@ -561,6 +575,22 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     internal var lastWeaponIdentity: String? = null
     internal var weaponSameRun: Int = 0
     internal var weaponStaleDropped: Int = 0
+
+    /**
+     * ★ #241（2026-10-13）：roll 重裁抢救链的会话计数（随 run 复位，进 `scan finished` 摘要）。
+     *
+     * 为什么要这三个：链此前**只有失败可见** —— 失败经 `RollSolver.logMiss` 进 `roll未解`，
+     * 而重裁救回与「首读就解出、链没进过」在计数上完全同相 ⇒ 摘要永远说不出
+     * 「这 N 件本来更多、是链救回来的」，也读不出 ≈1% 进链件的成败比。
+     * - [recropAttempts]：进入重裁链的件数（链入口 +1；只可能是 4★/5★，3★ 被闸门挡在链外）；
+     * - [recropNewCandidates]：重读经去重门槛真正 append 的候选总数（append 处累计，成败都算）；
+     * - [recropRescued]：重裁后解出的件数（「重裁抢救成功」分支 +1）。
+     * 三数合看才成立：`抢救>0` 证明链在兜底；`重裁>0 而 新候选≈0` ⇒ 重读根本没读出东西
+     * （去查链内按裁法的重读异常/丢字）；`重裁-抢救` 的差就是跑了没救回的件数。
+     */
+    internal var recropAttempts: Int = 0
+    internal var recropNewCandidates: Int = 0
+    internal var recropRescued: Int = 0
 
     /**
      * ★ #265：**生产者自己**在本格投出来的武器星级（`vote` 的 `weapon.panel.starBand` 两条分支写）。
@@ -1329,9 +1359,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          *
          * 华为实测（08:38）：标题屏 → 世界的加载远大于 `RETURN_HOME_SETTLE_MS(900)`，
          * 只等一轮就被"盲点 3 次"那条闸截住 ⇒ 点打了、整轮仍然 `returnHomeStuck`。
-         * 预算取 30s = 华为冷进世界实测的量级；到点仍未进游戏就停手（这一试是最后一步）。
+         * 预算取 45s：2026-10-13 华为实测**冷进世界用了 27.7s**（那会儿整机被钳频，
+         * 同轮 OCR 均时 969ms/槽）—— 30s 只剩 2s 余量，太紧；这里多留 1.5 倍。
+         * 到点仍未进游戏就停手（这一试是最后一步，不会回到盲点循环）。
          */
-        const val TITLE_ENTER_WAIT_MS = 30_000L
+        const val TITLE_ENTER_WAIT_MS = 45_000L
         const val TITLE_ENTER_POLL_MS = 1500L
         // §15 P0-1：左侧菜单切页后的稳定等待（长于普通点击，动画约 600~800ms）
         /**

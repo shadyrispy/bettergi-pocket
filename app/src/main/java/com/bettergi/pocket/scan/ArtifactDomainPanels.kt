@@ -974,7 +974,15 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //   只在失败后触发（≈1% 的件），正常件零开销。
     val rollIn = substats.map { RollSolver.In(it.key, it.value, it.inactive) }
     var solved = RollSolver.solve(rarity, vars.level, rollIn)
-    if (solved == null && substats.isNotEmpty()) {
+    // ★★ #241 闸门（2026-10-12）：重裁链只对 RollSolver 解得动的星级（4★/5★）开启。
+    //   `RollSolver.solve` 对 rarity ∉ {4,5} 按构造恒 null（RollSolver.kt:109 函数首行即返，
+    //   不看数值/等级）⇒ 3★ 件（2026-09-19 起纳入导出）走旧条件时每件白跑两批多 ROI 重读
+    //   （右缘 -8%/-16% 各一轮），失败后再经失败分支的 `logMiss` 记进 `roll未解`。
+    //   而 #241 要 `roll未解>0` 只表示阅读器真失败（读数歪了、救不回来）—— 3★ 的构造性
+    //   无解是确定事件、不是读失败，混进来就是把该信号稀释成「3★ 有几件」。
+    //   3★ 其余行为一字未动：照常导出（2026-09-19 用户定稿），只是不进链、不计 miss。
+    if (solved == null && substats.isNotEmpty() && (rarity == 4 || rarity == 5)) {
+        recropAttempts++ // #241 观测（摘要「重裁 n=」）：进链件数，每件一次
         // ⚠️ 行对应关系：rollIn[i] 对应 subRects 前 N 行（parseBlock 是"连续块"读取，压缩尾部空行），
         //    候选列表必须按 rollIn 构建而非 subRects.indices（3★ 件 subRects=4 行、rollIn 可能只有 2 条
         //    —— 22:36 真机 IndexOutOfBounds 即此错位）。
@@ -1014,12 +1022,17 @@ internal suspend fun ScanEngine.parseArtifactPanel(
             if (anyNew) {
                 solved = RollSolver.solve(rarity, vars.level, candidates)
                 if (solved != null) {
+                    recropRescued++ // #241 观测（摘要「抢救 …」）：重裁后解出的件数，每件一次
                     Log.i(TAG, "roll 重裁抢救成功（-$cropPct%）: " +
                         candidates.joinToString("|") { c -> c.joinToString(",") { "${it.key}=${it.value}" } })
                     break
                 }
             }
         }
+        // #241 观测：「新候选」= 重读经去重门槛真正 append 入候选列表的数量，**成败都累计** ——
+        //   抢救成功的链同样产出过候选（break 前的 anyNew 至少 1 个），若只记失败侧会把
+        //   总数系统性记小；失败时该数恰等于下方失败日志报告的 M，两边可互对。
+        recropNewCandidates += newCands
         if (solved == null) {
             Log.w(
                 TAG,

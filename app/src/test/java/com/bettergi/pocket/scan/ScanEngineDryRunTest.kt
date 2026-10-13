@@ -744,17 +744,20 @@ class ScanEngineDryRunTest {
                 forceCrop = true,
                 nativeFlow = "artifact",
             )
-            // ★ #260：口径按 §6.1 的设计写死成**上界**而不是恰好 10。
-            //   取消时"在途 job 只释放裁片、不 emit"⇒ 止扫那一刻还在途的格**按构造不会入库**，
-            //   所以下界是 `10 - pipeDepth`；旧断言写 `== 10` 把这条设计当成不变式，
-            //   机器一忙（消费者还没追上就收到取消）就红，而红的恰恰是本用例要防的**虚增**的反面。
-            val lo = 10 - pipe
-            assertTrue(
-                "pipe=$pipe：件数必须落在 [已点格数 − 在途, 已点格数] = $lo..10（多于 10 才是泄漏）" +
-                    "，实收 " + engine.results.size,
-                engine.results.size in lo..10,
-            )
-            assertEquals("pipe=$pipe", ENTER_CHAIN_CLICKS + 10, h.clicks.size)
+            // ★ 复核（2026-10-13）**收回**上一版把它放宽成区间 `[10-pipeDepth, 10]` 的改法：
+            //   区间是想给"取消时丢弃在途 job"留余量，但今天核了一遍——**取消路径根本走不到**：
+            //   `pipeCancel()` 全仓零调用（`pipeReset` 亦然），止扫只置 `stopRequested` 后 `break`，
+            //   页末 `pipeJoinPage` 仍会把在途 job 全部消费完 ⇒ 这 10 格必然全 emit。
+            //   少一件只可能来自真实丢失（消费者抛异常 / emit 缺失），而那正是本用例要抓的；
+            //   放宽下界等于**把要抓的东西放过去**（还静默容忍 2 件丢失）。
+            //   所以恢复 `== 10`，并把两条"少件只可能出自这里"的计数器一起断言，让红的时候直接归因：
+            //   - `pipeDiscard` = 有过期/取消丢弃（纪元打标或重访语义错）；
+            //   - `pipeFail` = 消费者抛异常被 catch 吞掉。
+            //   满载跑曾见 `was 8`，那是 #253 锚点预算被打满导致**点击数变少**（前置探针多烧了几次）
+            //   ⇒ 已经由 `panchor` 旋钮在干跑里失效，不是取消语义的锅。
+            assertEquals("pipe=$pipe：只应入库已点过的 10 格（少了就是真丢件，不是「给了余量」）", 10, engine.results.size)
+            assertEquals("pipe=$pipe：有过期/取消丢弃 ⇒ 纪元打标或重访语义错", 0L, PerfProbe.pipeDiscardCount())
+            assertEquals("pipe=$pipe：消费者抛异常被吞 ⇒ 少件的唯一另一条路", 0L, PerfProbe.pipeFailCount())
             assertTrue("pipe=$pipe 应正常收尾（非异常）", h.finished != null)
         }
     }

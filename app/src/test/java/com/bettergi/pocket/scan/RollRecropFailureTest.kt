@@ -32,10 +32,12 @@ import java.io.File
  * :1005 的待激活标记补写 —— 全是 `parseArtifactPanel` 体内的内联语句，**一个 seam 都没抽出来**，
  * 本类碰不到它们，只能把它们依赖的下游判据（同一份候选列表进同一个 solver）钉住。
  *
- * TODO(#241)：链的**成功侧零可观测**（见 `抢救成败在会话计数上不可区分`）—— 需要往 `RollSolver`
- * 或 `PerfProbe` 补三个会话计数器并打进 `scan finished` 摘要（`ScanEngine.kt:338` 现只报 `roll未解=`）：
- * `recropAttempts`（进了链几次）/ `recropNewCandidates`（新增候选总数）/ `recropRescued`（:1017 成功几次）。
- * 只有 `recropRescued > 0` 才证明这条链真在救人；只有 `recropAttempts` 才证明 :996 的异常路径没在悄悄吞裁法。
+ * ✅ #241 已补（2026-10-13）：三个会话计数落在 **`ScanEngine`** 上并进了 `scan finished` 摘要
+ * （`recropAttempts` 进链件数 / `recropNewCandidates` 重读新增候选 / `recropRescued` 重裁解出件数，
+ * 条件式打印 ⇒ 链没进就整段不打）。链入口同时加了闸门（只放 4★/5★ 进链，3★ 按构造无解 ⇒
+ * 白跑两批重读还污染 `roll未解`）。⇒ 现在读得出来的东西：`抢救>0` 证明链在救人，
+ * `重裁-抢救` 是跑了没救回的件数，`新候选≈0` 说明重读根本没读出东西；异常吞裁法仍只有
+ * `重裁 n` 与失败日志的 `跑了 N 种裁法` 对不上时才能看出来（:996 那条路径没单独计数）。
  */
 class RollRecropFailureTest {
 
@@ -185,5 +187,40 @@ class RollRecropFailureTest {
             // 会话计数复位口径与 ScanEngine.run()(:238) 一致，别把脏计数留给别的用例
             RollSolver.resetMissCount()
         }
+    }
+
+    /**
+     * #241 闸门依据（2026-10-13）：`solve` 对 rarity ∉ {4,5} **按构造恒 null**（`RollSolver.kt:109`
+     * 函数首行即返回，不看数值/等级）⇒ 3★ 件（2026-09-19 起纳入导出）若照旧进链，首读 solve 必无解、
+     * 链必然跑满两批多 ROI 重读（右缘 -8%/-16%），再经失败分支记进 `roll未解`。
+     * `parseArtifactPanel` 链入口的闸门（只放 4★/5★ 进链）依据的就是本用例钉的这个契约。
+     *
+     * 两个重载都钉：首读走单候选重载、链内走行候选重载 —— 对 3★ 的任意输入两条都出不了解，
+     * 「无闸门时链必空跑」不是巧合而是构造。（引用链内位置一律不写行号：本次改动增删了几行，
+     * 本类 KDoc 里的旧行号已按改动前口径，别再添会漂的。）
+     *
+     * ⚠️ 诚实边界（同本类 KDoc）：闸门本体在 `parseArtifactPanel` 内，属引擎/设备级，本类驱动
+     * 不了真链 —— 所以这里能证明的只有**契约**（闸门的依据），不是闸门执行本身；3★ 照常导出
+     * 那一半同样没有 JVM 用例。类 KDoc TODO(#241) 所需的三个会话计数现已落在 `ScanEngine`
+     * （`recropAttempts`/`recropNewCandidates`/`recropRescued`，进 `scan finished` 摘要；
+     * 闸门使 3★ 不进链 ⇒ 三数只含 4★/5★），但同为引擎级状态，本类只能由契约间接背书。
+     */
+    @Test
+    fun `3星件求解按构造恒 null 故重裁链必须设闸门`() {
+        // 形状按 3★ 真件取（≤3 条词条、level ≤ 12）；数值不参与判定 —— rarity 检查在函数
+        // 首行、先于一切数值/档位表查询，任意输入都改不了 null 这个结论。
+        val threeStar = listOf(
+            RollSolver.In("atk_", 7.0),
+            RollSolver.In("def", 19.0),
+            RollSolver.In("eleMas", 16.0),
+        )
+        assertNull(
+            "3★ 首读（单候选重载）按构造无解 ⇒ 无闸门时链必进、两批多 ROI 重读必空跑",
+            RollSolver.solve(3, 12, threeStar),
+        )
+        assertNull(
+            "行候选重载对 3★ 同样按构造无解 ⇒ 链内没有任何出口，进链=纯开销+污染 roll未解",
+            RollSolver.solve(3, 12, threeStar.map { listOf(it) }),
+        )
     }
 }
