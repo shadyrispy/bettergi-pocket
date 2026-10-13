@@ -101,6 +101,13 @@ internal fun ScanEngine.returnButtonPoint(frame: Mat): Pair<FramePoint, Boolean>
  *    两者可信度不是一回事，不该共用同一个次数上限。
  *  - 放弃时不再只 warn：ERROR + NoticeCenter + `stopReason="returnHomeStuck"` 终止本轮 ——
  *    归位失败意味着后面每一步都在未知界面上点，**继续跑比停下来危险**。
+ *
+ * ★★ 2026-10-13 #266 加第三道（顺序在"停手"之前）：整轮一次「点任意处进入」★★
+ * 事故：BS 隔夜掉回**标题屏**（「点击进入」）起跑 ⇒ 21.8s 后 `returnHomeStuck cells=0`，
+ * 而日志显示紧随其后的 `enterScreen` **命中了背包锚点** —— 整轮是被归位这一步截死的。
+ * 标题屏的特征恰好是"返回钮模板不命中 + BACK 无进展 + 派蒙判非主界面"，三条刹车在这里
+ * 全部指向停手，而这个界面唯一需要的动作就是点一下屏幕。落点用**底部中带**（不是中心、
+ * 更不是右上角），理由见使用处注释。只试一次；仍无进展照旧 `returnHomeStuck`。
  */
 internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTEMPTS) {
     // ★ 2026-10-08：旧守卫 `hasTemplate("home.bagpack")` 已删除 —— 旧判定靠模板匹配，
@@ -111,6 +118,8 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
     var blindClicks = 0
     /** 每层最多一次 BACK 退化（有进展即重置）；见无进展分支的注释。 */
     var backFallbackUsed = false
+    /** ★ #266：整轮最多一次「点任意处进入」（标题屏兜底），不重置。 */
+    var titleTapUsed = false
     while (attempt++ < maxAttempts) {
         val frame = freshFrame()
         val atHome: Boolean?
@@ -179,6 +188,39 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
                 )
                 actions.back()
                 delay(RETURN_HOME_SETTLE_MS)
+                continue
+            }
+            // ★ #266 停手前的最后一次「点任意处进入」：标题屏（隔夜掉线后的常态）是唯一一类
+            //   「返回钮模板不命中 + BACK 无效 + 派蒙判非主界面」的画面，而它要的动作就是点一下屏幕。
+            //   真机实测（BS 2244 07:44）：从标题屏起跑 ⇒ 本函数 21.8s 后 returnHomeStuck、
+            //   `cells=0`，而**后面的 enterScreen 其实命中了背包锚点** ⇒ 整轮是被归位这一步截死的。
+            //   落点取**底部中带** (w/2, h·9/10)：标题屏的「点击进入」提示就在那一条上；
+            //   背包/角色页同一位置是页码点/空白，不是任何功能钮 —— #139 的教训就是不能拿
+            //   "右上角那一带"当兜底（那里是派蒙钮）。整轮只试一次，试完仍无进展照旧停手。
+            if (!titleTapUsed) {
+                titleTapUsed = true
+                val tap = try {
+                    val f = freshFrame()
+                    try {
+                        f.cols() / 2 to f.rows() * 9 / 10
+                    } finally {
+                        f.release()
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    null
+                }
+                if (tap == null) {
+                    Log.e(TAG, "returnToHome: 取不到帧 ⇒ 连「点任意处进入」这一试也不做，停手")
+                    NoticeCenter.error("自动归位取不到帧，已停手")
+                    vars.stopRequested = true
+                    vars.stopReason = "returnHomeStuck"
+                    return
+                }
+                Log.w(TAG, "returnToHome: 返回钮与 BACK 均无进展 ⇒ 试一次「点任意处进入」(${tap.first},${tap.second})（标题屏常态）")
+                clickAt(tap.first, tap.second)
+                delay(RETURN_HOME_SETTLE_MS * 2)
                 continue
             }
             Log.e(TAG, "returnToHome: 返回钮与 BACK 均无进展 ⇒ 停手（不再盲点漂移）")
