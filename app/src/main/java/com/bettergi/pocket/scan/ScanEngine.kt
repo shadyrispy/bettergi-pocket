@@ -248,7 +248,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   「第二轮摘要把上一轮的观察数一起报」（同 :239-240 的教训）。
         recropAttempts = 0; recropNewCandidates = 0; recropRescued = 0
         weaponOverlapRepeats = 0; weaponIdentityRuns.clear(); lastEmittedWeaponIdentity = null
-        unknownSetPieces = 0; charUnresolved = 0
+        unknownSetPieces = 0; charUnresolved = 0; charTalentUnread = 0
         // ★ #265：随 run 复位，与其它观察量同一处。这个量只在 visit 第 ② 步被读，而那时**本格还没投票**
         //   （星级在第 ⑤ 步才投）⇒ 它天生读的是"上一格的读数"；不清零就会让新一轮/新计划项的
         //   第 1 格直接继承上一轮尾部那件低星 ⇒ 一开场就止扫。
@@ -352,6 +352,9 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 } else "") +
                 // ★ #156：身份未解析的位数（照常入库、导出无 key）。>0 就说明昵称表又漏人了，
                 //   对账侧会同时报"多 N 条未解析 + 缺 N 个真角色"。
+                // ★ #274：天赋没读成的角色数（0 不是合法值）——条件式打印，与 `未解析身份` 同一族。
+                //   这条计数的存在理由见字段 KDoc：交替页签序漏了反序格那半，跑完只看得见件数。
+                (if (charTalentUnread > 0) "天赋未读=${charTalentUnread}件 " else "") +
                 "未解析身份=${charUnresolved}位 " +
                 // ★ #46：取证落盘的闸门计数只在**有话说**时出现（默认关取证 ⇒ 全 0 ⇒ 不打，免噪声）
                 (if (panelShotSeq > 0 || panelShotDropped > 0 || panelShotWriteFailures > 0) {
@@ -490,6 +493,15 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
 
     /** 三档解析全未命中、按显示名入库的角色数（#156；这些记录**没有 GOOD key**，去管理器页补昵称）。 */
     internal var charUnresolved = 0
+
+    /**
+     * 入库时**三项天赋全为 0** 的角色数（#274）。0 不是合法值（全部战斗天赋基础等级恒 ≥1，
+     * 见 `CharacterDomainPanels.kt:1320` 的实测注释），所以这个数就是"天赋根本没读成"的件数。
+     * 立这条计数的原因：2026-10-10 的「交替页签序」把**反序格**的天赋读整条漏掉了，
+     * 10-13 全量轮实测 43/95 件 `t=[0,0,0]`，而日志里连一条"跳过了"都没有 ⇒
+     * 静默分支必须留下可数的痕迹（同 #152 那条 else 日志的教训）。
+     */
+    internal var charTalentUnread = 0
 
     /** 重读期抑制「连续重复」计数：重访/回读必然重读到刚记过的件，会被回卷判据误判成"整页零新增"。 */
     internal var suppressDupStreak = false

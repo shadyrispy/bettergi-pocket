@@ -145,6 +145,18 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
     // ★ #156：数一下"没有 GOOD key 的入库件"，进 `scan finished` 摘要（逐条只有 Log.w，
     //   翻日志才看得见；对账侧表现为"多 N 条未解析 + 缺 N 个真角色"）。
     if (c.key == null) charUnresolved++
+    // ★ #274：**天赋一项都没读到**也进摘要（与上面 `未解析身份` 同一条纪律：逐条只有 Log 的话，
+    //   翻 3579 行日志才看得见）。这里判的是"导出里 t=[0,0,0]"，它**不是合法值**：
+    //   全部战斗天赋基础等级恒 ≥1（`CharacterDomainPanels.kt:1320` 那条实测），所以 >0 就是漏读，
+    //   不管漏在"整步没走"还是"重读打满上限"。本轮实测 43/95 全 0 ⇒ 这个数就是那 43。
+    if (c.talents.none { it > 0 }) {
+        charTalentUnread++
+        Log.w(
+            TAG,
+            "char: 天赋未读 ⇒ 导出 t=${c.talents} 不是合法值（${c.name} lv=${c.level} " +
+                "asc=${c.ascension}，全部战斗天赋基础等级恒 ≥1）",
+        )
+    }
     // #122：给「格级:」日志一个**与本格入库同源**的标签（由 pagedGrid 在本格日志后清）
     lastCharCellLabel = "c:${c.key ?: c.name}/lv${c.level}"
     Log.i(TAG, "char emit #${resultsCharacters.size}: ${c.name} lv=${c.level} c${c.constellation} t=${c.talents}")

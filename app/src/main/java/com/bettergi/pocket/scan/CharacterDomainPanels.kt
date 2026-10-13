@@ -1287,8 +1287,13 @@ internal suspend fun ScanEngine.charPanelLooksWrongPage(): Boolean {
 
 /** 天赋：3 个战斗天赋等级 OCR（panels.char_talent.lvRois）。 */
 internal suspend fun ScanEngine.readTalent() {
-    val gateway = ocr ?: return
-    val lv = profile.rawObject("panels.char_talent")?.optJSONArray("lvRois") ?: return
+    // ★ #274：三条 early return 原先**一声不吭** ⇒ "整步没走"与"走了但立刻退出"在日志里长得一样
+    //   （本轮就是靠数 `char: 天赋等级 [` 的次数 52 vs 件数 95 才分清的）。全部改成响亮。
+    val gateway = ocr ?: run { Log.w(TAG, "char: 天赋读取跳过 ⇒ OCR 网关不可用"); return }
+    val lv = profile.rawObject("panels.char_talent")?.optJSONArray("lvRois") ?: run {
+        Log.w(TAG, "char: 天赋读取跳过 ⇒ 本档 profile 缺 panels.char_talent.lvRois")
+        return
+    }
     val rects = ArrayList<FrameRect>()
     for (i in 0 until lv.length()) {
         val a = lv.getJSONArray(i)
@@ -1296,7 +1301,8 @@ internal suspend fun ScanEngine.readTalent() {
     }
     val frame = try {
         freshFrame()
-    } catch (e: CancellationException) { throw e } catch (_: Exception) {
+    } catch (e: CancellationException) { throw e } catch (ex: Exception) {
+        Log.w(TAG, "char: 天赋读取跳过 ⇒ 取帧失败：${ex.message}")
         return
     }
     var texts = try {

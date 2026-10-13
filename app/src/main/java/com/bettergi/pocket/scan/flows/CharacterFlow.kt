@@ -8,6 +8,7 @@ import com.bettergi.pocket.scan.enterScreen
 import com.bettergi.pocket.scan.navigate
 import com.bettergi.pocket.scan.pagedGridNative
 import com.bettergi.pocket.scan.readConstellation
+import com.bettergi.pocket.scan.readTalent
 import com.bettergi.pocket.scan.runVisitBody
 import com.bettergi.pocket.scan.stopWhenRegisterDuplicateStreak
 import com.bettergi.pocket.scan.visitClick
@@ -139,6 +140,11 @@ internal suspend fun ScanEngine.runCharacterScanNative() {
 /** character_scan 步序主体（ScanEngine.run() 按 flowName 分派用）。 */
 internal suspend fun ScanEngine.runCharacterSteps() {
     nativeStep("enterScreen") { enterScreen(CharacterFlow.ENTER_CHAR) }
+    // ★ #274：`reverse` 是 **object 级**状态（跨 run 存活），而它的语义是"上一格把面板留在了哪一页"。
+    //   刚 enterScreen 完 ⇒ 面板必然在「属性」页（进角色界面的落点），所以这里必须显式回到正序。
+    //   不清的后果：上一轮若结束在"反序待走"，这一轮第 0 格会以为面板停在天赋页 ⇒
+    //   天赋页预读/判重/（本次新增的）天赋读取全部落在属性页上。
+    CharacterFlow.reverse = false
     nativeStep("pagedGrid") {
         // ★ #219：dup 参数在**进 pagedGrid 之前**登记一次。判据（页级确认 dupPageConfirm）在
         //   格循环里就被读，而流程体内的那次登记要到第 0 格 visit 才生效 ⇒ 从页 0 起算的值
@@ -186,6 +192,20 @@ internal suspend fun ScanEngine.runCharacterSteps() {
                     // ③ dedupeSkip（用天赋页 header 名字判重；已见过 ⇒ 跳过属性/命座两跳）
                     visitDedupeSkip(col, row, idx)
                     if (!visitSkipTail) {
+                        // ★ #274：**这一半角色的天赋读取原先整条不存在**。正序格的天赋是在
+                        //   `navigate(NAV_TALENT)` 里顺带读的（`ScanNavigationDomain.kt:1023`
+                        //   `name.contains("天赋") -> readTalent()`），而反序格**从不导航到天赋页**
+                        //   —— 它开局就停在那一页 ⇒ 2026-10-10「交替页签序省一次点击」把反序这半的
+                        //   读取漏干净了。10-13 华为全量实测：43/95 件导出 `t=[0,0,0]`，
+                        //   而 `char: 天赋等级 [` 只打了 52 次（52 + 43 = 95 逐位对上）⇒ 不是读歪，是没读。
+                        //   补在这里而不是补一次导航：**零额外点击**（面板本来就在这页），
+                        //   且判重跳过的格不付这次读取。
+                        //   先 `assertScreen` 再读：这条断言在正序格里是"确认落到了天赋页"，
+                        //   在反序格里语义换成"确认上一格确实把我们留在了天赋页"——同一个判据、
+                        //   同一个失败行为（未命中 ⇒ 按一次 BACK 后继续），失败时读出来是 0，
+                        //   会被 `charTalentUnread` 当场报出来，不会再静默。
+                        assertScreen(CharacterFlow.ASSERT_TALENT)
+                        readTalent()
                         // ④ 命之座 + ⑤ 属性页（parse 补读 level/元素，结束在属性页）
                         navigate(CharacterFlow.NAV_CONSTELLATION)
                         readConstellation(CharacterFlow.READ_CONSTELLATION)
