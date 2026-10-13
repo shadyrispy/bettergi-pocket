@@ -170,6 +170,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
 
     suspend fun run() {
         runPreamble()
+        applyFlowPipeDefault()
         // ★ simple 分支（spec §1/§4，2026-10-07）：DSL 运行时已下线 —— 按 flowName 分派到
         //   原生步序（weapon/artifact/character/lock/equip + 两条标定流；dict/vars/步序常量
         //   已由 scan/flows/* 携带）。未知名字回落 artifact_scan（与 ScriptRunner 同口径）。
@@ -190,6 +191,25 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     }
 
     /**
+     * ★ A③：把本流程的**默认管道深度**落到 [TimingOverrides.pipeDepth]（在分派前、取帧前置之后）。
+     *
+     * 显式给过 `pipe=` 时一字不动（A/B 与回退把手见 [TimingOverrides.pipeExplicit]）；
+     * 与 `timing` 的 `pipe` 分支同口径：深度 >0 必须同时开 `crop`，因为消费者只拿得到裁片，
+     * 「整帧路径 + 流水线路径」并存会留语义漂移（原注释见 TimingOverrides.pipeDepth KDoc）。
+     */
+    internal fun applyFlowPipeDefault() {
+        if (TimingOverrides.pipeExplicit) {
+            Log.i(TAG, "pipe 深度取显式值=${TimingOverrides.pipeDepth}（flow=$flowName 的默认被覆盖）")
+            return
+        }
+        val d = PIPE_DEFAULT_BY_FLOW[flowName] ?: 0
+        if (d == TimingOverrides.pipeDepth) return
+        TimingOverrides.pipeDepth = d
+        if (d > 0) TimingOverrides.panelCrop = true
+        Log.i(TAG, "pipe 深度取流程默认：flow=$flowName ⇒ depth=$d${if (d > 0) "（crop 强制开）" else ""}")
+    }
+
+    /**
      * run() 的**前半段**（simple 分支抽出，一字未改）：计时/观察计数复位、PerfProbe.reset、
      * §15 流程前置归位（returnHome）。原生入口（runWeaponScanNative 等）与 JSON 路径共用。
      *
@@ -207,6 +227,10 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         clickGiveups = 0; weaponStaleDropped = 0
         weaponOverlapRepeats = 0; weaponIdentityRuns.clear(); lastEmittedWeaponIdentity = null
         unknownSetPieces = 0; charUnresolved = 0
+        // ★ #265：随 run 复位，与其它观察量同一处。这个量只在 visit 第 ② 步被读，而那时**本格还没投票**
+        //   （星级在第 ⑤ 步才投）⇒ 它天生读的是"上一格的读数"；不清零就会让新一轮/新计划项的
+        //   第 1 格直接继承上一轮尾部那件低星 ⇒ 一开场就止扫。
+        lastVotedWeaponRarity = -1
         weaponDictMiss = 0; weaponDictMissNames.clear()
         panelShotSeq = 0; panelShotDropped = 0; panelShotWriteFailures = 0
         panelShotSpaceCheckedAt = 0; panelShotSpaceOk = true
@@ -338,6 +362,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         get() = TimingOverrides.panelSettleMs.takeIf { it > 0L } ?: PANEL_SETTLE_MS
 
     val resultsCharacters = ArrayList<GoodCharacter>()
+
+    /**
+     * 已入库件数（三条容器的合计；单轮只有一个域在增长，口径同 [runPostamble] 的 total 核对）。
+     * 目前只有一个读者：管道消费者按 job 前后求差得「本格追加了几件」（#257）。
+     */
+    internal fun engineCellCount(): Int = results.size + resultsWeapons.size + resultsCharacters.size
 
     /** 单角色草稿：parsePanel(char_profile) → navigate(命座/天赋) → emit。 */
     // ── 耗时归因（调试标定用；见 TimingOverrides）──
@@ -516,6 +546,18 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     internal var lastWeaponIdentity: String? = null
     internal var weaponSameRun: Int = 0
     internal var weaponStaleDropped: Int = 0
+
+    /**
+     * ★ #265：**生产者自己**在本格投出来的武器星级（`vote` 的 `weapon.panel.starBand` 两条分支写）。
+     *
+     * 只有一个读者：[stopWhenRarityAtMost2]，它在 visit 第 ② 步求值 ⇒ 量的是**上一格**的星级。
+     * 同步臂下 `vars.rarity` 恰好等于这个值（vote 直接写 vars），所以旧写法看不出差别；
+     * 管道臂下 `vars` 由消费者按它自己的格装载 ⇒ 止扫点会随积压深度漂 ⇒ 尾部那几件低星
+     * 两臂收得不一样（`PAGES=3` 的验收跑走不到列表末尾，撞不到这条）。
+     * 与 [CellVotes] 是同一族的教训：**生产者要用的量必须留在生产者侧**，不能借共享 vars 传话。
+     * `-1` = 未判定哨兵（与 `vars.rarity` 同口径，见 [stopWhenRarityAtMost2] 的守卫）。
+     */
+    internal var lastVotedWeaponRarity: Int = -1
 
     /**
      * **在扫描星级区间内**读到了武器名、却查不到词典 key 的格数（#188，2026-10-04）。
@@ -823,12 +865,52 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         val panelKey: String,
         val idx: Int,                // 本格在 pageKeys/pageIdentities 的槽位（页末排水用）
         val votes: CellVotes,        // ★ #69：本格投票位快照（生产者写 vars 会与消费者串格，见 CellVotes）
+        val cols: Int,               // ★ #263：发送时的网格列数/遍历行数（跨页积压时消费者不读活值）
+        val traverseRows: Int,
     ) {
         val cellKey: String get() = "$gridKey:$col:$row"
+        // ★ #263：本格坐标上下文 —— 消费者解析时必须用它自己的，不能读引擎上的活值。
+        fun cellCoord() = CellCoord(page, row, col, idx, cols, traverseRows)
         // 消费者解析完成后回填（单消费者顺序执行，下一 job 解析前必已被生产者读取）：
         var resultKey: String? = null       // ← lastCellKey（contentKey；空读为 null/空）
         var resultIdentity: String? = ""    // ← lastCellIdentity
+        var resultAdded: Int = 0            // ← 本格实际追加进 results/resultsWeapons/resultsCharacters 的件数
     }
+
+    /** 页末排水的一条：本格（idx = pageKeys/pageIdentities 槽位）由消费者产出的结果。 */
+    internal data class PipeCellResult(
+        val idx: Int,
+        val key: String?,
+        val identity: String,
+        val added: Int,
+    )
+
+    /**
+     * ★ #263：**本格坐标**（页号 + 行 + 列 + 页内格序 + 该页的列数/遍历行数）。
+     *
+     * 引擎上的 `curPageNo/curCellRow/curCellCol/curCellIdx/curCols/curTraverseRows` 是**生产者正在
+     * 推进的活值**；`pipe>0` 时解析与 emit 跑在消费者线程上，生产者此刻已走到后面 ≤pipeDepth 格 ⇒
+     * 消费者直接读活值就是「按 B 格的内容判 A 格的坐标」。干跑里消费者 0ms 就追得上 ⇒
+     * 两者恒等、单测抓不到；真机一格 ≈0.5~11s ⇒ 会真的错位。
+     *
+     * 危害不止日志：武器的 `crossPageOverlap`（比上页同列 row1/row2）与 `weaponCellEmitted`
+     * 的「页:行:列:身份」同格键都拿坐标当**丢件判据**，坐标错一格就是丢件/漏挡 ——
+     * #60（上页表下标错位）、#73（跨页丢弃没登记）两支都是同一族。
+     * 与 [com.bettergi.pocket.scan.VoteJudges.weaponLock] 的 `origin` 同一做法：
+     * 参数显式传，同步路径传活值（行为一字不变），消费者传 job 自己的。
+     */
+    internal class CellCoord(
+        val page: Int,
+        val row: Int,
+        val col: Int,
+        val idx: Int,
+        val cols: Int,
+        val traverseRows: Int,
+    )
+
+    /** 同步（非管道）路径的本格坐标：就是引擎上的活值。 */
+    internal fun liveCellCoord() =
+        CellCoord(curPageNo, curCellRow, curCellCol, curCellIdx, curCols, curTraverseRows)
 
     private var pipeChannel: Channel<ParseJob>? = null
     private var pipeScope: CoroutineScope? = null
@@ -963,6 +1045,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             panelKey = panelKey,
             idx = idx,
             votes = currentCellVotes(),
+            cols = curCols, traverseRows = curTraverseRows,
         )
         synchronized(pipeLock) { pipeInFlight++ }
         pipeCellJobSent = true
@@ -984,12 +1067,17 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 synchronized(pipeLock) { pipeInFlight--; pipeReturnJob(job) }
                 continue
             }
+            val jobBefore = engineCellCount()
             pipeProcess(job)
             synchronized(pipeLock) {
                 pipeInFlight--
                 // 消费者解析完成 ⇒ 回填本格结果（页末排水按 idx 序写 pageKeys，§3.3）
                 job.resultKey = lastCellKey
                 job.resultIdentity = lastCellIdentity
+                // ★ #257：本格**追加了几件**只能在消费者侧量。生产者在 pagedGrid 里那份 addedCell 读的是
+                //   它此刻的 results 长度，管道臂下消费者还没走到本格 ⇒ 恒 0 —— 那是与 #188
+                //   「拿 key 栏下判决」同一坑的另一栏，事后看日志会把成功格读成未入库。
+                job.resultAdded = engineCellCount() - jobBefore
                 synchronized(pipeDoneLock) { pipeDoneResults.add(job) }
                 pipeReturnJob(job)
             }
@@ -1009,10 +1097,14 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             //   华为实测：vars.crafted 串格 ⇒ 祝圣 yShift(47px@2244) 被错加/漏加在别的格上，
             //   等级读成 0、首条副词条被顶掉、末行读到套装名 ⇒ 内容键变 ⇒ 去重当成新件。
             job.votes.applyTo(vars)
+            // ★ #263：本格坐标随 job 进来（同 #69 的投票位）。引擎上的 curPageNo/curCellRow/
+            //   curCellCol/curCellIdx 此刻是**生产者正在走的那一格**，消费者读它 = 按 B 格的
+            //   内容判 A 格的坐标 ⇒ 武器跨页/同格丢件判据错位。
+            val cell = job.cellCoord()
             if (job.panelKey == "weapon_backpack") {
-                parseWeaponPanel(job.crop, gw, job.parseStep.optJSONObject("dict"), job.origin)
+                parseWeaponPanel(job.crop, gw, job.parseStep.optJSONObject("dict"), job.origin, cell)
             } else {
-                parseArtifactPanel(job.crop, gw, job.panelKey, job.parseStep.optJSONObject("dict"), job.origin)
+                parseArtifactPanel(job.crop, gw, job.panelKey, job.parseStep.optJSONObject("dict"), job.origin, cell)
             }
             vars.panelMatched = evaluatePanelMatch(job.parseStep)
             if (job.parseStep.optString("match").isNotEmpty() && vars.panelMatched) vars.matchHit = true
@@ -1057,15 +1149,15 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
 
     /**
      * 页末排水（本页 job 结果，按 job id 序 = 生产者发送序 = 格序）。
-     * 返回 (idx, contentKey, identity)：idx 是该格在 pageKeys/pageIdentities 的槽位。
+     * 返回本格（idx 是它在 pageKeys/pageIdentities 的槽位）的**内容键 / 身份 / 追加件数**。
      * ⚠️ 必须先 [pipeJoinPage]；`pipe=0`（无消费者）时返回空。
      */
-    internal fun pipeDrainResults(): List<Triple<Int, String?, String>> =
+    internal fun pipeDrainResults(): List<PipeCellResult> =
         synchronized(pipeDoneLock) {
             val page = synchronized(pipeLock) { pipePageNo }
             val out = pipeDoneResults.sortedBy { it.id }
                 .filter { it.page == page }
-                .map { Triple(it.idx, it.resultKey, it.resultIdentity ?: "") }
+                .map { PipeCellResult(it.idx, it.resultKey, it.resultIdentity ?: "", it.resultAdded) }
             // 本页结果已全部交付 ⇒ 清空（pipeDrainAppeared 必须在本次调用之前或同批读取，见调用点顺序）
             pipeDoneResults.removeAll { it.page == page }
             out
@@ -1158,6 +1250,29 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      */
     internal companion object {
         const val TAG = "BetterGI.Scan"
+
+        /**
+         * ★ A③（#69 收尾，2026-10-13）：管道深度的**流程级默认**（"①流程属性"形态）。
+         *
+         * 依据是这一轮的设备实测，不是推测：
+         * - 华为 EML-AL00 正反序、圣遗物四臂：`pipe=2` 比 `pipe=0` **−10.8%**（反序对，两臂做功
+         *   逐位相同且同步臂单价更低）；BS 2244 同流程 **−5.7%**；两序同向。
+         * - 等价性：BS/华为各四臂导出**全字节相同**（#253/#259/#261 三个串格缺陷都修在管道侧，
+         *   同步臂与管道臂互验后才敢定默认）。
+         *
+         * 只有"读背包"的两条进来。**写类流程一律不列**（按构造排除，不靠注释提醒）：
+         * `artifact_lock`/`auto_equip` 的判据要在**下一格的开头**读回本格投票位（`curLock`
+         * 决定要不要真点锁钮，见 LockFlow.kt:204 与 ScanJudgmentDomain 的 vote），
+         * 而管道下这些位滞后 ≤pipeDepth 格 ⇒ 开了就是拿旧状态点写操作。
+         * 角色扫描 (`character_scan`) 也不列：它的本格要**多次取帧 + 中途分支**
+         * （dedupeSkip 消费解析结果决定跳不跳命座/天赋页），一张裁片的 job 表达不了（#262）。
+         *
+         * 显式 `--es timing "pipe=N"` 永远覆盖本表（[TimingOverrides.pipeExplicit]）。
+         */
+        val PIPE_DEFAULT_BY_FLOW: Map<String, Int> = mapOf(
+            "artifact_scan" to 2,
+            "weapon_scan" to 2,
+        )
         const val ENTER_SETTLE_MS = 1200L
         const val SCREEN_SETTLE_MS = 1500L
         const val CLICK_SETTLE_MS = 600L

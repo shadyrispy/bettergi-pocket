@@ -41,6 +41,15 @@ object TimingOverrides {
      */
     var pipeDepth: Int = DEFAULT_PIPE_DEPTH
 
+    /**
+     * ★ A③（#69 收尾，2026-10-13）：本轮 `pipe=` 是否**显式给过**。
+     *
+     * 管道深度改按**流程属性**给默认（见 [ScanEngine.PIPE_DEFAULT_BY_FLOW]）之后，这条是
+     * 唯一能把"默认开着管道的流程"拉回同步臂的把手 —— 没有它，`--es timing "pipe=0"`
+     * 会被流程默认覆写，#69 那种正反序 A/B 与"管道出问题先退回同步"的回退路同时失效。
+     */
+    var pipeExplicit: Boolean = false
+
     /** 签名轮询步长（仅 [panelSigEnabled] 时生效）。默认 40ms —— 实测面板内容 133ms 就绪（中位）。 */
     var panelSigPollMs: Long = ScanEngine.PANEL_SIG_POLL_MS
     /**
@@ -141,6 +150,7 @@ object TimingOverrides {
         panelSigEnabled = DEFAULT_PANEL_SIG_ENABLED
         panelCrop = DEFAULT_PANEL_CROP
         pipeDepth = DEFAULT_PIPE_DEPTH
+        pipeExplicit = false
         panelSigPollMs = DEFAULT_PANEL_SIG_POLL_MS
         panelSigBand = DEFAULT_PANEL_SIG_BAND
         panelSigSamples = DEFAULT_PANEL_SIG_SAMPLES
@@ -256,6 +266,7 @@ object TimingOverrides {
                     // S2b 流水线深度（#69）：0=同步；1..8=消费者队列深度（>0 强制 crop=1）
                     "pipe" -> {
                         pipeDepth = v.toInt().coerceIn(0, 8)
+                        pipeExplicit = true
                         if (pipeDepth > 0) panelCrop = true
                     }
                     "sigpoll" -> panelSigPollMs = v.coerceAtLeast(5L)

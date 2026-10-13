@@ -384,10 +384,12 @@ internal suspend fun ScanEngine.parsePanel(
         origin = FramePoint(x0, y0)
     }
     try {
+        // ★ #263：同步路径 = 生产者自己这一格 ⇒ 传引擎活值（与改前逐字等价）。
+        val cell = liveCellCoord()
         if (panelKey == "weapon_backpack") {
-            parseWeaponPanel(parseFrame, ocr, step.optJSONObject("dict"), origin)
+            parseWeaponPanel(parseFrame, ocr, step.optJSONObject("dict"), origin, cell)
         } else {
-            parseArtifactPanel(parseFrame, ocr, panelKey, step.optJSONObject("dict"), origin)
+            parseArtifactPanel(parseFrame, ocr, panelKey, step.optJSONObject("dict"), origin, cell)
         }
     } finally {
         if (owned) frame.release()
@@ -448,7 +450,19 @@ internal suspend fun ScanEngine.parseWeaponPanel(
     dict: JSONObject? = null,
     /** 见 [parseArtifactPanel] 的同名参数：裁片左上角帧坐标，rect 建树处统一减。 */
     origin: FramePoint = FramePoint(0, 0),
+    /** ★ #263：本格坐标（见 [ScanEngine.CellCoord]）。同步路径传活值，管道消费者传 job 自己的。 */
+    cell: ScanEngine.CellCoord,
 ) {
+    // ★ #263：本函数体内**一律用别名**，不要再直接读引擎上的 cur* 活值 ——
+    //   管道臂下这些活值是"生产者正在走的那一格"，而下面几处把它当**丢件判据**的坐标
+    //   （crossPageOverlap 比上页同列 row1/row2、weaponCellEmitted 的 页:行:列:身份）。
+    //   逐处替换会有漏（函数体 250 行、还有嵌套 lambda），别名一处封顶。
+    val curPageNo = cell.page
+    val curCellRow = cell.row
+    val curCellCol = cell.col
+    val curCellIdx = cell.idx
+    val curCols = cell.cols
+    val curTraverseRows = cell.traverseRows
     fun sh(r: FrameRect): FrameRect =
         if (origin.x == 0 && origin.y == 0) r else r.shiftedBy(-origin.x, -origin.y)
     val yShift = 0
@@ -715,7 +729,15 @@ internal suspend fun ScanEngine.parseArtifactPanel(
      * 本函数内所有 rect 统一减它换到裁片坐标。**rect 建树只在这一处减**，不要散到使用点。
      */
     origin: FramePoint = FramePoint(0, 0),
+    /** ★ #263：本格坐标（见 [ScanEngine.CellCoord]）。同步路径传活值，管道消费者传 job 自己的。 */
+    cell: ScanEngine.CellCoord,
 ) {
+    // ★ #263：同 [parseWeaponPanel] —— 本函数体内的 cur* 一律走别名的**本格**值，
+    //   读者是 emit 段的 `curPageIds` 槽位与全部带 page/行/列 的日志（含取证 manifest）。
+    val curPageNo = cell.page
+    val curCellRow = cell.row
+    val curCellCol = cell.col
+    val curCellIdx = cell.idx
     fun sh(r: FrameRect): FrameRect =
         if (origin.x == 0 && origin.y == 0) r else r.shiftedBy(-origin.x, -origin.y)
     val base = "panels.$panelKey"

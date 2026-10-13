@@ -1416,6 +1416,9 @@ internal suspend fun ScanEngine.vote(
                     //   直接 return ⇒ **BS 2244 实测 63 格全解析、0 件入库、`导出跳过：无已入库结果`**。
                     //   与下面那条回退分支注释担心的"整档导出 0 件"是同一个后果，只是换了触发路径。
                     sink.rarity = panelStars
+                    // ★ #265：同一份值留在生产者侧 —— 止扫判据在下一格第 ② 步读它，
+                    //   那时共享 vars 已被消费者装载成"落后 ≤pipeDepth 格"的那一格。
+                    lastVotedWeaponRarity = panelStars
                     Log.d(TAG, "weapon panel stars = $panelStars")
                 } else {
                     // ⚠️ 回退：profiles 未标定 `panels.weapon_backpack.starBand` 的分辨率档
@@ -1423,6 +1426,7 @@ internal suspend fun ScanEngine.vote(
                     //    parseWeaponPanel 直接 return（**整档导出 0 件**）。
                     val r = VoteJudges.weaponStarStrip(frame, prof, requireNotNull(gridKey), col, row)
                     sink.rarity = r.count
+                    lastVotedWeaponRarity = r.count
                     Log.d(TAG, "weapon panel stars unavailable → fallback card starStrip = ${r.count}")
                 }
             }
@@ -1457,18 +1461,27 @@ internal fun ScanEngine.stopWhenRegisterDuplicateStreak(streak: Int, dupPageConf
  * 的**原生式**（该条 Expr 退役）。语义与 stopWhen(expr) 逐位对应：
  * - 哨兵守卫：rarity<0（vote 未判定，如 3★ 蓝卡无金/紫 banner）跳过——否则 `<` 比较对 -1 恒真，
  *   会把"整页未判定"误判为"全部低星"而立即终止；
- * - `vars.rarity in 0..2` ⇒ stopRequested=true / stopReason="stopWhen"（scope=page 立即停；
+ * - `rarity in 0..2` ⇒ stopRequested=true / stopReason="stopWhen"（scope=page 立即停；
  *   原 flow 的 action="Stop+flush" 在引擎里**无消费者**——flush 就是扫描结束的自然导出）；
  * - 命中/未命中对 [ScanEngine.stopWhenCellStreak] 的记账与 Expr 路径同口径（该计数只被
  *   scope=cell 的连续确认消费，weapon 这条恒 page ⇒ 不改变行为，纯记账一致）。
+ *
+ * ★ #265：读的是 [ScanEngine.lastVotedWeaponRarity]（**生产者自己投的**），不是 `vars.rarity`。
+ *   本函数在 visit 步序第 ② 位求值，也就是**上一格**投出的星级（本格要到第 ⑤ 位才投票）——
+ *   同步臂下 `vars.rarity` 恰好就是那个值，所以以前看不出差别。管道臂下 `vars` 由消费者按它
+ *   自己的格装载 ⇒ 这里读到的是"落后 ≤pipeDepth 格"的星级 ⇒ **止扫点前移/后移**，
+ *   收尾那几件低星武器两臂收得不一样（导出差在尾部，`PAGES=3` 的验收跑**永远撞不到**，
+ *   因为那三页根本走不到列表末尾的素材区）。改成读生产者自持的那一份后两臂同值，
+ *   与同步臂旧行为逐位一致（同步臂下两者本来就相等）。
  */
 internal fun ScanEngine.stopWhenRarityAtMost2() {
+    val rarity = lastVotedWeaponRarity
     // 哨兵保护（与 Expr 路径同款）：rarity=-1 不得触发
-    if (vars.rarity < 0) {
+    if (rarity < 0) {
         Log.d(TAG, "stopWhen skipped: rarity not judged yet (-1 sentinel)")
         return
     }
-    if (vars.rarity in 0..2) {
+    if (rarity in 0..2) {
         stopWhenCellStreak++
         vars.stopRequested = true
         vars.stopReason = "stopWhen"

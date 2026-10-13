@@ -134,10 +134,20 @@ internal suspend fun ScanEngine.pagedGridCore(
     if (scrollToTop) {
         // 背包列表跨会话残留 → 先滚到顶。此处要求「连续 2 次未动」才认定到顶（双保险）。
         val tTop = System.nanoTime()
-        try {
+        val topped = try {
             swipeGridToTop(gridKey, "scrollGridToTop", stableRounds = GRID_TOP_STABLE_ROUNDS)
         } finally {
             PerfProbe.addStep("scrollToTop", System.nanoTime() - tTop)
+        }
+        // ★ #258：这个返回值以前**被丢掉**，而 `false` 的含义恰恰是"起始行号未知"（漏件的源头）。
+        //   具体原因（打满上限 / 前向+反向都不动 / 该网格无 advance）由 swipeGridToTop 自己打过 W，
+        //   这里补的是**归因到本流程**的一行，免得事后只看 pagedGrid 的日志以为回了顶。
+        if (!topped) {
+            Log.w(
+                TAG,
+                "pagedGrid[$gridKey]: 回顶**未确认**（成因见上面 swipeGridToTop 的告警行）" +
+                    "⇒ 本列可能从未知行号起步，漏的那些件在导出里表现为「缺 N 件」而不是报错",
+            )
         }
     }
     GridAlign.resetBaseline(gridKey)
@@ -286,6 +296,9 @@ internal suspend fun ScanEngine.pagedGridCore(
         }
         // ★ 行级闭环（方案 C）：本页键序列必须在**页级作用域**（skip 页也要留序列占位）
         val pageKeys = ArrayList<String>(cols * traverseRows)
+        // ★ #257：pipe>0 时**延后到页末排水之后**才打的「done cell / 格级:」两行（见 [CellLogRow]）。
+        //   pipe=0 恒空（逐格即打，与改前一字不变）。
+        val cellLogs = ArrayList<CellLogRow>(cols * traverseRows)
         // ★ S2b：本页页号（pipe 模式 job 遥测/epoch 键用）
         pipeSetPage(pageNo)
         // ★ 跨页重叠跳过（**武器专用**）：新页各格指纹 vs 上页**同列任意行**指纹 ⇒ 相同即同一件。
@@ -640,43 +653,48 @@ internal suspend fun ScanEngine.pagedGridCore(
                     lastCellIdentity = null
                     lastPanelAppeared = null
                     val addedCell = results.size + resultsWeapons.size + resultsCharacters.size - beforeCell
-                    Log.i(TAG, "pagedGrid[$gridKey] page=$pageNo done cell($col,$row) idx=$idx added=$addedCell")
                     // ★★ 格级日志（2026-09-16，用户要求"查出漏的 8 件在哪"）★★
                     //   每格记：页/格序(idx)/**全局列表序号估计 G**/本格内容键是否为空/键哈希。
                     //   G 的推导：本页首格全局序号 rowCheckGlobalStart + idx（页内行主序）——行级闭环
                     //   已把每页实际前进量测出来并累加过 ⇒ G 是**实测累计**，不是理想值。
                     //   用途：跑完把日志里连续 G 序列一看 ⇒ **哪一段 G 缺号 = 哪几格没被点到/没读到**，
                     //   与 GT 无关即可定位（GT 没有列表顺序，无法反查位置）。
-                    run {
-                        val g = rowCheckGlobalStart + idx
-                        // ⚠️ 顺序坑（2026-09-16 自查）：`lastCellKey` 在本格**收集后已被置空**
-                        //   （`pageKeys += (lastCellKey ?: ""); lastCellKey = null` 就在上面）⇒
-                        //   必须读 `pageKeys.lastOrNull()`，否则恒打出"空(未入库)"（实测 1365/1365 全空 ✗）。
-                        val k = pageKeys.lastOrNull()
+                    // ★ #257：pipe>0 时这三栏（added / key / item）在**本格刚走完的时刻**还没有真值：
+                    //   内容键与身份由**消费者** emit 时才写（生产者读到的最多是上一格交付的残值），
+                    //   added 同理（results 由消费者追加）。干跑里消费者 0ms 就追得上 ⇒ 看不出差别，
+                    //   真机管道臂实测整页打 `added=0` + `**空(未入库)**` ✗。
+                    //   所以管道臂把这两行**攒到页末**，等 [pipeDrainResults] 按 idx 回填权威值后再打；
+                    //   pipe=0（生产默认）逐格即打，时序与格式一字不变。
+                    //   ⚠️ 顺序坑（2026-09-16 自查）：`lastCellKey` 在本格**收集后已被置空**
+                    //     （上面那三行 `lastCellKey = null` 就是）⇒ 必须读 `pageKeys.lastOrNull()`
+                    //     而不是它自己，否则恒打出"空(未入库)"（实测 1365/1365 全空 ✗）。
+                    //   ⚠️ #188 的"尾区最后 5 格解析成空 ⇒ 丢 2 件"、#122 的角色 158/158 全空，
+                    //     都是拿这一栏下判决造出来的**假现象** ⇒ 这几行改的是"读哪一格的值"，
+                    //     不是 cosmetic。
+                    val cellLog = CellLogRow(
+                        idx = idx,
+                        global = rowCheckGlobalStart + idx,
                         // ★ 2026-09-29 修（#122）：**角色格不能用 `key` 这一栏下判决**。
                         //   `lastCellKey` 只在圣遗物/武器路径赋值（见 [lastCellKey] 的 KDoc 与
                         //   emitCharacter），角色路径**从不写它** ⇒ 158/158 格全打 `**空(未入库)**`，
                         //   而同一秒紧挨着的 `char emit #N` 说明它们**明明入库了** —— 正是 #55/#84
                         //   那类"日志字段与实际相反"的坑（拿这份日志判丢件会得出全盘错误结论）。
                         //   角色侧改报 [lastCharCellLabel]（emit 时写的 `key/lv`），没入库才说"空"。
-                        val charLabel = if (gridKey == "char_strip") lastCharCellLabel else null
-                        val keyCol = when {
-                            !k.isNullOrEmpty() -> "h${k.hashCode() and 0xFFFF}"
-                            charLabel != null -> charLabel
-                            else -> "**空(未入库)**"
-                        }
-                        Log.i(
-                            TAG,
-                            "格级: page=$pageNo row=${idx / cols} col=${idx % cols} idx=$idx global=$g key=" +
-                                keyCol +
-                                " item=" + (pageIdentities.lastOrNull()?.takeIf { it.isNotEmpty() } ?: "-") +
-                                " appeared=" + (if (pageAppeared.isEmpty()) "-" else pageAppeared.last()?.toString() ?: "无闸门") +
-                                " gridChanged=$gridCellChanged",
-                        )
+                        //   ⚠️ 角色一旦接入管道（#262）这个快照同样会变成残值，那时要改走 job 交付通道。
+                        charLabel = if (gridKey == "char_strip") lastCharCellLabel else null,
+                        producerAdded = addedCell,
+                        appeared = if (pageAppeared.isEmpty()) "-" else pageAppeared.last()?.toString() ?: "无闸门",
+                        gridChanged = gridCellChanged,
+                    )
+                    if (TimingOverrides.pipeDepth > 0) {
+                        cellLogs += cellLog
+                    } else {
+                        emitCellLog(gridKey, pageNo, cols, cellLog, pageKeys.lastOrNull(), pageIdentities.lastOrNull())
                     }
                     // #122：标签**必须在本格的「格级:」日志之后**才清 —— 它由 emitCharacter 写、
                     //   归本格所有（下一格重新写）。放在上面那段 lastCellKey=null 里会先清后读，
                     //   又变回"恒空"（这正是本条要修的那个坑的翻版）。
+                    //   ⚠️ 管道臂的快照已在 [cellLog] 里取走，延后打时不再读它 ⇒ 这里照清。
                     lastCharCellLabel = null
                 }
             }
@@ -693,7 +711,8 @@ internal suspend fun ScanEngine.pagedGridCore(
         //   pipe=0 时整块 no-op，同步路径行为不变。
         if (TimingOverrides.pipeDepth > 0) {
             pipeJoinPage()
-            for ((idx, k, id) in pipeDrainResults()) {
+            val addedByIdx = HashMap<Int, Int>()
+            for ((idx, k, id, added) in pipeDrainResults()) {
                 if (idx < pageKeys.size) {
                     pageKeys[idx] = k ?: ""
                     pageIdentities[idx] = id
@@ -702,8 +721,20 @@ internal suspend fun ScanEngine.pagedGridCore(
                 //   生产者的 `curCellIdx`（ArtifactDomainPanels 的 emitArtifact）。干跑里消费者
                 //   0ms 就追得上 ⇒ 两者同值、这条看不出差别；真机若追不上就会**落错槽**。
                 //   它是上面 ② 的唯一来源，所以按构造定槽，不留给时序决定。（推理，未实测复现）
+                //   ★ #263 之后消费者写的就是自己那一格的槽 ⇒ 这里与它同值，留着是回归哨兵。
                 curPageIds[idx] = id
+                addedByIdx[idx] = added
             }
+            // ★ #257：权威值到位了才补打攒下的「done cell / 格级:」（顺序：排水 → 补打 → 页级统计）
+            for (rec in cellLogs) {
+                emitCellLog(
+                    gridKey, pageNo, cols, rec,
+                    key = pageKeys.getOrNull(rec.idx),
+                    identity = pageIdentities.getOrNull(rec.idx),
+                    added = addedByIdx[rec.idx] ?: rec.producerAdded,
+                )
+            }
+            cellLogs.clear()
         }
         val added = results.size + resultsWeapons.size + resultsCharacters.size - beforeCount
         // ★ #230 续：把**每页**的「时钟上限 + rec 累计成本」配成一对打出来。
@@ -1310,6 +1341,50 @@ internal suspend fun ScanEngine.pagedGridCore(
     }
 }
 
+/**
+ * ★ #257：一页里**尚未定稿**的格级日志（只存生产者侧就已权威的那几项）。
+ *
+ * `pipe>0` 时本格的内容键、身份、追加件数都由**消费者**产出，生产者此刻手里只有
+ * 上一格交付的残值或空 ⇒ 「done cell」与「格级:」两行延后到页末排水之后按 idx 补打。
+ * 真机管道臂实测整页打 `added=0` + `key=**空(未入库)**`，而 #188/#122 两支"丢件"结论
+ * 正是拿这一栏下的判决 ⇒ 这条不是 cosmetic。
+ */
+private class CellLogRow(
+    val idx: Int,
+    /** 全局列表序号估计 = 建记录时的 `rowCheckGlobalStart + idx`（行级闭环实测累计 + 页内格序）。 */
+    val global: Int,
+    val charLabel: String?,
+    val producerAdded: Int,
+    val appeared: String,
+    val gridChanged: Boolean,
+)
+
+/** 「done cell / 格级:」两行的**唯一**格式出口（pipe=0 逐格即打、pipe>0 页末补打，格式一致）。 */
+private fun ScanEngine.emitCellLog(
+    gridKey: String,
+    pageNo: Int,
+    cols: Int,
+    rec: CellLogRow,
+    key: String?,
+    identity: String?,
+    added: Int = rec.producerAdded,
+) {
+    val row = rec.idx / cols
+    val col = rec.idx % cols
+    Log.i(TAG, "pagedGrid[$gridKey] page=$pageNo done cell($col,$row) idx=${rec.idx} added=$added")
+    val keyCol = when {
+        !key.isNullOrEmpty() -> "h${key.hashCode() and 0xFFFF}"
+        rec.charLabel != null -> rec.charLabel
+        else -> "**空(未入库)**"
+    }
+    Log.i(
+        TAG,
+        "格级: page=$pageNo row=$row col=$col idx=${rec.idx} global=${rec.global} key=$keyCol " +
+            "item=${identity?.takeIf { it.isNotEmpty() } ?: "-"} " +
+            "appeared=${rec.appeared} gridChanged=${rec.gridChanged}",
+    )
+}
+
 // §16.2 安全回顶（rosterFind 名册 / pagedGrid 背包 / setFilter 套装面板 三处共用一个实现）。
 // 反向 advance（to→from 上滑）连续多次，每轮 awaitGridStable + 缩略图差异判「是否真滚动」。
 // EMUI 节流规避：每轮单次 swipe 派发（不连续派发），靠 settle 轮询吸收节流。
@@ -1322,7 +1397,9 @@ internal suspend fun ScanEngine.pagedGridCore(
 //    → 每轮泄一个 native Mat（OpenCV 堆外内存）。
 //
 // @param stableRounds 需「连续未动」几次才认定到顶（≥1）
-// @return true = 判定到顶；false = 打满 maxRounds / stopRequested 中断 / 该网格无 advance
+// @return true = 判定到顶（**且至少观察到过一次手势造成的画面变化**，或反向探针证明手势是活的）；
+//   false = 打满 maxRounds / stopRequested 中断 / 该网格无 advance /
+//   ★ #258：前向与**反向**都读不到变化 ⇒ 无法区分"短到不用滚"与"手势被吞"，不替调用方赌到顶。
 internal suspend fun ScanEngine.swipeGridToTop(
     gridKey: String,
     logTag: String,
@@ -1348,36 +1425,121 @@ internal suspend fun ScanEngine.swipeGridToTop(
     val tx = profile.scale(from.getInt(0), profile.scaleX)
     val ty = profile.scale(from.getInt(1), profile.scaleY)
     var stable = 0
+    // ★ #258 两个记账位：`sawMove` = 本轮**观察到过**画面随手势变化；`probed` = 反向探针已打过（一次封顶）。
+    var sawMove = false
+    var probed = false
     for (i in 1..maxRounds) {
         if (vars.stopRequested) return false
-        val tb = gridThumbOf(gridKey)
-        actions.swipe(fx, fy, tx, ty)
-        // ⛔ 2026-09-12 试过「不等稳定、直接与滑动前缩略图比是否移动」来省掉每轮的 settle 等待，
-        //   **实测不可行，已回退**。原因：`actions.swipe` 是**异步派发**（不等 780ms 手势走完），
-        //   而列表在顶部时上滑会先被**拖起再回弹** ⇒ 手势期间 d 就 >GRID_END_DIFF（实测 12/12 轮
-        //   `d=0.44~0.75 waited=120~240ms`）⇒ 每轮误判"已滚动"，12 个手势以 ~150ms 节奏**重叠派发**
-        //   （1835ms）⇒ **到顶判定彻底失效**（起始页不是首页 ⇒ 漏件）。
-        //   ⇒ 每轮**必须等手势结束 + 画面稳定**：wait 这一侧没有安全的提前量。
-        //   （同一轮次里真正可省的是"手势时长 780ms 与稳定等待重叠"，但那不改变总时长。）
-        val settled = awaitGridStable(profile, gridKey)
-        val ta = try { VoteJudges.gridThumb(settled, profile, gridKey) } finally { settled.release() }
-        val diff = VoteJudges.thumbChangedFraction(tb, ta)
-        val moved = !(tb != null && ta != null && reachedEnd(tb, ta, GRID_END_DIFF))
-        Log.i(
-            TAG,
-            "$logTag: 回顶#$i ${if (moved) "(已滚动)" else "(已到顶)"} " +
-                "diff=${diff?.let { "%.3f".format(it) } ?: "null"} thr=$GRID_END_DIFF",
-        )
-        // D 级（RecognitionLog.verbose）探针：把「变了哪些缩略图像素」打成 ASCII 掩码，
-        // 用于区分「整块位移」与「零散量化抖动」。缩略图尺寸见 VoteJudges.gridThumb。
-        // ⚠️ 掩码刻意用**严格不等**（不带容差）：带容差会把噪声像素抹掉，就看不出噪声密度了。
-        if (RecognitionLog.verbose && tb != null && ta != null && tb.size == THUMB_COLS * THUMB_ROWS * 3) {
-            Log.i(TAG, "$logTag: 回顶#$i ${thumbMask(tb, ta)}")
+        val r = swipeThumbRound(gridKey, fx, fy, tx, ty)
+        logTopRound(logTag, i, r)
+        if (r.moved) {
+            stable = 0
+            sawMove = true
+            continue
         }
-        if (moved) stable = 0 else if (++stable >= stableRounds) return true
+        if (++stable < stableRounds) continue
+        // ★★ #258 判别测量（#144 的成因到这里才算真堵住）★★
+        //   「上滑没动」有两种**读数同形**的解释：① 真的在顶部；② 手势压根没送达
+        //   （x 落在卡缝外 / 被系统层吞 / 该档没标定，见函数头那条 x 之争）。两者都报 diff≈0.000，
+        //   而 09-29 实测过"停在半路就判到顶"（`回顶#1/#2 diff=0.010/0.000`，真顶首行是
+        //   HeartOfTheFurnace）⇒ 之后整列从**未知行号**起步 ⇒ 静默漏件。
+        //   `stableRounds=2`（#144 当时加的）挡不住它：连着两次同形的是**同一种失效**，不是偶发抖动。
+        //   能把两者分开的只有**反着滑一下**：列表在顶时向下滑必动（下面还有内容），
+        //   手势失效时两个方向都不动。所以只在"从未见过移动却就要判到顶"的那一刻付这一次代价。
+        if (sawMove || probed) return true
+        probed = true
+        val p = swipeThumbRound(gridKey, tx, ty, fx, fy)
+        logTopRound(logTag, i, p, reverse = true)
+        if (p.moved) {
+            // 手势是活的 ⇒ 刚才的"没动"就是真到顶；但这一下把列表推下去了，还得滑回来 ⇒
+            // 清计数继续走上滑循环（代价 1~2 轮，只发生在"本来就在顶且从没动过"这一种形态）。
+            sawMove = true
+            stable = 0
+            continue
+        }
+        Log.w(
+            TAG,
+            "$logTag: 回顶：上滑与**反向**滑动都没让画面变化 ⇒ 无法区分「这一列短到不用滚」与" +
+                "「手势被吞/x 落点无效」⇒ **不判定到顶**（本列可能从未知行号起步，$gridKey）",
+        )
+        return false
     }
     Log.w(TAG, "$logTag: 回顶达上限 $maxRounds 次仍未判定到顶")
     return false
+}
+
+/**
+ * 一轮「滑动 → 等画面稳定 → 比缩略图」的读数（[swipeGridToTop] 的回顶滑与 #258 的反向探针共用，
+ * 免得两处各写一遍 awaitGridStable + gridThumb + 释放 —— #225 泄 native Mat 的那个坑就在这段里）。
+ *
+ * ⛔ 2026-09-12 试过「不等稳定、直接与滑动前缩略图比是否移动」来省掉每轮的 settle 等待，
+ *   **实测不可行，已回退**。原因：`actions.swipe` 是**异步派发**（不等 780ms 手势走完），
+ *   而列表在顶部时上滑会先被**拖起再回弹** ⇒ 手势期间 d 就 >GRID_END_DIFF（实测 12/12 轮
+ *   `d=0.44~0.75 waited=120~240ms`）⇒ 每轮误判"已滚动"，12 个手势以 ~150ms 节奏**重叠派发**
+ *   （1835ms）⇒ **到顶判定彻底失效**（起始页不是首页 ⇒ 漏件）。
+ *   ⇒ 每轮**必须等手势结束 + 画面稳定**：wait 这一侧没有安全的提前量。
+ *   （同一轮次里真正可省的是"手势时长 780ms 与稳定等待重叠"，但那不改变总时长。）
+ *
+ * ⚠️ `moved` 的口径与改前逐字一致：**读数失败（任一侧缩略图为 null）算"移动"** —— 循环会继续，
+ *   最终走上限告警，绝不会因为取不到帧就假判到顶。
+ */
+private suspend fun ScanEngine.swipeThumbRound(
+    gridKey: String,
+    sx: Int,
+    sy: Int,
+    ex: Int,
+    ey: Int,
+): ThumbRound {
+    val tb = gridThumbOf(gridKey)
+    actions.swipe(sx, sy, ex, ey)
+    val settled = awaitGridStable(profile, gridKey)
+    val ta = try {
+        VoteJudges.gridThumb(settled, profile, gridKey)
+    } finally {
+        settled.release()
+    }
+    return ThumbRound(
+        moved = !(tb != null && ta != null && reachedEnd(tb, ta, GRID_END_DIFF)),
+        diff = VoteJudges.thumbChangedFraction(tb, ta),
+        before = tb,
+        after = ta,
+    )
+}
+
+/** [swipeThumbRound] 的读数（diff=null = 缩略图取不到，日志里就叫 `null`，即"判不了"）。 */
+private class ThumbRound(
+    val moved: Boolean,
+    val diff: Float?,
+    val before: ByteArray?,
+    val after: ByteArray?,
+)
+
+/**
+ * 回顶轮次的日志行。格式与 #258 之前逐字相同（反向探针多一个 `(反向探针)` 标记），
+ * 因为这份日志是"回顶到底有没有发生"的唯一取证。
+ */
+private fun ScanEngine.logTopRound(
+    logTag: String,
+    round: Int,
+    r: ThumbRound,
+    reverse: Boolean = false,
+) {
+    val tag = if (reverse) "(反向探针)" else ""
+    Log.i(
+        TAG,
+        "$logTag: 回顶#$round$tag ${if (r.moved) "(已滚动)" else "(已到顶)"} " +
+            "diff=${r.diff?.let { "%.3f".format(it) } ?: "null"} thr=$GRID_END_DIFF",
+    )
+    // D 级（RecognitionLog.verbose）探针：把「变了哪些缩略图像素」打成 ASCII 掩码，
+    // 用于区分「整块位移」与「零散量化抖动」。缩略图尺寸见 VoteJudges.gridThumb。
+    // ⚠️ 掩码刻意用**严格不等**（不带容差）：带容差会把噪声像素抹掉，就看不出噪声密度了。
+    if (RecognitionLog.verbose) {
+        val a = r.before
+        val b = r.after
+        if (a != null && b != null && a.size == THUMB_COLS * THUMB_ROWS * 3) {
+            Log.i(TAG, "$logTag: 回顶#$round$tag ${thumbMask(a, b)}")
+        }
+    }
 }
 
 /** 24×16 缩略图差异掩码（'.'=同 '#'=变，row0=网格上沿）；仅供 D 级诊断，故刻意不带容差。 */

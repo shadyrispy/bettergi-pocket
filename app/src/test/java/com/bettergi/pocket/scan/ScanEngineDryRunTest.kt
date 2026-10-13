@@ -563,7 +563,13 @@ class ScanEngineDryRunTest {
         //    加 withTimeout：卡死从「永久挂起」变成「失败 + 协程栈」，既防呆又能直接定位卡点。
         val prevPipe = TimingOverrides.pipeDepth
         val prevCrop = TimingOverrides.panelCrop
+        val prevExplicit = TimingOverrides.pipeExplicit
         TimingOverrides.pipeDepth = pipeDepth
+        // ★ A③（#69 流程默认）：`ScanEngine.run()` 现在会按 flowName 给 artifact/weapon 填默认深度，
+        //   把手就是 `pipeExplicit`。干跑里本用例集比的正是**传进来的那两档**（0 vs 2），
+        //   所以必须声明成"显式给过"，否则 JSON 路径（nativeFlow=null，直接 engine.run()）的用例会
+        //   被静默升成管道臂 —— 断言的还是同步期望，红法是随机的（#260 那类墙钟敏感假象的温床）。
+        TimingOverrides.pipeExplicit = true
         if (pipeDepth > 0 || forceCrop) TimingOverrides.panelCrop = true
         try {
             runBlocking {
@@ -596,6 +602,7 @@ class ScanEngineDryRunTest {
         } finally {
             TimingOverrides.pipeDepth = prevPipe
             TimingOverrides.panelCrop = prevCrop
+            TimingOverrides.pipeExplicit = prevExplicit
         }
         return RunResult(engine, h)
 
