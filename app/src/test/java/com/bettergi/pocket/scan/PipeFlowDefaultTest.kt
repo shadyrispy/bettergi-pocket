@@ -140,4 +140,21 @@ class PipeFlowDefaultTest {
         engine("artifact_scan").applyFlowPipeDefault()
         assertEquals(2, TimingOverrides.pipeDepth)
     }
+
+    /**
+     * ★ 复核 #263 那批时补的一条：白名单必须是**硬闸**，不能只写在注释里。
+     *
+     * 写类流程（`artifact_lock`/`auto_equip`）要在下一格开头读回**本格**投票位来决定点不点写操作，
+     * 角色扫描的判重账本同理 —— 管道下这些都滞后 ≤pipeDepth 格 ⇒ 拿旧状态点写按钮。
+     * 有了 `pipeExplicit` 之后，"显式 `pipe=2`" 原本可以绕过整张表（`--es timing` 是生产可达的入口），
+     * 所以 `applyFlowPipeDefault` 现在对不在表里的流程**无条件清零**，显式也不例外。
+     */
+    @Test
+    fun `不在白名单里的流程，显式 pipe= 也不能开管道`() {
+        for (flow in listOf("artifact_lock", "auto_equip", "character_scan")) {
+            TimingOverrides.apply("pipe=2")
+            engine(flow).applyFlowPipeDefault()
+            assertEquals("flow=$flow 必须被强制回同步", 0, TimingOverrides.pipeDepth)
+        }
+    }
 }

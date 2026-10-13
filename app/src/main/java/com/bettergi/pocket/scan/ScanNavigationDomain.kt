@@ -20,6 +20,8 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_SETTLE_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.RETURN_HOME_ATTEMPTS
 import com.bettergi.pocket.scan.ScanEngine.Companion.RETURN_HOME_BLIND_MAX
 import com.bettergi.pocket.scan.ScanEngine.Companion.RETURN_HOME_SETTLE_MS
+import com.bettergi.pocket.scan.ScanEngine.Companion.TITLE_ENTER_POLL_MS
+import com.bettergi.pocket.scan.ScanEngine.Companion.TITLE_ENTER_WAIT_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SCREEN_SETTLE_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_FRAME_TIMEOUT_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
@@ -219,9 +221,41 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
                     return
                 }
                 Log.w(TAG, "returnToHome: 返回钮与 BACK 均无进展 ⇒ 试一次「点任意处进入」(${tap.first},${tap.second})（标题屏常态）")
-                clickAt(tap.first, tap.second)
-                delay(RETURN_HOME_SETTLE_MS * 2)
-                continue
+                // ⚠️ **不走 clickAt**：它按 `profile.scalePoint` 把坐标从 base 再放大到帧坐标，
+                //    而这里算出来的已经是**帧坐标**（`f.cols()/f.rows()`）。base==frame 的档位
+                //    （2244/2560 两份 profile）碰巧 scale=1 看不出来，落到回退基线
+                //    `profiles.json`（base 3200×1440）的设备上会偏到 (37%w, 67%h) —— 那一带是卡片/页签，
+                //    正是要避免的误点。守卫照过（它判的是"能不能点"，与坐标无关）。
+                if (safetyGuard()) actions.click(tap.first, tap.second)
+                // ★ 这一试之后**轮询等进主界面**，不等就是白点：华为实测标题屏 → 世界的加载
+                //   远大于 `RETURN_HOME_SETTLE_MS`，08:38 那一轮就是"点打了、下一轮立刻被
+                //   『盲点 3 次』那条闸截住 ⇒ 仍然 returnHomeStuck"。
+                //   等不到就当场停手（本函数到此为止，不再回到盲点循环 —— 这一试是最后一步）。
+                val until = clock() + TITLE_ENTER_WAIT_MS
+                var entered = false
+                while (clock() < until && !vars.stopRequested) {
+                    delay(TITLE_ENTER_POLL_MS)
+                    val f = runCatchingCancellable { freshFrame() }.getOrNull()
+                    if (f == null) continue
+                    val home = try {
+                        atHomeScreen(f)
+                    } finally {
+                        f.release()
+                    }
+                    if (home == true) {
+                        entered = true
+                        break
+                    }
+                }
+                if (entered) {
+                    Log.i(TAG, "returnToHome: 「点任意处进入」后到达主界面（标题屏已恢复）")
+                    return
+                }
+                Log.e(TAG, "returnToHome: 「点任意处进入」后 ${TITLE_ENTER_WAIT_MS}ms 内仍未到主界面 ⇒ 停手")
+                NoticeCenter.error("自动归位点在标题屏后仍未进游戏，已停手")
+                vars.stopRequested = true
+                vars.stopReason = "returnHomeStuck"
+                return
             }
             Log.e(TAG, "returnToHome: 返回钮与 BACK 均无进展 ⇒ 停手（不再盲点漂移）")
             NoticeCenter.error("自动归位点击后画面无变化，已停手（避免继续盲点漂移）")

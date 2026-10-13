@@ -564,12 +564,19 @@ class ScanEngineDryRunTest {
         val prevPipe = TimingOverrides.pipeDepth
         val prevCrop = TimingOverrides.panelCrop
         val prevExplicit = TimingOverrides.pipeExplicit
+        val prevAnchor = TimingOverrides.pipeAnchorMs
         TimingOverrides.pipeDepth = pipeDepth
         // ★ A③（#69 流程默认）：`ScanEngine.run()` 现在会按 flowName 给 artifact/weapon 填默认深度，
         //   把手就是 `pipeExplicit`。干跑里本用例集比的正是**传进来的那两档**（0 vs 2），
         //   所以必须声明成"显式给过"，否则 JSON 路径（nativeFlow=null，直接 engine.run()）的用例会
         //   被静默升成管道臂 —— 断言的还是同步期望，红法是随机的（#260 那类墙钟敏感假象的温床）。
         TimingOverrides.pipeExplicit = true
+        // ★ #260：锚点早到交付的预算在干跑里**等于不限**。它防的是真机消费者被饿死，
+        //   而在 JVM 里它量的是机器负载：满载复跑（load 12）实测被打满 ⇒ 管道臂多击一整条
+        //   重叠带（`expected 43 but was 50`），而夹具把 sub0 挂在**点击序号**上（[:367] `stateCell`），
+        //   一次多击就把后面所有格的读数整体平移 ⇒ 四条 S2b 用例同时红。
+        //   外层 `withTimeout(ENGINE_RUN_TIMEOUT_MS)` 仍然兜住真挂死，所以这里放宽不会把故障藏起来。
+        TimingOverrides.pipeAnchorMs = 600_000L
         if (pipeDepth > 0 || forceCrop) TimingOverrides.panelCrop = true
         try {
             runBlocking {
@@ -603,6 +610,7 @@ class ScanEngineDryRunTest {
             TimingOverrides.pipeDepth = prevPipe
             TimingOverrides.panelCrop = prevCrop
             TimingOverrides.pipeExplicit = prevExplicit
+            TimingOverrides.pipeAnchorMs = prevAnchor
         }
         return RunResult(engine, h)
 
@@ -736,7 +744,16 @@ class ScanEngineDryRunTest {
                 forceCrop = true,
                 nativeFlow = "artifact",
             )
-            assertEquals("pipe=$pipe：只应入库已点过的 10 格", 10, engine.results.size)
+            // ★ #260：口径按 §6.1 的设计写死成**上界**而不是恰好 10。
+            //   取消时"在途 job 只释放裁片、不 emit"⇒ 止扫那一刻还在途的格**按构造不会入库**，
+            //   所以下界是 `10 - pipeDepth`；旧断言写 `== 10` 把这条设计当成不变式，
+            //   机器一忙（消费者还没追上就收到取消）就红，而红的恰恰是本用例要防的**虚增**的反面。
+            val lo = 10 - pipe
+            assertTrue(
+                "pipe=$pipe：件数必须落在 [已点格数 − 在途, 已点格数] = $lo..10（多于 10 才是泄漏）" +
+                    "，实收 " + engine.results.size,
+                engine.results.size in lo..10,
+            )
             assertEquals("pipe=$pipe", ENTER_CHAIN_CLICKS + 10, h.clicks.size)
             assertTrue("pipe=$pipe 应正常收尾（非异常）", h.finished != null)
         }

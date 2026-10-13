@@ -567,7 +567,15 @@ internal suspend fun ScanEngine.pagedGridCore(
                         //   覆写走管道的格；未交付（过期/取消丢弃或超时）⇒ 置空按今天的兜底走。
                         //   代价每页一次、被积压深度封顶（见 pipeAwaitAnchorIdentities 的 KDoc）。
                         if (TimingOverrides.pipeDepth > 0) {
-                            val early = pipeAwaitAnchorIdentities(pageNo, intArrayOf(1, 2))
+                            // ★ #260：预算可覆盖。真机上它防"消费者被饿死"，而在 JVM 干跑里它量的是
+                            //   这台机器有多忙 —— 满载时被填满就会让管道臂多击一整条重叠带（43→50），
+                            //   夹具又把内容挂在点击序号上 ⇒ 四条 S2b 用例同时红。
+                            val early = pipeAwaitAnchorIdentities(
+                                pageNo,
+                                intArrayOf(1, 2),
+                                budgetMs =
+                                    if (TimingOverrides.pipeAnchorMs > 0) TimingOverrides.pipeAnchorMs else PAGE_WATCHDOG_MS,
+                            )
                             fun adoptAnchorId(k: Int, piped: Boolean) {
                                 if (!piped) return
                                 val id = early[k]
@@ -685,6 +693,9 @@ internal suspend fun ScanEngine.pagedGridCore(
                         producerAdded = addedCell,
                         appeared = if (pageAppeared.isEmpty()) "-" else pageAppeared.last()?.toString() ?: "无闸门",
                         gridChanged = gridCellChanged,
+                        // 与上面 anchorPiped1/2 同一判据：只有真发过 job 的格才可能被"未交付"坑到
+                        piped = copiedFrom == null && pipeCellJobSent,
+                        copied = copiedFrom != null,
                     )
                     if (TimingOverrides.pipeDepth > 0) {
                         cellLogs += cellLog
@@ -727,12 +738,26 @@ internal suspend fun ScanEngine.pagedGridCore(
             }
             // ★ #257：权威值到位了才补打攒下的「done cell / 格级:」（顺序：排水 → 补打 → 页级统计）
             for (rec in cellLogs) {
-                emitCellLog(
-                    gridKey, pageNo, cols, rec,
-                    key = pageKeys.getOrNull(rec.idx),
-                    identity = pageIdentities.getOrNull(rec.idx),
-                    added = addedByIdx[rec.idx] ?: rec.producerAdded,
-                )
+                val delivered = addedByIdx[rec.idx]
+                if (rec.piped && delivered == null) {
+                    // 本格**走了管道但结果没回来**（被判过期/取消丢弃，或消费者抛异常）。
+                    // 此时 `pageKeys[idx]`/`pageIdentities[idx]` 里是**生产者写下的残值**
+                    // （= 消费者上一格交付的那件）⇒ 照打就是一条**看起来可信的错行读数**，
+                    // 比空值更危险（#188 就是这么被带偏的）。宁可说"未交付"。
+                    emitCellLog(gridKey, pageNo, cols, rec, key = null, identity = null, undelivered = true)
+                } else {
+                    emitCellLog(
+                        gridKey,
+                        pageNo,
+                        cols,
+                        rec,
+                        key = pageKeys.getOrNull(rec.idx),
+                        identity = pageIdentities.getOrNull(rec.idx),
+                        // 复制格**按构造不产件**（不点击不 OCR）⇒ 不能读 producerAdded：
+                        // 那个数是在消费者中途追加的 results 差，会把**别格**的新增算到这格头上。
+                        added = delivered ?: if (rec.copied) 0 else rec.producerAdded,
+                    )
+                }
             }
             cellLogs.clear()
         }
@@ -1357,9 +1382,20 @@ private class CellLogRow(
     val producerAdded: Int,
     val appeared: String,
     val gridChanged: Boolean,
+    /** 本格是否**发了 job**（发了却没交付结果 ⇒ 日志只能报"未交付"，不能报残值）。 */
+    val piped: Boolean = false,
+    /** 本格是否是跨页重叠的**复制格**（不点击、不 OCR、按构造不产件）。 */
+    val copied: Boolean = false,
 )
 
-/** 「done cell / 格级:」两行的**唯一**格式出口（pipe=0 逐格即打、pipe>0 页末补打，格式一致）。 */
+/**
+ * 「done cell / 格级:」两行的**唯一**格式出口（pipe=0 逐格即打、pipe>0 页末补打，格式一致）。
+ *
+ * ⚠️ `undelivered = true` 时三栏一律报"未交付"而不是 `pageKeys[idx]` 里的值 ——
+ * 那个槽位此时装的是**消费者给别格算出的结果**（生产者写下的残值），
+ * 照打就是一条看起来可信的错行读数；这份日志是用来判"哪一格丢了"的证据，
+ * 宁可缺信息也不能给错信息（#188 的假结论正是拿 `key` 栏下的判决）。
+ */
 private fun ScanEngine.emitCellLog(
     gridKey: String,
     pageNo: Int,
@@ -1368,10 +1404,23 @@ private fun ScanEngine.emitCellLog(
     key: String?,
     identity: String?,
     added: Int = rec.producerAdded,
+    undelivered: Boolean = false,
 ) {
     val row = rec.idx / cols
     val col = rec.idx % cols
-    Log.i(TAG, "pagedGrid[$gridKey] page=$pageNo done cell($col,$row) idx=${rec.idx} added=$added")
+    Log.i(
+        TAG,
+        "pagedGrid[$gridKey] page=$pageNo done cell($col,$row) idx=${rec.idx} " +
+            "added=" + if (undelivered) "?" else added.toString(),
+    )
+    if (undelivered) {
+        Log.i(
+            TAG,
+            "格级: page=$pageNo row=$row col=$col idx=${rec.idx} global=${rec.global} " +
+                "key=未交付(管道丢弃/未回) item=未交付 appeared=${rec.appeared} gridChanged=${rec.gridChanged}",
+        )
+        return
+    }
     val keyCol = when {
         !key.isNullOrEmpty() -> "h${key.hashCode() and 0xFFFF}"
         rec.charLabel != null -> rec.charLabel
@@ -1434,7 +1483,7 @@ internal suspend fun ScanEngine.swipeGridToTop(
         logTopRound(logTag, i, r)
         if (r.moved) {
             stable = 0
-            sawMove = true
+            if (r.readable) sawMove = true
             continue
         }
         if (++stable < stableRounds) continue
@@ -1453,9 +1502,24 @@ internal suspend fun ScanEngine.swipeGridToTop(
         if (p.moved) {
             // 手势是活的 ⇒ 刚才的"没动"就是真到顶；但这一下把列表推下去了，还得滑回来 ⇒
             // 清计数继续走上滑循环（代价 1~2 轮，只发生在"本来就在顶且从没动过"这一种形态）。
-            sawMove = true
+            // ⚠️ 同样只有**读得到**才算数（见 ThumbRound.readable）。
             stable = 0
+            if (p.readable) sawMove = true
             continue
+        }
+        // 一屏就装得下的列表（背包件数 ≤ 一页格数）**两个方向都推不动**，那不是手势被吞。
+        // 不豁免的话这类网格每次回顶都打一条"回顶未确认"的 W ⇒ 假告警叫多了，真告警就没人看。
+        // 几何从**本网格的 profile** 取（不能用 pagedGrid 的局部量：`rosterFind`/`setFilter` 也调本函数）；
+        // `vars.total` 读不到（null/0）时不豁免，保持原来的否定口径。
+        val cellsPerPage = grid.optInt("cols", 0) * grid.optInt("traverseRows", 0)
+        val onePage = cellsPerPage > 0 && vars.total?.let { it > 0 && it <= cellsPerPage } == true
+        if (onePage) {
+            Log.i(
+                TAG,
+                "$logTag: 前向与反向都没动，但计数器 total=${vars.total} ≤ 一页 $cellsPerPage 格" +
+                    "⇒ 这一列本来就一屏装得下，判**已在顶部**",
+            )
+            return true
         }
         Log.w(
             TAG,
@@ -1503,6 +1567,7 @@ private suspend fun ScanEngine.swipeThumbRound(
         diff = VoteJudges.thumbChangedFraction(tb, ta),
         before = tb,
         after = ta,
+        readable = tb != null && ta != null,
     )
 }
 
@@ -1512,6 +1577,13 @@ private class ThumbRound(
     val diff: Float?,
     val before: ByteArray?,
     val after: ByteArray?,
+    /**
+     * ★ #258：两侧缩略图**都取到了**才叫"读到了证据"。
+     * `moved` 在取不到帧时也是 true（沿用改前口径：宁可多滑不许假判到顶），
+     * 所以**不能**拿它当"手势确实推动过列表"的凭据 —— 那会让 `sawMove` 被一次取帧失败点亮，
+     * 于是后面两次"没动"就被当成"验证过的到顶"，正是本条探针要防的那个洞。
+     */
+    val readable: Boolean,
 )
 
 /**

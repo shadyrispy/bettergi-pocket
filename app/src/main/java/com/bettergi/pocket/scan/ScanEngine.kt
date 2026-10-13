@@ -198,6 +198,20 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      * 「整帧路径 + 流水线路径」并存会留语义漂移（原注释见 TimingOverrides.pipeDepth KDoc）。
      */
     internal fun applyFlowPipeDefault() {
+        val allowed = PIPE_DEFAULT_BY_FLOW.containsKey(flowName)
+        if (!allowed && TimingOverrides.pipeDepth > 0) {
+            // ★ 写类流程（artifact_lock / auto_equip）与角色扫描**一律不许开管道**，
+            //   连显式 `pipe=` 也不行：它们在**下一格开头**读回本格投票位来决定点不点写操作
+            //   （LockFlow.kt 的 curLock、ScanJudgmentDomain 的写流程分支），而管道下这些位
+            //   滞后 ≤pipeDepth 格 ⇒ 拿旧状态点写按钮。以前这条约束只写在注释里，
+            //   而 `pipeExplicit` 让任何人都能把它绕过去 ⇒ 约束落到代码上。
+            Log.e(
+                TAG,
+                "pipe=${TimingOverrides.pipeDepth} 对 flow=$flowName 不生效 ⇒ 强制回同步（写类/角色流程不能开管道，见 PIPE_DEFAULT_BY_FLOW）",
+            )
+            TimingOverrides.pipeDepth = 0
+            return
+        }
         if (TimingOverrides.pipeExplicit) {
             Log.i(TAG, "pipe 深度取显式值=${TimingOverrides.pipeDepth}（flow=$flowName 的默认被覆盖）")
             return
@@ -208,6 +222,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         if (d > 0) TimingOverrides.panelCrop = true
         Log.i(TAG, "pipe 深度取流程默认：flow=$flowName ⇒ depth=$d${if (d > 0) "（crop 强制开）" else ""}")
     }
+
 
     /**
      * run() 的**前半段**（simple 分支抽出，一字未改）：计时/观察计数复位、PerfProbe.reset、
@@ -1032,11 +1047,16 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         val y1 = cropRect.bottom.coerceIn(y0 + 1, frame.rows())
         val crop = synchronized(pipeLock) { pipeAcquireCropLocked(x1 - x0, y1 - y0) }
         val view = Mat(frame, Rect(x0, y0, x1 - x0, y1 - y0))
+        // ★ #252：这次 memcpy 以前**不进任何探针**（管道臂的 `PerfProbe` 摘要里 `crop n=0`），
+        //   所以"管道臂每格到底为裁片付多少"一直没人量过 ⇒ 先让它可见，再谈要不要省。
+        //   复用同步臂已有的 `crop` 计数（同一件事：建视图 + 拷像素），不新增计数器。
+        val tCrop = System.nanoTime()
         try {
             view.copyTo(crop)
         } finally {
             view.release()
         }
+        PerfProbe.addCrop(System.nanoTime() - tCrop)
         val job = ParseJob(
             id = pipeNextId++, epoch = epoch, gridKey = gridKey, col = col, row = row,
             page = synchronized(pipeLock) { pipePageNo },
@@ -1303,6 +1323,16 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         /** #139：走兜底坐标（返回钮模板未命中）时最多点几次 —— 盲点与"模板命中"不共用上限。 */
         const val RETURN_HOME_BLIND_MAX = 3
         const val RETURN_HOME_SETTLE_MS = 900L
+
+        /**
+         * ★ #266：「点任意处进入」之后等进主界面的**轮询预算**与步长。
+         *
+         * 华为实测（08:38）：标题屏 → 世界的加载远大于 `RETURN_HOME_SETTLE_MS(900)`，
+         * 只等一轮就被"盲点 3 次"那条闸截住 ⇒ 点打了、整轮仍然 `returnHomeStuck`。
+         * 预算取 30s = 华为冷进世界实测的量级；到点仍未进游戏就停手（这一试是最后一步）。
+         */
+        const val TITLE_ENTER_WAIT_MS = 30_000L
+        const val TITLE_ENTER_POLL_MS = 1500L
         // §15 P0-1：左侧菜单切页后的稳定等待（长于普通点击，动画约 600~800ms）
         /**
          * 页签切换后的等待。**2026-09-12 由 900 → 700**（档位实测：屏幕侧内容就绪 397~529ms；

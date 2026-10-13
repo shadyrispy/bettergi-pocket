@@ -50,6 +50,18 @@ object TimingOverrides {
      */
     var pipeExplicit: Boolean = false
 
+    /**
+     * ★ #260：管道"锚点早到交付"（#253）那次有界停等的预算，0 = 用 `PAGE_WATCHDOG_MS`(90s)。
+     *
+     * 为什么要做成可覆盖：这个预算防的是**真机消费者被饿死**，而干跑单测里它是
+     * "当前这台机器有多忙"的度量 —— 满载复跑实测（load 12，8 个 busy 进程）：
+     * 预算被打满 ⇒ 锚定退回"照常访问" ⇒ 管道臂比同步臂**多击 7 格**
+     * （`expected 43 but was 50`），而夹具把内容挂在**点击序号**上 ⇒ 一次多击
+     * 就把后面所有格的读数整体平移 ⇒ 四条 S2b 用例同时红。
+     * 给一个"测试里等于不限"的值，让预算只在真机上生效；外层 `withTimeout` 仍兜住真挂死。
+     */
+    var pipeAnchorMs: Long = 0L
+
     /** 签名轮询步长（仅 [panelSigEnabled] 时生效）。默认 40ms —— 实测面板内容 133ms 就绪（中位）。 */
     var panelSigPollMs: Long = ScanEngine.PANEL_SIG_POLL_MS
     /**
@@ -151,6 +163,7 @@ object TimingOverrides {
         panelCrop = DEFAULT_PANEL_CROP
         pipeDepth = DEFAULT_PIPE_DEPTH
         pipeExplicit = false
+        pipeAnchorMs = 0L
         panelSigPollMs = DEFAULT_PANEL_SIG_POLL_MS
         panelSigBand = DEFAULT_PANEL_SIG_BAND
         panelSigSamples = DEFAULT_PANEL_SIG_SAMPLES
@@ -269,6 +282,8 @@ object TimingOverrides {
                         pipeExplicit = true
                         if (pipeDepth > 0) panelCrop = true
                     }
+                    // #260：锚点早到交付的预算（干跑给大值，真机留默认 90s）
+                    "panchor" -> pipeAnchorMs = v.coerceAtLeast(0L)
                     "sigpoll" -> panelSigPollMs = v.coerceAtLeast(5L)
                     "sigband" -> panelSigBand = v != 0L
                     "sigsamples" -> panelSigSamples = v.toInt().coerceIn(1, 6)
