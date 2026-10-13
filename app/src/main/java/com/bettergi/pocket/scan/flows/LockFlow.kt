@@ -131,17 +131,13 @@ internal object LockFlow {
 }
 
 /**
- * artifact_lock 原生入口（spec §3.4）。步序 = 原 flow JSON 的 steps 逐条直调：
+ * artifact_lock 步序主体（`ScanEngine.run()` 按 flowName 分派用；planSummary 在本体内）。
+ * 步序 = 原 flow JSON 的 steps 逐条直调：
  * enterScreen×2 → dualStateButton → filterReset → setFilter → assertScreen
  * → clicks(排序钮+确认，#255 按钮回顶) → pagedGridNative(pageSkip, visitBody) → planSummary。
+ * ★ D1（2026-10-14 删）：原先另有一个三行壳 `runLockScanNative()`（preamble+本函数+postamble），
+ *   全仓零调用者 ⇒ 删；生产入口就是 `run()` 的分派。
  */
-internal suspend fun ScanEngine.runLockScanNative() {
-    runPreamble()
-    runLockSteps()
-    runPostamble()
-}
-
-/** artifact_lock 步序主体（ScanEngine.run() 按 flowName 分派用；planSummary 在本体内）。 */
 internal suspend fun ScanEngine.runLockSteps() {
     try {
         runLockStepsInner()

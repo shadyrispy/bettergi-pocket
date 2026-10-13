@@ -141,17 +141,12 @@ internal object EquipFlow {
 }
 
 /**
- * auto_equip 原生入口（spec §3.5）。结构 = 原 flow JSON 的 steps 逐条直调：
- * foreach(plan){ 16 个逐目标步 } → exit。
+ * auto_equip 步序主体（`ScanEngine.run()` 按 flowName 分派用；foreach + 条件 exit）。
+ * 结构 = 原 flow JSON 的 steps 逐条直调：foreach(plan){ 16 个逐目标步 } → exit。
  * top=2（foreach over $plan as task）、visit 交给 snap 遍历（advance.type=snap）。
+ * ★ D1（2026-10-14 删）：原先另有一个三行壳 `runEquipScanNative()`（preamble+本函数+postamble），
+ *   全仓零调用者 ⇒ 删；生产入口就是 `run()` 的分派。
  */
-internal suspend fun ScanEngine.runEquipScanNative() {
-    runPreamble()
-    runEquipSteps()
-    runPostamble()
-}
-
-/** auto_equip 步序主体（ScanEngine.run() 按 flowName 分派用；foreach + 条件 exit）。 */
 internal suspend fun ScanEngine.runEquipSteps() {
     nativeStep("foreach") {
         val items = vars.plan

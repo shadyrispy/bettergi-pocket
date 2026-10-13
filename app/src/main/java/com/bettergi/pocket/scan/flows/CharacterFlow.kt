@@ -128,18 +128,15 @@ internal object CharacterFlow {
 }
 
 /**
- * character_scan 原生入口（spec §3.3）。步序 = 原 flow JSON 的 steps 逐条直调：
- * enterScreen(char_interface) → pagedGridNative(char_strip, scrollToTop)。
+ * character_scan 步序主体（`ScanEngine.run()` 按 flowName 分派用；preamble/postamble 也在那边调）。
+ * 步序 = 原 flow JSON 的 steps 逐条直调：enterScreen(char_interface) →
+ * pagedGridNative(char_strip, scrollToTop)。
+ * ★ D1（#233 单2④ 同批，2026-10-14 删）：这里原先还包着一个 `runCharacterScanNative()`
+ *   （preamble + 本函数 + postamble 的三行壳），全仓零调用者 —— 生产入口是 `run()` 直接分派到
+ *   本函数，壳只让人误以为存在"每流程一个原生入口"这层 API。
  * dedupeSkip 语义内联进 visitBody（key==null 不跳过；跳过后命之座/天赋两跳省略，
  * stopWhen/emit 照跑 = TAIL_RUN_ALWAYS 语义由 `if (!visitSkipTail)` 守卫自行保证）。
  */
-internal suspend fun ScanEngine.runCharacterScanNative() {
-    runPreamble()
-    runCharacterSteps()
-    runPostamble()
-}
-
-/** character_scan 步序主体（ScanEngine.run() 按 flowName 分派用）。 */
 internal suspend fun ScanEngine.runCharacterSteps() {
     nativeStep("enterScreen") { enterScreen(CharacterFlow.ENTER_CHAR) }
     // ★ #274：`reverse` 是 **object 级**状态（跨 run 存活），而它的语义是"上一格把面板留在了哪一页"。
