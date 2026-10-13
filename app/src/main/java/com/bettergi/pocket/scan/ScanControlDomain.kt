@@ -1127,13 +1127,21 @@ internal suspend fun ScanEngine.visitClick(
             // 可读的名字 ROI（character_scan 的 click 是 visit 首步，ctx.frame 为空）。
             // ⚠️ 历史上这里曾误用 coerceAtMost(panelPollMs) 把 550ms 拖到 120ms ——
             //   panelPollMs/PANEL_POLL_MS 已于 2026-10-05 连根删除（该常量从未被任何
-            //   生效路径引用），本分支如今就是纯固定等待，不存在可调的步长。
+            //   生效路径引用）。本分支**当时**不存在可调的步长；
+            //   2026-10-14 起有 `prefresh=<ms>` 这个**显式 A/B 覆盖档**（默认 -1 = 用常数），
+            //   与当年那个"没人读的常数"不同 —— 它只服务于"550 该不该降到 400"这一次测量。
             // ★ 2026-10-05：原先这里前面还有一条「抓帧 + OCR 读名字轮询」分支
             //   （`waitPanelNameReady`），在**全部存档真机日志里 0 次命中**（签名分支的
             //   「面板未变但选中框已移动」有 4956 次），留着只会误导"以为就绪判定还依赖 OCR"。
             //   ⇒ 已删；签名采样失败这类情形统一落到本分支，由上面的 W 日志暴露。
-            tmPanelMs += PANEL_REFRESH_MS
-            delay(PANEL_REFRESH_MS)
+            // ★ 2026-10-14：加 `prefresh=<ms>` 覆盖档 —— 对齐方案 §8.3 那条"550→400"的取值决策
+            //   一直没有 A/B 通道（本常数原先是纯 const，改一次要重编一次 APK）。
+            //   角色流水每一格都落到这里（click 是 visit 首步 ⇒ ctx.frame 空 ⇒ sigUsable 恒假），
+            //   所以这个旋钮就是角色线"等待"的唯一闸；实测签名路径反而更慢（556→689ms/格，
+            //   见本文件上面那段 KDoc），故走"降固定档"而不是"接签名门"。
+            val refreshMs = TimingOverrides.panelRefreshMs.takeIf { it >= 0L } ?: PANEL_REFRESH_MS
+            tmPanelMs += refreshMs
+            delay(refreshMs)
         }
     }
     // 收敛帧兜底：签名路径若从未确认成功（未变兜底/超时），此处补抓一次，

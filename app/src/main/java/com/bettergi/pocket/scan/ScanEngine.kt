@@ -1755,16 +1755,17 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         const val PANEL_FP_DUP_WAIT_MS = 100L
 
         /** 武器面板**固定延迟**（GOODScanner `DEFAULT_WEAPON_PANEL_DELAY = 50ms`）：同款武器面板全同 ⇒ 指纹无效。 */
-        /**
-         * 武器面板**固定延迟**。GOODScanner 用 `DEFAULT_WEAPON_PANEL_DELAY = 50ms`，
-         * ⚠️ 但**真机实测 50ms 不够**：面板动画未完成就抓帧 ⇒ 精炼/等级行读到空
-         * （首轮 209 件里 57 条的 `refine` 读成 `null` ⇒ 同款 3★ 键全同 ⇒ 大量误判重复
-         *  ⇒ 触发 `duplicateStreak` 早停 ⇒ 3★ 区被截断 ⇒ 漏 100 件 ✗✗）。
-         * 提到 **300ms**（与我方 artifact 的 clickDelay 同量级），给面板渲染留足时间。
-         */
-        const val WEAPON_PANEL_DELAY_MS = 300L
-        // ★ 对齐方案 P1 曾考虑降到 GOODScanner 的 50ms —— **被上面这条事故否决**：
-        //   它 50ms 能活靠「每格单帧 + 无指纹门」，我方就绪逻辑不同，抄数值不抄条件必复现漏件。
+        // ★ 2026-10-14 #233：这里原来有 `WEAPON_PANEL_DELAY_MS = 300L`，**已删**。
+        //   它作用在 `frame` 已经抓妥之后（武器不走换帧分支）⇒ 只是在盲等一张定格的帧；
+        //   原先记在 KDoc 里那条「50ms 实测不够 ⇒ 57 条 refine 读空 ⇒ 漏 100 件」的因果**三条都站不住**：
+        //   ① 形状上不可能（延迟在抓帧之后）② refine 空号是系统性读不出数字「1」
+        //      （同文件账：171 次里「精炼1阶」命中 0 次、空号 43 次，GT 的 R1 正好 39 件），不是时序问题
+        //   ③ 那次事故查无落盘件，只随 10-02 的 squash 提交 b1e2d5a 进了注释。
+        //   GOODScanner 的 50ms 也不是裸等：后面紧跟 ensure_panel_stable(rect,100)；
+        //   而我方的稳定判定本来就在 visitClick 的签名就绪闸里做过了。
+        //   对照杠杆：`--es timing "wpdelay=<ms>"`（默认 0）。实测数见 ArtifactDomainPanels 的注释。
+
+        //   就是上面①②，已收回。留着 300 只是因为还没跑 A/B，不是因为它是安全的。
 
         /** 天赋读数为 0 时（时序性读失败 / 切页淡入）**最多重读次数**与间隔（ms）。 */
         const val TALENT_RETRY_MAX = 6

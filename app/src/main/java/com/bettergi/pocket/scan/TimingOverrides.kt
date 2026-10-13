@@ -64,6 +64,25 @@ object TimingOverrides {
      */
     var pipeAnchorIdlePolls: Long = 0L
 
+    /**
+     * 武器面板那段盲等的覆盖值（`wpdelay=<ms>`，**默认 0 = 不等**）。
+     * 2026-10-14 #233 把原先写死的 300ms 删了（它作用在抓帧之后 ⇒ 只是盲等），
+     * 这个键留着纯粹是为了能把那段等待加回去做对照（照 `dupskip` 的先例）。
+     *
+     * 之所以要能运行时改：2026-10-14 读代码发现**这段延迟在抓帧之后**
+     * （[ArtifactDomainPanels] 里 `frame` 在 :267 就 acquire 好了，:292 才 delay），
+     * 所以它不可能在"等面板渲染完"，只是把 OCR 推迟到一张**已经定格的帧**之后 ⇒ 净效果 = 白等 300ms/格。
+     * 这个结论要靠 A/B 定，不该由我一句话直接删常量。
+     */
+    var weaponPanelDelayMs: Long = 0L
+
+    /**
+     * 签名不可用时那条**固定等待**的覆盖值（`prefresh=<ms>`，`-1` = 用 [ScanEngine.PANEL_REFRESH_MS]）。
+     * 角色流水每格都走这一档 ⇒ 这是"角色等待"唯一的旋钮；对齐方案里 550→400 那条取值决策
+     * 原先没有 A/B 通道（纯 const，改一次重编一次），这个键就是为了补上它。
+     */
+    var panelRefreshMs: Long = -1L
+
     /** 签名轮询步长（仅 [panelSigEnabled] 时生效）。默认 40ms —— 实测面板内容 133ms 就绪（中位）。 */
     var panelSigPollMs: Long = ScanEngine.PANEL_SIG_POLL_MS
     /**
@@ -166,6 +185,8 @@ object TimingOverrides {
         pipeDepth = DEFAULT_PIPE_DEPTH
         pipeExplicit = false
         pipeAnchorIdlePolls = 0L
+        weaponPanelDelayMs = 0L
+        panelRefreshMs = -1L
         panelSigPollMs = DEFAULT_PANEL_SIG_POLL_MS
         panelSigBand = DEFAULT_PANEL_SIG_BAND
         panelSigSamples = DEFAULT_PANEL_SIG_SAMPLES
@@ -287,6 +308,8 @@ object TimingOverrides {
                     // #260：锚点早到交付的预算（干跑给大值，真机留默认 90s）
                     // #260 后半：锚点停等的"无进展轮询次数"上限（原为墙钟预算，干跑不再需要覆盖）
                     "panchor" -> pipeAnchorIdlePolls = v.coerceAtLeast(0L)
+                    "wpdelay" -> weaponPanelDelayMs = v.coerceIn(0L, 5000L)
+                    "prefresh" -> panelRefreshMs = v.coerceIn(-1L, 5000L)
                     "sigpoll" -> panelSigPollMs = v.coerceAtLeast(5L)
                     "sigband" -> panelSigBand = v != 0L
                     "sigsamples" -> panelSigSamples = v.toInt().coerceIn(1, 6)
@@ -322,6 +345,7 @@ object TimingOverrides {
             "sigband=${if (panelSigBand) 1 else 0},sigsamples=$panelSigSamples,sigconfirm=${if (panelSigConfirm) 1 else 0}," +
             "siggate=${if (panelSigGateCached) 1 else 0},phi=${if (phiApply) 1 else 0}," +
             "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0},panel=$panelSettleMs," +
+            "wpdelay=$weaponPanelDelayMs,prefresh=$panelRefreshMs," +
             "advdist=$advanceDistPx,advextra=$advanceExtraPx," +
             "skiplimit=$pageSkipLimit,swipecap=$maxTotalSwipes," +
 

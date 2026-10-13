@@ -23,7 +23,6 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.STOP_MARKER_RARITY
 import com.bettergi.pocket.scan.ScanEngine.Companion.ARTIFACT_STOP_NAMES
 import com.bettergi.pocket.scan.ScanEngine.Companion.WEAPON_FORGING_STOP_NAMES
 import com.bettergi.pocket.scan.ScanEngine.Companion.hitsStopName
-import com.bettergi.pocket.scan.ScanEngine.Companion.WEAPON_PANEL_DELAY_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.WEAPON_SAME_IDENTITY_CAP
 import com.bettergi.pocket.scan.ScanEngine.Companion.DEFAULT_SET_DICT
 import com.bettergi.pocket.scan.ScanEngine.Companion.crossPageOverlap
@@ -289,7 +288,19 @@ internal suspend fun ScanEngine.parsePanel(
     } else {
         emptyList()
     }
-    if (isWeaponPanel) delay(WEAPON_PANEL_DELAY_MS)
+    // ★ 2026-10-14 #233：**删掉了原先这里的 `delay(WEAPON_PANEL_DELAY_MS)`（300ms）**。
+    //   理由不是"觉得太长"，是它**原理上不可能起作用**：`frame` 在上面就 acquire 好了，
+    //   而武器 `fpRects` 恒空 ⇒ 走不到下面 `if (fpRects.isNotEmpty())` 的换帧分支
+    //   ⇒ 这段延迟改不到被 OCR 的那张帧，只是把 OCR 推迟到一张已经定格的帧上。
+    //   BS 2244 实测（runlogs/bs_pipe_20261014_004949 与 _005701）：
+    //     3 页四臂（正反两序）elapsed −36.6% / −38.2%，每格省 289/306ms ≈ 就是那 300ms；
+    //     全量两臂 cells 均 168、件数均 161 = GT 161、对 GT 命中数同为 160。
+    //   `wpdelay=<ms>` 仍可把这段等待加回来做对照（默认 0）。
+    val wpDelayMs = TimingOverrides.weaponPanelDelayMs
+    if (isWeaponPanel && wpDelayMs > 0L) {
+        delay(wpDelayMs)
+        Log.d(TAG, "weapon panel 盲等 ${wpDelayMs}ms（wpdelay 覆盖档，帧已在 delay 之前抓妥 ⇒ 仅用于对照）")
+    }
     // ★ P1（2026-10-06）：重复格（卡格指纹没变 = 同一件再点）**整段跳过等待**，
     //   对齐 GOODScanner backpack_scanner.rs:1417（is_duplicate ⇒ 面板等待直接不走）。
     //   语义：等的是「面板变化」，同一件点了面板本就不会变 ⇒ 等是白等。
