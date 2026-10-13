@@ -1389,6 +1389,11 @@ internal suspend fun ScanEngine.readTalent() {
     //   ⚠️ 旧的 max 合并在 Manekina/Fischl 这两例**都是对的** ⇒ 本改法不是回退 #153：
     //   多数票仍然保留（它挡"单帧偶发"，不依赖方向），只是不再让平票冒充多数票。
     //   循环节奏/延迟/上限一个都不动。
+    //     ↑ 这句是 #166 当时写的，**上限后来动了**：2026-10-14 #233 单2③ 把
+    //       [TALENT_RETRY_MAX] 从 6（=最多 7 个样本）收到 2（=最多 3 个样本），
+    //       依据是 8 臂 742 格的离线回放"截到 3 样本与现行逐格全等"；节奏与延迟仍未动。
+    //       为什么**不能**再收到 1 个重读（2 样本）也写在那条 KDoc 里：13 个分歧槽的正确性
+    //       全部由第 3 帧的多数票兑现，两样本时任何分歧恰好是平票。
     while (attempts < TALENT_RETRY_MAX) {
         if (attempts > 0 && charTalents.none { it <= 0 } && !talentSamplesTied(samples)) break
         attempts++
