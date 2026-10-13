@@ -48,6 +48,10 @@ class InputAccessibilityService : AccessibilityService() {
         //   否则窗口随 WindowManager 泄漏一个已销毁的 service 实例（探针本是一次性诊断设施）。
         //   ⚠️ 必须在 clearInstance 之前：unmount 要用 instance 取 WindowManager。
         unmountBalProbeOverlay()
+        // P2 探针（probeView/probeProgressView）是同类静态 View，原先只卸了 BAL 那条 ⇒
+        // 挂着的窗口 + 静态引用钉住已销毁的 service（同一条泄漏，漏在另一个探针上）。
+        // 同样是"必须在 clearInstance 之前"。
+        unmountProbeOverlay()
         clearInstance()
         super.onDestroy()
     }
@@ -1203,6 +1207,21 @@ class InputAccessibilityService : AccessibilityService() {
             runCatching {
                 (service.getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(view)
             }.onFailure { Log.w(TAG, "bal-probe unmount failed", it) }
+        }
+
+        /**
+         * P2 探针（[probeView]/[probeProgressView]）的卸载路径，与 [unmountBalProbeOverlay]
+         * 同款：摘窗口 + 清两个静态引用（进度行是 container 的子 View，随窗口一并消失，
+         * 只需清引用）；服务 onDestroy 时调用，重复调用幂等。
+         */
+        private fun unmountProbeOverlay() {
+            val service = instance ?: return
+            val view = probeView ?: return
+            probeView = null
+            probeProgressView = null
+            runCatching {
+                (service.getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(view)
+            }.onFailure { Log.w(TAG, "probe overlay unmount failed", it) }
         }
 
         private fun balTryStart(service: AccessibilityService, why: String) {

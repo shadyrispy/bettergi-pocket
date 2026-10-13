@@ -1,6 +1,7 @@
 package com.bettergi.pocket.pcdata
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.bettergi.pocket.notice.NoticeCenter
 import com.bettergi.pocket.scan.GoodRepository
@@ -11,6 +12,7 @@ import com.esc.irminsul.capture.DataStatusSink
 import com.esc.irminsul.capture.IrminsulCapture
 import com.esc.irminsul.capture.SessionPhase
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -83,12 +85,23 @@ object CaptureSession {
     private var watcher: Job? = null
     private var blindSince = 0L
 
-    /** 一次会话的标识：提醒的 onceKey 挂它，保证"同一句提示每会话最多报一次"。 */
+    /**
+     * 一次会话的标识：提醒的 onceKey 挂它，保证"同一句提示每会话最多报一次"。
+     * ⚠️ 必须取**单调钟**（[SystemClock.elapsedRealtime]）：`currentTimeMillis` 可被校时
+     * 回拨/前跳，回拨窗口内的两次会话会拿到同一个 token ⇒ onceKey 误去重 + watcher
+     * 换代判定（`myToken == sessionToken`）失真。跨线程读（watcher 协程）⇒ @Volatile。
+     */
+    @Volatile
     private var sessionToken = 0L
 
-    /** [CaptureGate] 的凭据：只有拿着它的那次会话能让位（0 = 没占着闸门）。 */
-    @Volatile
-    private var gateTicket = 0L
+    /**
+     * [CaptureGate] 的凭据：只有拿着它的那次会话能让位（0 = 没占着闸门）。
+     *
+     * AtomicLong：释放是「读 + 清零」的 RMW，并发释放者（stop / watcher 收尾）若各自
+     * 读到旧值再各自清零，中间的「新会话刚写入的凭据」会被后一个输家抹成 0 ⇒
+     * 闸门被新会话占着却没有 ticket 能放它（该占位永久滞留）。见 [releaseGate]。
+     */
+    private val gateTicket = AtomicLong(0L)
 
     private val sink = object : DataStatusSink {
         override fun publish(status: DataStatus) {
@@ -102,7 +115,7 @@ object CaptureSession {
     fun start(context: Context): String? {
         val ticket = CaptureGate.tryEnter()
         if (ticket == 0L) return message("已有抓包在跑（在线会话或 pcap 回放），本次不启动")
-        gateTicket = ticket
+        gateTicket.set(ticket)
         return try {
             startLocked(context)
         } catch (e: Exception) {
@@ -132,7 +145,7 @@ object CaptureSession {
         latest.value = DataStatus()
         exported.set(false)
         blindSince = 0L
-        sessionToken = System.currentTimeMillis()
+        sessionToken = SystemClock.elapsedRealtime()
         when (val started = IrminsulCapture.start(app, CaptureSource.Vpn, sink,
             IrminsulCapture.Config(completionNotification = false))) {
             is CaptureResult.Ok -> Unit
@@ -154,10 +167,20 @@ object CaptureSession {
         return message(text)
     }
 
-    /** 只还**自己**那份凭据；已被别人接手时是空操作（见 [CaptureGate] 的 P2-1 说明）。 */
+    /**
+     * 只还**自己**那份凭据；已被别人接手时是空操作（见 [CaptureGate] 的 P2-1 说明）。
+     *
+     * 「读 + 清零」是**原子 RMW**（compareAndSet），输掉竞争的调用者一律空操作：
+     * - 字段已被并发释放者清零（读到 t，CAS 时已是 0）⇒ 该放的人已放，无需动作；
+     * - 字段已被**新会话**换成新凭据（读到 T1，CAS 时已是 T2）⇒ 绝不把 T2 抹掉——
+     *   旧实现非原子 RMW 会读到 T1 却在 T2 写入后清零字段，令新会话从此 `exit(0)`
+     *   恒空操作、闸门被占着却再无人能放（"占位滞留"）。
+     * 与 [CaptureGate.exit] 的凭据校验叠加后，释放只可能落在「我读到且清掉的那一份」上。
+     */
     private fun releaseGate() {
-        val t = gateTicket
-        gateTicket = 0L
+        val t = gateTicket.get()
+        if (t == 0L) return
+        if (!gateTicket.compareAndSet(t, 0L)) return
         CaptureGate.exit(t)
     }
 
@@ -174,7 +197,7 @@ object CaptureSession {
         // 只有**本会话**持闸门时才允许拆进程级管线：回放期间 `isCapturing` 同样为真
         // （文件源也走 start），只看 isRunning 会把别人正在跑的回放掐成"已结束"，
         // 而那条通路会把半截库存当成跑完落盘。
-        val mine = gateTicket != 0L
+        val mine = gateTicket.get() != 0L
         val wasRunning = isRunning()
         if (mine) stopTunnel(app)
         watcher?.cancel()

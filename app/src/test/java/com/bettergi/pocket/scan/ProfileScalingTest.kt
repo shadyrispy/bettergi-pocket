@@ -86,4 +86,23 @@ class ProfileScalingTest {
         assertEquals(0.75, p.scaleY, 1e-3)
         assertTrue("22:9 vs 20:9 distortion=${p.aspectDistortion}", p.aspectDistortion < 0.02)
     }
+
+    /**
+     * 2244x1080 —— 现役设备档（#223）。
+     *
+     * 覆盖：**回落到基准 profiles.json 时**的形状 —— sx=2244/3200=0.70125、sy=0.75、失真 ≈7.0%，
+     *   与 2560x1080 同带（两者都不是 20:9，横向相对纵向压缩 ≈7%）；断言口径与 2560 档逐条相同。
+     * 不覆盖：真机实际加载的是专属档 `profiles_2244x1080.json`（base 2244x1080 ⇒ scale=1）——
+     *   本用例不加载它、不校验其中的任何坐标（专属档的键完整性由 ProfileGridAuditTest /
+     *   DslAssetsIntegrityTest 守）。本用例只钉「基准档回落」这条不变式，不编造无出处的期望值。
+     */
+    @Test
+    fun `2244x1080 (active tier) keeps the same 7-percent band as 2560`() {
+        val p = profile()
+        p.calibrate(2244, 1080)
+        assertEquals(0.70125, p.scaleX, 1e-3)
+        assertEquals(0.75, p.scaleY, 1e-3)
+        // 20.8:9 vs 基准 20:9 → 偏差 6.95%：属「接近等比」但不是等比 ⇒ 回落坐标必须带 ~7% 的已知偏差
+        assertTrue("distortion=${p.aspectDistortion}", p.aspectDistortion > 0.05 && p.aspectDistortion < 0.08)
+    }
 }

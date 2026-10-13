@@ -571,7 +571,11 @@ class TriggerForegroundService : Service() {
             }
             ACTION_DEBUG_SCAN_FLOW -> {
                 val flow = intent.getStringExtra(EXTRA_FLOW) ?: "artifact_scan"
-                val maxPages = intent.getIntExtra(EXTRA_MAX_PAGES, Int.MAX_VALUE)
+                // ★ 钳位与产线同口径（[maxPagesOrDefault]：0/负数 = 不限 → Int.MAX_VALUE）：
+                //   原先直传 EXTRA_MAX_PAGES 给 startScan，绕过了产线（settings.scanMaxPages）
+                //   必过的这道钳位 ⇒ 只有显式 `--ei maxPages 0` 会变成"扫 0 页"而不是"不限"。
+                //   改走同一函数后，调试入口仍可用 `--ei maxPages 0` 表达"不限"。
+                val maxPages = maxPagesOrDefault(intent.getIntExtra(EXTRA_MAX_PAGES, 0))
                 // ⚠️ 2026-09-17 默认改为 **false**：几何起点（x=638，两卡缝隙）实测让 BS 的滚动**被截断**
                 // （落地条带 L 仅 501~516px = **1.7 行**，而遍历 3 行 ⇒ 重叠 1.3 行 ⇒ 同件大量重复，
                 //  武器扫描"多 126"）；改用 profile 坐标（x=1614）后落地 **777~812px = 2.7 行** ✓ 稳定。

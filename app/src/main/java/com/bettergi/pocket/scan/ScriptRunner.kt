@@ -364,9 +364,9 @@ class ScriptRunner(
                     // 有界重试（挂死 ⇒ 扫描协程不再 add ⇒ 重试必然拿到稳定快照，见该类注释），
                     // 整个导出体包 runCatching——失败走 RecognitionLog + logcat，绝不裸抛。
                     runCatching {
-                        val arts = ResultsSnapshot.withRetry { engine.results.toList() }
-                        val wps = ResultsSnapshot.withRetry { engine.resultsWeapons.toList() }
-                        val chs = ResultsSnapshot.withRetry { engine.resultsCharacters.toList() }
+                        val arts = ResultsSnapshot.snapshot(engine.results)
+                        val wps = ResultsSnapshot.snapshot(engine.resultsWeapons)
+                        val chs = ResultsSnapshot.snapshot(engine.resultsCharacters)
                         if (arts.isEmpty() && wps.isEmpty() && chs.isEmpty()) {
                             Log.w(TAG, "导出跳过（$why）：无已入库结果")
                             return
@@ -626,9 +626,15 @@ internal object MainDispatchGate {
  * A13（2026-09-30）：并发容器的**有界重试**快照（纯 JVM，ScriptRunnerTest 直接驱动）。
  *
  * 背景：会话级看门狗线程在扫描协程可能仍持锁 add 的情况下读 engine.results（ArrayList）
- * ⇒ ConcurrentModificationException。有界重试必然成功的依据（工单口径）：看门狗只在判
+ * ⇒ ConcurrentModificationException；扩容窗口还有 IOOBE 与「null 槽」两种撕裂形态
+ * （成因与处理见 [snapshot]）。有界重试必然成功的依据（工单口径）：看门狗只在判
  * 「挂死」（SESSION_STALL_MS 无进展）后才并发读——挂死 = 扫描协程不再 add ⇒ 重试必然拿到
  * 稳定快照。retries 耗尽仍冲突 ⇒ 原样抛出，交给 exportNow 的 runCatching 兜底（绝不裸抛）。
+ *
+ * 为什么不按「给 writer 加锁 / 换并发容器」修：writer 在 ScanEngine 的领域文件里裸
+ * `add`（ArtifactDomainPanels/ScanControlDomain），既没有可同步的 writer 锁，加锁或换
+ * 容器都要动引擎核心且都是热路径 ⇒ 本对象内的重试是**唯一不动 writer** 的修法，
+ * 也是本通道（看门狗抢救导出）已采纳的既有机制。
  *
  * 测试口径：真 CME 的并发构造不稳定，单测用「第 N 次调用才成功」的桩模拟冲突；
  * 真机验证方式：DEBUG_SCAN_FLOW 注入挂死触发看门狗导出，观察 logcat BetterGI.ScanRunner
@@ -637,7 +643,34 @@ internal object MainDispatchGate {
 internal object ResultsSnapshot {
 
     /**
-     * @param retries 总尝试次数（≥1）；每次 CME 后睡 [retryDelayMs] 再试
+     * 引擎结果列表的**撕裂感知**快照（看门狗导出路径的唯一入口）。
+     *
+     * 为什么不能直接 `list.toList()`：`ArrayList.toArray()` 在并发 add 的扩容窗口里读到的
+     * size 与 elementData 不是同一时刻的状态 ⇒ 两条损坏形态：
+     * - `ArrayIndexOutOfBoundsException`（size 已增、底层数组还是旧的）；
+     * - **null 槽**（按新 size 拷贝时尾部被补齐 null）——它不在快照时炸，而在导出/序列化
+     *   时才炸（或更糟：静默导出残缺内容）。
+     * 两者都按「撕裂快照」处理：重试（挂死前提见类注释，重试必然收敛）；null 槽伪装成
+     * CME 进入同一条重试路径。采样即校验的代价是 O(n) 一次 `contains(null)` 等价的遍历，
+     * 只发生在 120s 停滞抢救路径上，不在扫描热路径。
+     */
+    fun <T> snapshot(list: List<T>, retries: Int = 3, retryDelayMs: Long = 50L): List<T> =
+        withRetry(retries, retryDelayMs) {
+            val copy = list.toList()
+            if (hasNullSlot(copy)) {
+                throw ConcurrentModificationException("torn snapshot: null slot from concurrent growth")
+            }
+            copy
+        }
+
+    /** 快照里是否有 null 槽（`List<*>` 以避免泛型非空比较告警，供 [snapshot] 用）。 */
+    private fun hasNullSlot(list: List<*>): Boolean {
+        for (e in list) if (e == null) return true
+        return false
+    }
+
+    /**
+     * @param retries 总尝试次数（≥1）；每次撕裂异常（CME / IOOBE）后睡 [retryDelayMs] 再试
      *                （睡眠被打断则不吞中断标记、不再睡，立即补试剩余次数）
      */
     fun <T> withRetry(retries: Int = 3, retryDelayMs: Long = 50L, snapshot: () -> T): T {
@@ -646,7 +679,10 @@ internal object ResultsSnapshot {
         repeat(retries) { attempt ->
             try {
                 return snapshot()
-            } catch (e: ConcurrentModificationException) {
+            } catch (e: Exception) {
+                // A13 原只认 CME；扩容窗口的 IOOBE（AIOOBE 是其子类）是同一处撕裂的
+                // 另一种抛法 ⇒ 一并重试；其余异常照旧原样穿透。
+                if (e !is ConcurrentModificationException && e !is IndexOutOfBoundsException) throw e
                 last = e
                 if (attempt < retries - 1) {
                     try {

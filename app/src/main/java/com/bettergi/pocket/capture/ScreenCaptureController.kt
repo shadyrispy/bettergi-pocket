@@ -564,10 +564,12 @@ class ScreenCaptureController(
      * 输出格式**刻意对齐 [VoteJudges.thumbChangedFraction]**：每 3 字节 = 1 个块（R,G,B 均值，0..255），
      * 长度 = `blocksX*blocksY*3` ⇒ 可直接复用既有的 `tol=THUMB_DIFF_TOL(2)` 容差经验。
      *
-     * ⚠️ 两个坑：
+     * ⚠️ 三个坑：
      * 1. 行距用 [cachedPixelStride]（RGBA_8888 通常 4，但**不可硬编码**）；
      *    缓存内每行已由 `copyRgbaImage` 压缩为紧凑（row pitch = pixelStride）。
      * 2. **不量化**：现有容差 `tol=2` 是作用在 0..255 上的（0.8%）；若 `shr 4` 到 0..15 会让容差变成 13%，失真。
+     * 3. 采样段必须**持 [lock]**走字节（见函数体注释）：缓存 RGBA 由 poller 在锁内原地覆写，
+     *    锁外采样会读到半新半旧的撕裂帧。
      *
      * @param out 长度须 ≥ `blocksX*blocksY*3`
      * @return false = 无缓存帧 / 参数非法（**调用方必须回退旧路径**）
@@ -579,55 +581,56 @@ class ScreenCaptureController(
         blocksY: Int = SIG_BLOCKS_Y,
     ): Boolean {
         if (out.size < blocksX * blocksY * 3) return false
-        var bufRef: ByteArray? = null
-        var w = 0
-        var h = 0
-        var ps = 4
+        // ★ 采样段**全程持 [lock]**（审计：撕裂帧）：缓存 RGBA 由 poller 在同一个锁里
+        //   原地覆写（`copyRgbaImage`，尺寸不变时不换数组）。原先只持锁取引用、锁外走
+        //   字节 ⇒ 采样可能与整帧 memcpy 交错，读到半新半旧的帧（"帧变了/没变"偶发误判，
+        //   虽然有 tol=2 容差与多采样掩护）。持锁走完 288 次字节读（~µs，相对 poller
+        //   整帧 memcpy 的 ms 级可忽略）恢复不变式：**单次签名对应一帧完整像素** ——
+        //   poller 要么在采样前写完、要么在采样后开始，不存在中间态。
         synchronized(lock) {
             ensureFramePollerLocked()
             if (!hasCachedFrame) return false
-            bufRef = cachedRgba
-            w = cachedWidth
-            h = cachedHeight
-            ps = cachedPixelStride
-        }
-        val src = bufRef ?: return false
-        if (w <= 0 || h <= 0 || ps < 3) return false
-        val x0 = rect.x.coerceIn(0, w - 1)
-        val y0 = rect.y.coerceIn(0, h - 1)
-        val rw = rect.width.coerceIn(1, w - x0)
-        val rh = rect.height.coerceIn(1, h - y0)
+            val src = cachedRgba
+            val w = cachedWidth
+            val h = cachedHeight
+            val ps = cachedPixelStride
+            if (w <= 0 || h <= 0 || ps < 3) return false
+            val x0 = rect.x.coerceIn(0, w - 1)
+            val y0 = rect.y.coerceIn(0, h - 1)
+            val rw = rect.width.coerceIn(1, w - x0)
+            val rh = rect.height.coerceIn(1, h - y0)
 
-        var o = 0
-        for (by in 0 until blocksY) {
-            val ya = y0 + rh * by / blocksY
-            val yb = (y0 + rh * (by + 1) / blocksY).coerceAtLeast(ya + 1)
-            for (bx in 0 until blocksX) {
-                val xa = x0 + rw * bx / blocksX
-                val xb = (x0 + rw * (bx + 1) / blocksX).coerceAtLeast(xa + 1)
-                var sr = 0
-                var sg = 0
-                var sb = 0
-                var n = 0
-                for (sy in 0 until SIG_SAMPLES_PER_AXIS) {
-                    val y = (ya + (yb - ya) * sy / SIG_SAMPLES_PER_AXIS).coerceIn(0, h - 1)
-                    for (sx in 0 until SIG_SAMPLES_PER_AXIS) {
-                        val x = (xa + (xb - xa) * sx / SIG_SAMPLES_PER_AXIS).coerceIn(0, w - 1)
-                        val p = (y * w + x) * ps
-                        sr += src[p].toInt() and 0xFF       // RGBA：R 在前
-                        sg += src[p + 1].toInt() and 0xFF
-                        sb += src[p + 2].toInt() and 0xFF
-                        n++
+            var o = 0
+            for (by in 0 until blocksY) {
+                val ya = y0 + rh * by / blocksY
+                val yb = (y0 + rh * (by + 1) / blocksY).coerceAtLeast(ya + 1)
+                for (bx in 0 until blocksX) {
+                    val xa = x0 + rw * bx / blocksX
+                    val xb = (x0 + rw * (bx + 1) / blocksX).coerceAtLeast(xa + 1)
+                    var sr = 0
+                    var sg = 0
+                    var sb = 0
+                    var n = 0
+                    for (sy in 0 until SIG_SAMPLES_PER_AXIS) {
+                        val y = (ya + (yb - ya) * sy / SIG_SAMPLES_PER_AXIS).coerceIn(0, h - 1)
+                        for (sx in 0 until SIG_SAMPLES_PER_AXIS) {
+                            val x = (xa + (xb - xa) * sx / SIG_SAMPLES_PER_AXIS).coerceIn(0, w - 1)
+                            val p = (y * w + x) * ps
+                            sr += src[p].toInt() and 0xFF       // RGBA：R 在前
+                            sg += src[p + 1].toInt() and 0xFF
+                            sb += src[p + 2].toInt() and 0xFF
+                            n++
+                        }
                     }
+                    val k = if (n > 0) n else 1
+                    out[o] = (sr / k).toByte()
+                    out[o + 1] = (sg / k).toByte()
+                    out[o + 2] = (sb / k).toByte()
+                    o += 3
                 }
-                val k = if (n > 0) n else 1
-                out[o] = (sr / k).toByte()
-                out[o + 1] = (sg / k).toByte()
-                out[o + 2] = (sb / k).toByte()
-                o += 3
             }
+            return true
         }
-        return true
     }
 
     /**
