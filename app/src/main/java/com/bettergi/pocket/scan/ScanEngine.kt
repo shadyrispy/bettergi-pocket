@@ -1730,6 +1730,22 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          */
         const val SETTLE_CHANGE_WINDOW_MS = 1500L
 
+        /**
+         * ★ 2026-10-14（#293）：命令滑动后 [awaitGridStable] 的**最早判稳时刻**（ms，从 settle 起点算）。
+         *
+         * 为什么需要它（实测，BS 2244，`20261014_192411_2244_artifact_lock_dbg.log`）：
+         * 注入的三段式滑动**标称 800ms**（400 快滑 90% + 300 缓爬 10% + 100 回退），实测整链闭合
+         * `+804ms`；而 `actions.swipe` 是**异步派发**（不等手势走完），段1 走完 90% 位移后
+         * 段2/3 只剩 ~10% 慢爬 —— 24×16 缩略图**看不见**（`diff=0.000`）⇒ settle 在 `629ms`
+         * 就判稳返回，返回帧是**手势中途的位移帧**。顶页 row0（套装列表第一格 = 目标套装所在）
+         * 的字被移出 [textLineCrop] 的 ±slack 搜索窗 ⇒ `行位没量到 ⇒ 不读不点`（+32.272 / +32.524），
+         * 直至甩尾停稳（+32.781）才读得到 ⇒ `selected=0` ⇒ `not_applied` ⇒ 退化全量扫。
+         * 同一根因还让多轮回顶时「下一轮派发打断上一链」（`swipe3 段2 断…手指未抬起`）。
+         *
+         * 取值 **900** = 整链 804ms + ~96ms 余量（覆盖派发起点对齐误差与 ~1fps 的采样抖动）。
+         * 只**延后判稳起点**，不改 moved/到顶口径、不改释放路径；[SETTLE_MAX_MS]=6000 仍是硬上限。
+         */
+        const val SWIPE_CHAIN_MS = 900L
 
         const val SETTLE_FRAME_TIMEOUT_MS = 800L
         /** `pollAnchorReady` 的轮询步长（enterScreen 末端就绪）。一次采样 = 抓帧 + 1 次 rec ≈ 10~25ms。 */

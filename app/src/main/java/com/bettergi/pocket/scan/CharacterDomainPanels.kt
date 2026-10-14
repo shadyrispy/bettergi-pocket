@@ -31,6 +31,7 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.FILTER_PANEL_BACK_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.MAX_ROSTER_PAGES
 import com.bettergi.pocket.scan.ScanEngine.Companion.MAX_SNAP_ROUNDS
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_RAW_DUMP
+import com.bettergi.pocket.scan.ScanEngine.Companion.SWIPE_CHAIN_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
 import com.bettergi.pocket.scan.ScanEngine.Companion.TALENT_LEVEL_MAX
 import com.bettergi.pocket.scan.ScanEngine.Companion.TALENT_REREAD_DELAY_MS
@@ -228,7 +229,7 @@ internal suspend fun ScanEngine.traverseRoster(
             val before = try { freshFrame() } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
             val beforeThumb = before?.let { try { VoteJudges.gridThumb(it, profile, gridKey) } finally { it.release() } }
             actions.swipe(fx, fy, tx, ty)
-            val after = awaitGridStable(profile, gridKey)
+            val after = awaitGridStable(profile, gridKey, minElapsedMs = SWIPE_CHAIN_MS)
             val afterThumb = try { VoteJudges.gridThumb(after, profile, gridKey) } finally { after.release() }
             val looped = firstSeen != null && charName == firstSeen
             Log.i(

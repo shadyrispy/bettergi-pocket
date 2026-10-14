@@ -22,6 +22,7 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_REFRESH_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_MAX_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_STABLE_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SNAP_TOL
+import com.bettergi.pocket.scan.ScanEngine.Companion.SWIPE_CHAIN_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
 import com.bettergi.pocket.recognition.name.GoodNames
 import com.bettergi.pocket.log.RecognitionLog
@@ -472,7 +473,8 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
             )
             actions.swipe(nx, ny, nx, ny + profile.scale(rowPitch / 2, profile.scaleY))
             // 半行位移喂给 24×16 缩略图的"确实变了"判据太弱 ⇒ 这里只等画面静止。
-            awaitGridStable(profile, gridKey).release()
+            // minElapsedMs：往回轻推也是三段链注入，必须等手势闭合再判稳（#293）。
+            awaitGridStable(profile, gridKey, minElapsedMs = SWIPE_CHAIN_MS).release()
             continue
         }
         pageNudges = 0
@@ -497,7 +499,10 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
         )
         // requireChange=true：必须**先看到列表变了**才允许判稳定；超窗未变会告警，
         // 那种情况才真的可能是"滑动未送达 / 确实到底"。
-        val stable = awaitGridStable(profile, gridKey, requireChange = true)
+        // minElapsedMs：翻页也是三段链注入，等手势闭合再判稳（#293）。
+        val stable = awaitGridStable(
+            profile, gridKey, requireChange = true, minElapsedMs = SWIPE_CHAIN_MS,
+        )
         stable.release()
     }
     if (pending.isNotEmpty()) Log.w(TAG, "setFilter: 目标未全部点选，剩余=$pending")

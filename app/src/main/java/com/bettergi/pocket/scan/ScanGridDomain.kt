@@ -26,6 +26,7 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_CHANGE_WINDOW_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_FRAME_TIMEOUT_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_MAX_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SUBST_STALE_MIN
+import com.bettergi.pocket.scan.ScanEngine.Companion.SWIPE_CHAIN_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
 import com.bettergi.pocket.scan.ScanEngine.Companion.THUMB_COLS
 import com.bettergi.pocket.scan.ScanEngine.Companion.THUMB_ROWS
@@ -1109,7 +1110,9 @@ internal suspend fun ScanEngine.pagedGridCore(
             )
         }
         swipeLogged(gridKey, swipeFrom.x, swipeFrom.y, swipeFrom.y - injected, "主滑")
-        val latest = awaitGridStable(profile, gridKey, requireChange = true)
+        val latest = awaitGridStable(
+            profile, gridKey, requireChange = true, minElapsedMs = SWIPE_CHAIN_MS,
+        )
         // ── ★ 相位消化（2026-09-14 整体改造）：唯一主判据 = fpband 落地条带 ──────────────
         //   res = L − advTarget（raw）；φ_mod = centeredMod(**−res**, rowPitch)（补偿量=target−L，
         //   与 withGridRowOffset 的 y+=φ 语义一致；符号写反过一次，见 GridAlign.phiFromLanding）。
@@ -1454,6 +1457,8 @@ private fun ScanEngine.emitCellLog(
 // @return true = 判定到顶（**且至少观察到过一次手势造成的画面变化**，或反向探针证明手势是活的）；
 //   false = 打满 maxRounds / stopRequested 中断 / 该网格无 advance /
 //   ★ #258：前向与**反向**都读不到变化 ⇒ 无法区分"短到不用滚"与"手势被吞"，不替调用方赌到顶。
+//   ⚠️ #293：判据失明时反向探针会**真位移却读不出来**，故 false 路径退出前会补一次前向滑把列表
+//   拉回顶（见那条分支的注释）；不能假设"返回 false ⇒ 列表还在原处"。
 internal suspend fun ScanEngine.swipeGridToTop(
     gridKey: String,
     logTag: String,
@@ -1531,6 +1536,16 @@ internal suspend fun ScanEngine.swipeGridToTop(
             "$logTag: 回顶：上滑与**反向**滑动都没让画面变化 ⇒ 无法区分「这一列短到不用滚」与" +
                 "「手势被吞/x 落点无效」⇒ **不判定到顶**（本列可能从未知行号起步，$gridKey）",
         )
+        // ★ #293：反向探针是**破坏性测量**，退出前必须把它造成的位移清掉。
+        //   探针有两种形态，读数同形（都报 p.moved=false）：① 手势被吞 ⇒ 列表没动，无事可做；
+        //   ② 判据在**本网格上失明** ⇒ 探针其实真把列表推下去一页，只是没被读出来。
+        //   ② 在 set_filter_popup 上是实测常态：套装的 24×16 缩略（VoteJudges.gridThumb）对整块位移
+        //   的 diff 实测仅 0.008~0.018、静止态 0.000，均 << GRID_END_DIFF=0.35 ⇒ `moved` 恒 false。
+        //   此时若直接 return false，列表就停在被探针推下去的下一页，而调用方 setFilter 拿回顶的
+        //   返回值**丢弃**、按"已在顶"继续逐行读 ⇒ 首行目标永远读不到 ⇒ selected=0 ⇒ 退化为全量扫。
+        //   补这一次前向滑：列表在顶时它是幂等空操作（前向滑方向就是回顶），被推下去时它把列表滑回顶。
+        val recover = swipeThumbRound(gridKey, fx, fy, tx, ty)
+        logTopRound(logTag, i, recover)
         return false
     }
     Log.w(TAG, "$logTag: 回顶达上限 $maxRounds 次仍未判定到顶")
@@ -1561,7 +1576,7 @@ private suspend fun ScanEngine.swipeThumbRound(
 ): ThumbRound {
     val tb = gridThumbOf(gridKey)
     actions.swipe(sx, sy, ex, ey)
-    val settled = awaitGridStable(profile, gridKey)
+    val settled = awaitGridStable(profile, gridKey, minElapsedMs = SWIPE_CHAIN_MS)
     val ta = try {
         VoteJudges.gridThumb(settled, profile, gridKey)
     } finally {
@@ -1638,6 +1653,7 @@ internal suspend fun ScanEngine.awaitGridStable(
     profile: ScreenProfile,
     gridKey: String,
     requireChange: Boolean = false,
+    minElapsedMs: Long = 0L,
 ): Mat {
     val start = clock()
     var prevThumb: ByteArray? = null
@@ -1655,6 +1671,15 @@ internal suspend fun ScanEngine.awaitGridStable(
             val thumb = VoteJudges.gridThumb(latest, profile, gridKey)
             if (thumb != null) {
                 val diff = VoteJudges.thumbChangedFraction(prevThumb, thumb)
+                // ★ 2026-10-14（#293）：手势链闭合前**不计稳**（语义见 [SWIPE_CHAIN_MS]）。
+                //   段1 走完 90% 位移后，段2/3 的慢爬在 24×16 缩略图上 diff=0.000 ⇒ 若不设这一闸，
+                //   settle 会在 629ms 就判稳返回**手势中途的位移帧**（顶页 row0 的字被移出搜索窗）。
+                //   照常记 sawChange，否则 requireChange 会在手势后白烧满 [SETTLE_CHANGE_WINDOW_MS]。
+                if (clock() - start < minElapsedMs) {
+                    if (!(diff != null && diff <= GRID_SIMILAR_DIFF)) sawChange = true
+                    prevThumb = thumb
+                    continue
+                }
                 if (diff != null && diff <= GRID_SIMILAR_DIFF) {
                     // ★ 2026-09-14（`requireChange`，滑动后专用）：本循环只判「连续 700ms 帧间差 ≤ 阈值」，
                     //   从不要求"先看到变化" ⇒ 而手势是**异步派发**（见 swipeGridToTop 注释：780ms 手势不等走完）
