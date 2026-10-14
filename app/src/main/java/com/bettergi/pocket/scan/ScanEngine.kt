@@ -1486,10 +1486,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         // ── ★ 就绪信号直采（2026-09-12，取代上面的「抓帧 + OCR」轮询）──
         /**
          * 签名轮询步长。**实测面板内容 133ms（中位）就绪**（PERF-timing.md，样本 67/133/298），
-         * 旧路径却花 428ms/格（= delay(120×3) + 每轮抓帧 + 每轮 OCR）。步长取 40ms 即可
-         * 与帧率（~33ms）解耦；可由 `--es timing "sigpoll=…"` 覆盖。
+         * 旧路径却花 428ms/格（= delay(120×3) + 每轮抓帧 + 每轮 OCR）。
+         * ★ 2026-10-14：40→20。全量 artifact 扫描 A/B（BS，57 页 / 1026 格）：sigpoll=20 臂与
+         * 默认臂 **cells 逐位相同、判滑空=0、吞击重发落在 5~7 的同轮噪声带内**，
+         * panel 263593→242657ms ⇒ −4.6%。可由 `--es timing "sigpoll=…"` 覆盖。
          */
-        const val PANEL_SIG_POLL_MS = 40L
+        const val PANEL_SIG_POLL_MS = 20L
         /** 签名分块数（列×行）；格式与 [VoteJudges.thumbChangedFraction] 对齐（每块 3 字节）。 */
         const val SIG_BLOCKS_X = 8
         const val SIG_BLOCKS_Y = 4
@@ -1713,7 +1715,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   300ms 时被吞率 53~67%、落地中位 13~19px；700ms 时被吞率 33~40%、中位 128~139px。
         //   机制：滑动后存在 ~0.4s 低速惯性尾（帧间变化恰在 0.10 阈值附近）⇒ 300ms 会在尾巴里判"稳定"
         //   ⇒ 下一次滑动打在滚动动画中 ⇒ 被整段吞掉。700ms 让 settle 跨过尾巴。
-        const val SETTLE_STABLE_MS = 700L
+        // ★ 2026-10-14：700→350。**上述 09-13 的坑已被 09-14 的 requireChange 守卫堵死**
+        //   （命令滑动后必须先观察到一次变化才允许判稳定，见 SETTLE_CHANGE_WINDOW_MS），
+        //   故 350ms 不会再误判惯性尾为稳定帧。全量 artifact 扫描 A/B（BS，57 页 / 1026 格）：
+        //   sstable=350 臂与默认臂 **cells 逐位相同（1026）、判滑空=0、吞击重发=5 落在默认臂 5~7 的噪声带内**，
+        //   settle 87960→67320ms ⇒ 整轮 −4.8%。可由 `--es timing "sstable=…"` 覆盖。
+        const val SETTLE_STABLE_MS = 350L
         const val SETTLE_MAX_MS = 6000L
 
         /**
