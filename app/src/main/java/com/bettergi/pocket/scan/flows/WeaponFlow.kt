@@ -1,8 +1,14 @@
 package com.bettergi.pocket.scan.flows
 
+import android.util.Log
 import com.bettergi.pocket.scan.ScanEngine
+import com.bettergi.pocket.scan.ScanEngine.Companion.GRID_END_DIFF
+import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
+import com.bettergi.pocket.scan.VoteJudges
+import com.bettergi.pocket.scan.awaitGridStable
 import com.bettergi.pocket.scan.clickChainEntry
 import com.bettergi.pocket.scan.enterScreen
+import com.bettergi.pocket.scan.gridThumbOf
 import com.bettergi.pocket.scan.pagedGridNative
 import com.bettergi.pocket.scan.readCount
 import com.bettergi.pocket.scan.runVisitBody
@@ -108,8 +114,37 @@ internal suspend fun ScanEngine.runWeaponSteps() {
     nativeStep("enterScreen") { enterScreen(WeaponFlow.ENTER_BAGPACK) }
     nativeStep("enterScreen") { enterScreen(WeaponFlow.ENTER_WEAPON_TAB) }
     nativeStep("clicks") {
-        clickChainEntry(WeaponFlow.SORT_CHAIN_ENTRY)
-        clickChainEntry(WeaponFlow.SORT_CHAIN_ENTRY)
+        // ★ #280：开局归零 = 排序钮两次点击「强制游戏重排 + 回顶」（相对开关，两下净零）。
+        //   旧写法是**盲点两下**：不等待、不校验 —— 任一下被吞（输入节流 / 落在重排动画中）时
+        //   列表停在上一轮的位置，起扫行号随之漂移（件数 161/163 摆动、md5 不为空的根因）。
+        //   现在每下点击后等画面停稳，并确认网格**确实重排**（缩略图差异 > GRID_END_DIFF）。
+        //   未确认只报 W（归因本轮起点不可信），**不自动补点**：相对开关补点会把排序翻成反向。
+        var prevThumb = gridThumbOf(WeaponFlow.GRID)
+        for (i in 1..2) {
+            clickChainEntry(WeaponFlow.SORT_CHAIN_ENTRY)
+            val settled = awaitGridStable(profile, WeaponFlow.GRID, requireChange = true)
+            val thumb = try {
+                VoteJudges.gridThumb(settled, profile, WeaponFlow.GRID)
+            } finally {
+                settled.release()
+            }
+            val diff = VoteJudges.thumbChangedFraction(prevThumb, thumb)
+            if (diff == null) {
+                Log.w(
+                    TAG,
+                    "weaponSort 归零#$i: 两侧缩略图取不到 ⇒ **无法校验**是否重排（本轮起扫原点存疑）",
+                )
+            } else if (diff <= GRID_END_DIFF) {
+                Log.w(
+                    TAG,
+                    "weaponSort 归零#$i: 点击后网格**未确认重排**（diff=%.3f ≤ $GRID_END_DIFF）" +
+                        "⇒ 该下疑似被吞，列表可能未回顶（本轮起扫原点不可信）".format(diff),
+                )
+            } else {
+                Log.i(TAG, "weaponSort 归零#$i: 网格重排已确认（diff=%.3f）".format(diff))
+            }
+            prevThumb = thumb
+        }
     }
     nativeStep("readCount") { readCount(WeaponFlow.READ_COUNT) }
     nativeStep("pagedGrid") {
