@@ -78,6 +78,14 @@ class InputAccessibilityService : AccessibilityService() {
             return
         }
         lastAppPackage = pkg
+        // ★ #283：同包名的 MiHoYo SDK 登录/切号页只能靠**类名**区分（见 [lastAppClass]）。
+        //   只记「像 Activity」的类名；顶层换成非 Activity 窗（`android.widget.RelativeLayout`，
+        //   游戏包也会发）就清空 —— 说明上一个 Activity 已不在顶层。
+        //   ⚠️ 10-14 华为实测否掉了旧的「仅换包才清」：从 SDK 页回到世界**只发一条非 Activity 事件**
+        //   （SdkActivity → RelativeLayout），此后**再无任何 Activity 事件** ⇒ 旧逻辑让类名恒停在
+        //   SdkActivity，注入闸把整轮正常扫描全拒（#283 的假阳性面；日志见 runlogs/20261014_huawei_283_repro）。
+        val cls = event.className?.toString()
+        lastAppClass = cls?.takeIf { GenshinPackages.isActivityLikeClass(it) }
         overlayHeldBy = null             // 真应用重新拿到前台 ⇒ 弹层已消失
         selfUiCover = null               // 同上：外来应用盖上来，自家 Activity 就不算挡着了
     }
@@ -90,6 +98,7 @@ class InputAccessibilityService : AccessibilityService() {
         if (instance === this) {
             instance = null
             lastAppPackage = null
+            lastAppClass = null
             overlayHeldBy = null
             selfUiCover = null
             notifyStateChanged()
@@ -111,6 +120,8 @@ class InputAccessibilityService : AccessibilityService() {
         private const val KEY_TEXT = "text"
         private const val KEY_CONNECTED = "connected"
         private const val KEY_LAST_PACKAGE = "last_package"
+        /** ★ #283：前台应用最近一个 Activity 类名（区分同包名的 MiHoYo SDK 登录/切号页）。 */
+        private const val KEY_LAST_CLASS = "last_class"
         /** 压在上面的 transient 窗包名（只读观测用，不参与放行判定）。 */
         private const val KEY_OVERLAY_PKG = "overlay_pkg"
         /** 挡住游戏的自家 Activity 类名（只给起扫闸门读，见 [selfUiCover]）。 */
@@ -156,6 +167,21 @@ class InputAccessibilityService : AccessibilityService() {
 
         @Volatile
         private var lastAppPackage: String? = null
+
+        /**
+         * ★ #283：前台**应用**最近一个 Activity 类名（非 Activity 窗 ⇒ 置空）。
+         *
+         * 为什么单开一笔：[lastAppPackage] 只有包名，而 MiHoYo SDK 登录/切号页**与游戏同包名**
+         * （`com.miHoYo.Yuanshen/com.miHoYo.sdk.platform.SdkActivity`）⇒ 只看包名分不出登录页，
+         * 会把顶号的 SDK 页当成游戏。类名从 `TYPE_WINDOW_STATE_CHANGED` 的 `event.className` 取：
+         * 「像 Activity」（见 [GenshinPackages.isActivityLikeClass]）就刷新，否则**置空**。
+         * ⚠️ 曾经是「仅换包才清」，10-14 华为实测把它否掉：从 SDK 页回到世界只发**一条非 Activity
+         * 事件**、此后再无 Activity 事件 ⇒ 旧逻辑让类名恒停在 SdkActivity、注入闸把整轮正常扫描全拒
+         * （#283 的假阳性面，日志见 `runlogs/20261014_huawei_283_repro`）。
+         * 判定落在 [GenshinPackages.isGameForeground] / [GenshinPackages.isSdkActivity]。
+         */
+        @Volatile
+        private var lastAppClass: String? = null
 
         /**
          * ★ 批0 后半（2026-10-03）：现在**压在上面的 transient 窗**（通知栏 / 权限页 / 设置）。
@@ -222,6 +248,15 @@ class InputAccessibilityService : AccessibilityService() {
         private fun allowInject(op: String): Boolean {
             if (!requireGenshinForeground) return true
             val pkg = lastAppPackage
+            // ★ #283：同包名的 MiHoYo SDK 登录/切号页 —— 包名分不出（都叫 com.miHoYo.Yuanshen），
+            //   靠 [lastAppClass] 拦下，避免在登录页上乱点（顶号时注入会落到 SDK 页）。
+            if (GenshinPackages.isGenshinPackage(pkg) && GenshinPackages.isSdkActivity(lastAppClass)) {
+                Log.w(
+                    TAG,
+                    "$op 被前台闸门拦下：前台是 MiHoYo SDK 登录/切号页（$lastAppClass，与游戏同包名）⇒ 拒绝注入",
+                )
+                return false
+            }
             if (pkg == null || GenshinPackages.isGenshinPackage(pkg)) return true
             // 缓存说"不是原神"⇒ **现问一次活动窗口**再判（见 [activeWindowPackage] 的 HyperOS 实测）：
             // 系统隐私角标会在焦点切进游戏后追发一条事件把缓存改写掉，那个窗 100ms 就自己消失、
@@ -259,6 +294,18 @@ class InputAccessibilityService : AccessibilityService() {
             // 桥通了但没这个键（对面是旧版实现）⇒ 当作"没挡住"，不假装知道
             if (!b.containsKey(KEY_SELF_UI)) return false
             return b.getString(KEY_SELF_UI) != null
+        }
+
+        /**
+         * ★ #283：前台是否**同包名的 MiHoYo SDK 登录/切号页**（顶号时被 SDK 拉到前台）。
+         * `null` = 读不到（无障碍未连 / 桥不通 / 对面旧版无此类名键）。只给起跑闸打点用，
+         * 判定本身仍走 [isGenshinInForeground] / [genshinActiveNow]（它们各自采信同一笔类名）。
+         */
+        fun sdkLoginOnTop(): Boolean? {
+            if (instance != null) return GenshinPackages.isSdkActivity(lastAppClass)
+            val b = remoteStatus() ?: return null
+            if (!b.containsKey(KEY_LAST_CLASS)) return null
+            return GenshinPackages.isSdkActivity(b.getString(KEY_LAST_CLASS))
         }
 
         /**
@@ -301,7 +348,15 @@ class InputAccessibilityService : AccessibilityService() {
          */
         fun genshinActiveNow(): Boolean? {
             val live = activeWindowPackage() ?: return null
-            return GenshinPackages.isGenshinPackage(live)
+            if (!GenshinPackages.isGenshinPackage(live)) return false
+            // ★ #283：MiHoYo SDK 登录/切号页**与游戏同包名** ⇒ 现问只能问出包名，分不出登录页
+            //   （rootInActiveWindow 给的是根 View 类，不是 Activity 类）。用事件缓存里最近一个
+            //   Activity 类名兜底：它是 SDK 页 ⇒ 报"非游戏前台"，让起跑闸拒绝起跑（否则会把流程
+            //   入口点到 SDK 页上、OCR 找不到锚点 `元素` ⇒ 整轮崩在 assertAnchor）。
+            //   ⚠️ 这笔兜底**必须经桥读**（[sdkLoginOnTop]）：扫描跑在主进程、无障碍服务在 :a11y
+            //   ⇒ 主进程里静态 [lastAppClass] 恒 null，直接读它会让兜底恒等于"不是 SDK 页"、
+            //   形同虚设（10-14 华为实测：现问恒 true ⇒ 起跑闸放行 ⇒ 点击落到 SDK 页、anchor 不达）。
+            return sdkLoginOnTop() != true
         }
 
         /** 无障碍节点查询要在带 Looper 的线程上做（与探针窗口同理）；binder 线程就 post 过去等回执。 */
@@ -381,10 +436,11 @@ class InputAccessibilityService : AccessibilityService() {
 
         /** `true`/`false` 表示原神是否在前台；无障碍未连接或尚未观察到窗口时为 `null`。 */
         fun isGenshinInForeground(): Boolean? {
-            val (connected, pkg) = currentStatus()
+            val (connected, pkg, cls) = currentStatus()
             if (!connected) return null
             val name = pkg ?: return null
-            return GenshinPackages.isGenshinPackage(name)
+            // ★ #283：包名 + 类名一起判 —— 同包名的 MiHoYo SDK 登录/切号页不算游戏前台。
+            return GenshinPackages.isGameForeground(name, cls)
         }
 
         fun isEnabledInSettings(context: Context): Boolean {
@@ -588,6 +644,7 @@ class InputAccessibilityService : AccessibilityService() {
                 A11yProtocol.M_STATUS -> Bundle().apply {
                     putBoolean(KEY_CONNECTED, instance != null)
                     putString(KEY_LAST_PACKAGE, lastAppPackage)
+                    putString(KEY_LAST_CLASS, lastAppClass)
                     putString(KEY_OVERLAY_PKG, overlayHeldBy)
                     putString(KEY_SELF_UI, selfUiCover)
                     // ⚠️ 这里**不放** KEY_ACTIVE_PACKAGE：现问要在主线程查节点、binder 线程等它
@@ -636,8 +693,8 @@ class InputAccessibilityService : AccessibilityService() {
             }
         }
 
-        private fun currentStatus(): Pair<Boolean, String?> {
-            if (instance != null) return true to lastAppPackage
+        private fun currentStatus(): Triple<Boolean, String?, String?> {
+            if (instance != null) return Triple(true, lastAppPackage, lastAppClass)
             // ★ #181（2026-10-03）：主进程这条路有三种"拿不到"，成因完全不同但过去长得一样：
             //   ① appContext 还没 attach（remoteCall 直接返回 null，**一条日志都不打**）；
             //   ② contentResolver.call 抛异常（remoteCall 里已有 remoteCall failed 日志）；
@@ -650,14 +707,15 @@ class InputAccessibilityService : AccessibilityService() {
                         "currentStatus 取不到：appContext=${if (appContext == null) "null(未 attach)" else "有"}" +
                             "（异常成因请看同时间的 remoteCall failed 行）",
                     )
-                    return false to null
+                    return Triple(false, null, null)
                 }
             val connected = status.getBoolean(KEY_CONNECTED, false)
             val pkg = status.getString(KEY_LAST_PACKAGE)
             if (pkg == null) {
                 Log.w(TAG, "currentStatus 桥已通但无障碍尚未观察到窗口：connected=$connected")
             }
-            return connected to pkg
+            // ★ #283：类名键对面旧版可能没有 ⇒ getString 返回 null ⇒ isGameForeground 按包名兜底。
+            return Triple(connected, pkg, status.getString(KEY_LAST_CLASS))
         }
 
         private fun clickLocal(x: Int, y: Int, durationMs: Long): Boolean {

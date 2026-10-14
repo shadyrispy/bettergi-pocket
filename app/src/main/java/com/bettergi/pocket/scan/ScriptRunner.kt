@@ -274,6 +274,15 @@ class ScriptRunner(
                 "回退累计=${StartGateLiveAsk.cacheFallbacks}）",
         )
         if (foreground == false) {
+            // ★ #283：顶号时 MiHoYo SDK 登录页被拉到前台，**包名与游戏相同**（所以闸门判得出来），
+            //   单独点一句把"谁挡的"说清楚 —— 否则现场只看得到 not_in_genshin，无从归因。
+            if (InputAccessibilityService.sdkLoginOnTop() == true) {
+                Log.w(
+                    TAG,
+                    "起扫前台闸: 前台是 MiHoYo SDK 登录/切号页（与游戏同包名 com.miHoYo.Yuanshen）⇒ " +
+                        "拒绝起跑，避免把流程入口点到 SDK 页上（#283）",
+                )
+            }
             listener.onFinished("not_in_genshin")
             return
         }
