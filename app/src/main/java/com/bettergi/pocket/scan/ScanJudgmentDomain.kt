@@ -472,11 +472,15 @@ internal fun ScanEngine.lockVoteAny(frame: Mat): Boolean =
  *    现在改成 `当前态 == 目标态 才跳过`，两个方向都正确。
  * 2. **确定性选位**：目标**显式**给了 `elixirCrafted` 时直接按它选普通位/祝圣位
  *    （GOODScanner：`Lock toggles use the scanned piece's elixirCrafted to apply a 40px Y-shift`），
- *    省掉"先点普通位 → 回读 → 未生效再点祝圣位"的第二次点击；只有没给（手写最小计划）才退回试错。
+ *    省掉"先点普通位 → 回读 → 未生效再点祝圣位"的第二次点击。
  *
  * ★ 2026-09-27（#97）：未生效后的兜底改为 [followUpLockShift] —— 见那个函数的 KDoc。
  *   原来无条件"换另一侧 +zhushengShiftPx"，对**非祝圣件**那是个没标定过的坐标
  *   （同帧实测 gold=0/red=0）；对**祝圣件**则等于把刚点过的位置再点一次（净效果归零）。
+ *
+ * ★ 2026-10-14（#279）：计划**没给** `elixirCrafted` 时，选位改用**屏幕事实**（同预读帧的紫横幅投票），
+ *   不再盲猜普通位。实测（BS 2244×1080，task 缺失 elixirCrafted 的祝圣件）：旧行为首选 0 落空 ⇒
+ *   settle 烧满 90s/46 轮才走到兜底；改后首选即 +sh、一轮内收敛。判据不可用 ⇒ 退回普通位（旧行为）。
  */
 internal suspend fun ScanEngine.lockClickAdaptive(): Pair<Int, Int> {
     val obj = profile.zone("artifact.panel.lock")
@@ -491,17 +495,33 @@ internal suspend fun ScanEngine.lockClickAdaptive(): Pair<Int, Int> {
     vars.lockWriteAttempted = true
     // 目标态：来自 {lock,unlock} 清单归一出的项内 wantLock（缺省 true = 应锁定）
     val desired = vars.currentTask?.optBoolean(GoodPlan.KEY_WANT_LOCK, true) ?: true
-    // 确定性选位：显式给了 elixirCrafted 就不试错
+    // 计划里的 elixirCrafted：显式给了就采信，没给则用屏幕事实选位（见下）
     val wantElixir = vars.currentTask?.let {
         if (it.has("elixirCrafted")) it.optBoolean("elixirCrafted") else null
     }
+    // 同一帧取两个事实：当前锁态 + 屏幕祝圣态（紫横幅投票，与 [parseArtifactPanel] 的 crafted 同源）。
+    // ★ #279：屏幕祝圣态以前只在**补点兜底**里读，于是"计划没给 elixirCrafted"时首选位盲猜 0；
+    //   祝圣件得等 settle 预算烧完（实测 90s、46 轮）才走到兜底。这里提前读，选位直接用屏幕事实。
+    val f = freshFrame()
+    val pre: Boolean
+    val screenCrafted: Boolean?
+    try {
+        pre = lockVoteAny(f)
+        screenCrafted = runCatchingCancellable {
+            VoteJudges.panelZhusheng(f, profile).matched
+        }.getOrElse { e ->
+            Log.w(TAG, "lockClickAdaptive: 祝圣横幅判据不可用（${e.message}）⇒ 按计划/默认选位")
+            null
+        }
+    } finally {
+        f.release()
+    }
+    // 确定性选位：显式给了 elixirCrafted 就按它；没给就用**屏幕事实**（判据不可用 ⇒ 退回普通位）。
     val firstShift = when (wantElixir) {
         true -> sh
         false -> 0
-        null -> 0 // 未知 ⇒ 仍先试普通位（与旧行为一致）
+        null -> if (screenCrafted == true) sh else 0
     }
-    var f = freshFrame()
-    val pre = try { lockVoteAny(f) } finally { f.release() }
     // ★ 只有"当前态已等于目标态"才可跳过 —— 原来只看"已锁"⇒ 解锁方向被静默跳过
     if (pre == desired) {
         Log.i(TAG, "lockClickAdaptive: 已处于目标态（locked=$pre desired=$desired），跳过点击")
@@ -509,7 +529,8 @@ internal suspend fun ScanEngine.lockClickAdaptive(): Pair<Int, Int> {
     }
     Log.i(
         TAG,
-        "lockClickAdaptive: locked=$pre desired=$desired elixirCrafted=$wantElixir 首选位移=$firstShift",
+        "lockClickAdaptive: locked=$pre desired=$desired elixirCrafted=$wantElixir " +
+            "屏幕祝圣=$screenCrafted 首选位移=$firstShift",
     )
     // 原语取 `click`（2px 微滑 + 按压）。⚠️ **tap vs click 之争是伪命题**：
     //   09-18「真机 clickLocal accepted=true 但毫无反应」与 09-27「纯 tap 三轮全背包锁态零变化」
@@ -524,18 +545,8 @@ internal suspend fun ScanEngine.lockClickAdaptive(): Pair<Int, Int> {
     if (settleLockState(desired)) return rect.centerX to (rect.centerY + firstShift)
     // ★★ #97：首选位未生效时的兜底 —— **只点"屏幕上真的是锁钮"的那一侧，且绝不重复点同一坐标** ★★
     //   判据与完整理由见 [followUpLockShift]（纯函数、有单测）。
-    //   这里只负责把屏幕事实取出来：同帧紫横幅投票，与 [parseArtifactPanel] 的 crafted 同源。
-    val craftedOnScreen = runCatchingCancellable {
-        val f2 = freshFrame()
-        try {
-            VoteJudges.panelZhusheng(f2, profile).matched
-        } finally {
-            f2.release()
-        }
-    }.getOrElse { e ->
-        Log.w(TAG, "lockClickAdaptive: 祝圣横幅判据不可用（${e.message}）⇒ 不补点第二坐标")
-        null
-    }
+    //   屏幕祝圣态复用**预读帧**那次探测（点击不会改变横幅，不再另取帧）。
+    val craftedOnScreen = screenCrafted
     val followUp = followUpLockShift(firstShift, sh, craftedOnScreen)
     if (followUp == null) {
         Log.w(
@@ -1226,7 +1237,10 @@ internal suspend fun ScanEngine.verify(step: JSONObject) {
     } else expectRaw.toBoolean()
     // ★ 读判据前先清一次加锁确认弹框：它是全屏模态，盖住锁图标 ⇒ 否则恒读 false、假 FAILED
     // （只有锁定流程会用这条 verify；#93 起仍用 `actTried` 作闸是安全的 —— 该 zone 仅锁流程投）
-    if (zone == "artifact.panel.lock" && vars.actTried) dismissLockConfirm(1200L)
+    // #279：本设备已学会"不再弹确认框"时按 0 预算探一次即可，别白等 1.2s/格（与 [settleLockState] 同口径）。
+    if (zone == "artifact.panel.lock" && vars.actTried) {
+        dismissLockConfirm(if (lockConfirmAbsent) 0L else 1200L)
+    }
     val frame = freshFrame()
     val actual = try {
         when (zone) {
