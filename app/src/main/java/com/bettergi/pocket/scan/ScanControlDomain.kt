@@ -706,6 +706,10 @@ internal fun ScanEngine.resetScanAccumulation() {
     curPageIds.clear()
     skipCopyFrom.clear()
     anchoredD = null
+    // #292：本页实测前进行数（来自身份锚定 d/cols）与"本页武器格 → resultsWeapons 下标"映射，
+    // 都是**本页**语义（页序跨目标会重号 ⇒ 下标失效）⇒ 与 anchoredD 一起清。
+    curAdvanceRows = -1
+    curPageWeaponEmit.clear()
     curCellIdx = -1
     curCellRow = -1
     curCellCol = -1

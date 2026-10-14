@@ -294,6 +294,9 @@ internal suspend fun ScanEngine.pagedGridCore(
         curPageIds.clear()
         skipCopyFrom.clear()
         anchoredD = null
+        // ★ #292：本页前进量未定 ⇒ 跨页判据 fail-open；本页武器入库下标表清空（锚点后追认用）。
+        curAdvanceRows = -1
+        curPageWeaponEmit.clear()
         panelFpSnapshot = null
         if (pageNo == 0) {
             rowCheckGlobalStart = 0
@@ -643,6 +646,9 @@ internal suspend fun ScanEngine.pagedGridCore(
                                 )
                             } else {
                                 anchoredD = d
+                                // ★ #292：前进量 = d / cols（已由上面的取模哨兵保证整除）。页内逐格
+                                //   跨页判据（[crossPageOverlap]）按它门控：前进 ≥ traverseRows 一律不丢。
+                                curAdvanceRows = d / cols
                                 val last = cols * traverseRows - 1
                                 // 只复制"上页**确实读到了**（身份 + 内容键都非空）"的重叠格；
                                 // 上页那格本就失败 ⇒ 本页照常访问（宁可慢，不可漏）。
@@ -657,9 +663,37 @@ internal suspend fun ScanEngine.pagedGridCore(
                                 Log.w(
                                     TAG,
                                     "pagedGrid[$gridKey] **身份锚定命中**：本页 idx1,2 ≡ 上页 idx$hit,${hit + 1}" +
-                                        " ⇒ d=$d ⇒ 新增跳过 $added 格（累计 ${skipCopyFrom.size} 格，" +
+                                        " ⇒ d=$d（前进 ${d / cols} 行）⇒ 新增跳过 $added 格（累计 ${skipCopyFrom.size} 格，" +
                                         "复制上页身份，不点击不 OCR）",
                                 )
+                                // ★★ #292：**追认 idx0~2** ★★
+                                //   锚点要读完 idx1/idx2 才有信息 ⇒ 触发时 idx0~2 早已访问并入库，
+                                //   它们的逐格跨页判据当时拿不到前进量（fail-open 没丢）⇒ 这里按**同一个
+                                //   门控公式**回查：命中上页重叠格就把已入库的那件撤回来（武器无内容键去重，
+                                //   不撤就多一件）。只查 0..OVERLAP_ANCHOR_COUNT（=2）—— idx≥3 已由上面的
+                                //   复制循环覆盖（`m+d ≤ last` 与本式 `row+aRows < traverseRows` 等价）。
+                                val victims = ArrayList<Int>(OVERLAP_ANCHOR_COUNT + 1)
+                                for (m in 0..OVERLAP_ANCHOR_COUNT) {
+                                    val mr = m / cols
+                                    val mc = m % cols
+                                    // 同 [crossPageOverlap]：前进 ≥ 一整页 ⇒ 零重叠，绝不追认。
+                                    if (mr + curAdvanceRows >= traverseRows) continue
+                                    val expect = prevAllCellIds?.getOrNull((mr + curAdvanceRows) * cols + mc).orEmpty()
+                                    val got = pageIdentities.getOrNull(m).orEmpty()
+                                    if (expect.isEmpty() || got.isEmpty() || expect != got) continue
+                                    curPageWeaponEmit.remove(m)?.let { victims += it }
+                                }
+                                if (victims.isNotEmpty()) {
+                                    // 降序删：resultsWeapons 是同一列表内的绝对下标，先删小下标会移位后面的。
+                                    victims.sortedDescending().forEach {
+                                        if (it in resultsWeapons.indices) resultsWeapons.removeAt(it)
+                                    }
+                                    Log.w(
+                                        TAG,
+                                        "pagedGrid[$gridKey] **跨页追认**：page=$pageNo 撤回 idx0~$OVERLAP_ANCHOR_COUNT 中" +
+                                            "与上页重叠的 ${victims.size} 件（前进 ${d / cols} 行）",
+                                    )
+                                }
                             }
                         }
                     }

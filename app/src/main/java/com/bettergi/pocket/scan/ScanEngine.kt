@@ -706,6 +706,29 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     internal var anchoredD: Int? = null
 
     /**
+     * ★ #292：本页**实测前进行数** `advanceRows = anchoredD / cols`；-1 = 未锚定
+     * （前进量未知 ⇒ [crossPageOverlap] fail-open 不判）。
+     *
+     * 为什么前进量必须来自 [anchoredD] 而不是几何量：`GridAlign.rowsAdvanced` 在每一页都读
+     * `行数=3`（含已知只前进 2 行的页）⇒ 有固有 +1 偏置、不可用；[GridRowCheck] 的 advance 要到
+     * **页末**才有 ⇒ 页内逐格判据拿不到。C' 锚点的 `d` 是内容实测（逐位相邻命中），且与页末
+     * 行级闭环读数一致（实测 d=14 与「前进 14」同值）。
+     */
+    internal var curAdvanceRows: Int = -1
+
+    /**
+     * ★ #292：本页**武器格 idx → [resultsWeapons] 下标**（页内局部语义，每页清空）。
+     *
+     * 动机：锚点在读完 idx2 之后才定出 `d`，而那时 idx0~2 **已经访问并入库**了 ⇒ 它们的跨页
+     * 判据当时拿不到前进量（fail-open，没丢）。锚点定出 `d` 后靠这张表**追认**：
+     * 若 idx0~2 按同一个门控公式命中上页重叠格，就把已入库的那件撤回来（武器侧**没有**内容键
+     * 去重 ⇒ 不撤就多一件）。
+     *
+     * 只武器路径写（[crossPageOverlap] 的唯一调用点）；圣遗物侧恒空（走 `seenArtifactKeys` 内容键去重）。
+     */
+    internal val curPageWeaponEmit = HashMap<Int, Int>()
+
+    /**
      * 本轮已入库的「页:行:列:身份」四元组（#58② 同格重解析幂等，用法见 [parseWeaponPanel]）。
      * 与 [prevAllCellIds] 的跨页重叠判据互补：那条管"这格是上页某行的同一张卡"，这条管
      * "**同一页同一格被解析了两遍**"（吞击重发/定点重访都会让一格再解析一次）。
@@ -1620,18 +1643,28 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             s.isNotEmpty() && s.split(',').all { it.trim().toDoubleOrNull() != null }
 
         /**
-         * 武器**跨页重叠**判据（纯函数）：本格是否就是上页那张已经读过的卡。
+         * 武器**跨页重叠**判据（纯函数，#292）：给定本页相对上页的**实测前进量** [advanceRows]，
+         * 判断本格是不是上页那张已经读过的卡。
          *
          * 表必须是**绝对下标** `r*cols+c` 的全行表（`prevAllCellIds`）——#60 就是喂了一张
          * 只存 row1/row2 的紧凑表却仍按绝对下标读，于是"row1"这一路静默失效（见调用处注释）。
          *
-         * 只比**同列**的上页最后两行（`traverseRows-2` / `traverseRows-1`）：
-         * 一页 3 行时，前进 1 行 ⇒ 新 row0 ← 上页 row1；前进 2 行 ⇒ 新 row0 ← 上页 row2。
-         * 前进量 >2 行的部分对应上页 row3/row4，表里没有 ⇒ `getOrNull` 给 null ⇒ 不误伤真·同款多把。
+         * ## 判据（#292：把"固定比末两行"换成"按前进量门控"）
+         * 前进 `a` 行 ⇒ 本页 `(row,col)` 那格在上页的同一位是 `(row+a, col)`：
+         * ```
+         * 丢弃 ⟺ row + a < traverseRows  且  prev[(row+a)*cols + col] == identity
+         * ```
+         * 于是三种情形都由同一条式子给出：`a=0`（整页没动）退化成"比上页同位置" `prev[row*cols+col]`；
+         * `a=1` ⇒ 本页 row0 ← 上页 row1、row1 ← 上页 row2；`a=2` ⇒ 本页 row0 ← 上页 row2；
+         * `a≥traverseRows`（前进 ≥ 一整页 ⇒ 零重叠）**一律不丢** —— 这正是 #215 的根因：
+         * 旧实现不管前进多少，都拿上页 `row1/row2` **固定**比，于是**前进一整页**的页里，本页
+         * 任一格与上页 row1/row2 同列的"同款同列"巧合被当成重叠 ⇒ **静默丢真件**（同款多把）。
          *
-         * 注意 `row` **不参与**取数下标（判据问的是"这个身份在上页末两行出现过吗"，
-         * 不是"上页第 row 行是谁"）——但 `row`/`col` 为 -1 时（snap / rosterFind 等非 pagedGrid 路径）
-         * 本格没有网格位置可谈，一律不判。
+         * ⚠️ 前进量**未知**（首页无上页表 / 锚点未命中 ⇒ `advanceRows < 0`）⇒ 一律不判（fail-open：
+         * 宁可多留一件，也不误丢）。这是有意的：判据一旦错判就是**静默丢件**，代价高于多一件待办。
+         *
+         * `row`/`col` 为 -1 时（snap / rosterFind 等非 pagedGrid 路径）本格没有网格位置可谈，一律不判；
+         * 空身份也不判（不能与表里的空格"相等"，否则读失败的格会被当成重叠）。
          */
         internal fun crossPageOverlap(
             prev: List<String>?,
@@ -1640,13 +1673,18 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             row: Int,
             col: Int,
             identity: String?,
+            advanceRows: Int,
         ): Boolean {
             if (prev == null || row < 0 || col < 0) return false
             // 空身份 = 这格根本没读到东西，不能拿去和表里的空格"相等"（那会把读失败的格当成重叠）。
             if (identity.isNullOrEmpty()) return false
             if (traverseRows < 2 || cols < 1) return false
-            return prev.getOrNull((traverseRows - 2) * cols + col) == identity ||
-                prev.getOrNull((traverseRows - 1) * cols + col) == identity
+            // 前进量未知/为负 ⇒ fail-open（见 KDoc）。
+            if (advanceRows < 0) return false
+            val pr = row + advanceRows
+            // pr >= traverseRows 覆盖 advanceRows >= traverseRows（row>=0）：前进 ≥ 一整页 = 零重叠。
+            if (pr >= traverseRows) return false
+            return prev.getOrNull(pr * cols + col) == identity
         }
 
         /**

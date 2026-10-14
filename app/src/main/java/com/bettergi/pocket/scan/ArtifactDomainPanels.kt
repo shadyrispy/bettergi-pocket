@@ -620,27 +620,25 @@ internal suspend fun ScanEngine.parseWeaponPanel(
     //   用于验证"翻页/点击是否造成重复或漏点"（此前武器路径不写 identity ⇒ 格级日志 `item` 全是 `-` ✗）
     lastCellIdentity = "$key/$level/$rarity#R$refine" + (if (location.isNotEmpty()) "@$location" else "")
     if (curCellIdx >= 0) curPageIds[curCellIdx] = lastCellIdentity ?: ""
-    // ★ 跨页重叠判定（identity 版）：本格若与**上页同列**的 row1/row2 身份相同 ⇒ 是同一张卡 ⇒ 丢弃
-    //   （实测像素指纹跨页零命中 ✗；identity 为 OCR 内容、稳定 ✓；**只比同列** ⇒ 不伤同款多把）
-    //   前进量可为 0~2 行（滑不动时整页 3 行全重叠）；前进 2 行时新页 row1/row2 对应上页 row3/row4
-    //   —— 上页表里没有那两格 ⇒ 取到 null ⇒ 不误判真·多把 ✓
-    // ⚠️ 2026-09-25 #60 第一次试修**已回退**：把窗口放宽成"本格查上页 r..r+2 三行" ⇒ 2560 实测
-    //   **负收益**（导出 155→157 件，且丢掉 TravelersHandySword / BloodtaintedGreatsword /
-    //   SkyriderSword / FilletBlade / FerrousShadow 5 件真 3★，页级冻结放弃 0→17 格）。
-    //   成因：identity **不唯一**（ThrillingTalesOfDragonSlayers 光 L1R5 就有 2 把），窗口一放宽，
-    //   "真·同款多把"就会被当成跨页重叠丢掉 ⇒ 判据本身**维持只比 row1/row2**。
-    // ★2026-09-25 #60 真正的成因 = **上页表下标错位**：原先喂给本判据的是一张紧凑表
-    //   （只存 row1/row2 ⇒ 槽位 0/1），而判据按绝对下标 `(traverseRows-2)*cols+c` /
-    //   `(traverseRows-1)*cols+c` 读 ⇒ 第一个取到的其实是 row2、第二个**恒越界 null**
-    //   ⇒ 事实上只比 row2 ⇒ "前进 1 行"（新 row0 ← 上页 row1）无人管 ⇒ 尾区假重复。
-    //   实测（同码对照轮）：判据命中的 **19** 条全是 `新行 ← 上页 row2`（page3/7 各 6 条 r0 +
-    //   page9 6 条 r1 + page5 1 条 r2）；漏掉的 6 件**全是** `page9 row0 ← page8 row1`
-    //   （TwinNephrite/EmeraldOrb/OtherworldlyStory/BlackTassel/ThrillingTales×2）。
-    //   ⇒ 本轮只换表（紧凑 → [prevAllCellIds] 绝对表），判据逻辑一字不动。
-    // ⚠️ 日志此前把行号写死成字面量 `r0` ⇒ "丢弃全落在 row0"是**日志假象**，别拿它当证据。
-    //   下标算术已抽成纯函数 [crossPageOverlap] 并单测（这条判据错过一次，代价是一整轮误修）。
-    if (crossPageOverlap(prevAllCellIds, curCols, curTraverseRows, curCellRow, curCellCol, lastCellIdentity)) {
-        Log.i(TAG, "跨页重复(identity) 丢弃: page=$curPageNo r${curCellRow}c$curCellCol $lastCellIdentity")
+    // ★ 跨页重叠判定（identity 版）：本格若与**上页按实测前进量对齐的那一格**身份相同 ⇒ 同一张卡 ⇒ 丢弃
+    //   （实测像素指纹跨页零命中 ✗；identity 为 OCR 内容、稳定 ✓；只比同列 ⇒ 不伤同款多把）
+    // ★★ 2026-10-14 #292（= #215 根因）：把"固定比上页 row1/row2"换成"**按本页实测前进量 aRows 门控**"。
+    //   旧实现在**任何**前进量下都拿上页 row1/row2 比 ⇒ 前进**一整页**（零重叠）时，本页某格与上页
+    //   row1/row2 同列的"同款同列"巧合被当成重叠 ⇒ **静默丢真件**。实测 100842 日志：104 次翻页里
+    //   只有 11 次 OVERLAP（欠滚），却有 124 次丢弃 ⇒ 绝大多数丢在**零重叠页**上 = 误丢。
+    //   新判据：前进 a 行 ⇒ 只比 `prev[(row+a)*cols+col]`；`a≥traverseRows`（一整页）一律不丢。
+    //   `aRows` 来自 C' 锚点的 `d/cols`（内容实测，见 [curAdvanceRows]）；未锚定 ⇒ -1 ⇒ fail-open 不判。
+    // ⚠️ #60 的坑仍在：表必须是**绝对下标** r*cols+c 的全行表（[prevAllCellIds]）——紧凑表会让
+    //   "row1" 那一路静默失效。⚠️ 日志此前把行号写死成字面量 `r0` ⇒ "丢弃全落在 row0"是日志假象。
+    if (
+        crossPageOverlap(
+            prevAllCellIds, curCols, curTraverseRows, curCellRow, curCellCol, lastCellIdentity, curAdvanceRows,
+        )
+    ) {
+        Log.i(
+            TAG,
+            "跨页重复(identity) 丢弃: page=$curPageNo r${curCellRow}c$curCellCol $lastCellIdentity（前进 $curAdvanceRows 行）",
+        )
         // ★★ #73（2026-09-27 实测定位）：这条 return **必须先把本格登记**，否则它绕过了
         //   下面那段 `weaponCellEmitted.add`，被丢的格在表里是"没来过"的状态 ⇒
         //   同一页的**定点重访**再点这一格时 cellTag 又是新的 ⇒ 又入库一次。
@@ -708,6 +706,8 @@ internal suspend fun ScanEngine.parseWeaponPanel(
         location = location,
         ascension = ascension,
     )
+    // ★ #292：登记本格入库下标 —— 锚点定出前进量后要"追认" idx0~2 里与上页重叠的那几件（撤回）。
+    if (curCellIdx >= 0) curPageWeaponEmit[curCellIdx] = resultsWeapons.size
     resultsWeapons.add(weapon)
     // ★ 内容键必须落到 `lastCellKey`（2026-10-04 #188 复盘）：这条赋值以前**没有**，
     //   武器路径的 `lastCellKey` 因此恒为 null ⇒ 两处后果，都不是"日志难看"这么轻：
