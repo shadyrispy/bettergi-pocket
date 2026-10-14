@@ -24,6 +24,7 @@ import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.Rect
 import org.opencv.imgcodecs.Imgcodecs
+import com.bettergi.pocket.scan.flows.LockFlow
 import com.bettergi.pocket.scan.flows.runArtifactSteps
 import com.bettergi.pocket.scan.flows.runCharacterSteps
 import com.bettergi.pocket.scan.flows.runCharCalibrateSteps
@@ -181,6 +182,10 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         when (flowName) {
             "weapon_scan" -> runWeaponSteps()
             "artifact_scan" -> runArtifactSteps()
+            // ★ 2026-10-14：套装筛选后扫描（adb 调试工具）——在 artifact_scan 前先按
+            //   LockFlow.SET_FILTER 应用一次套装筛选；筛选未生效即在 runArtifactSteps 内抛
+            //   ScanAbortedException 中止，绝不退化全量扫。pipe 默认 0（不在 PIPE_DEFAULT_BY_FLOW）。
+            "artifact_scan_set" -> runArtifactSteps(setFilterStep = LockFlow.SET_FILTER)
             "character_scan" -> runCharacterSteps()
             "artifact_lock" -> runLockSteps()
             "auto_equip" -> runEquipSteps()
@@ -311,6 +316,8 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //     ⚠️ 但覆盖到不等于量到：走 snap 的只有 `select_3col`（auto_equip），而它不读背包
         //     计数器 ⇒ `total==null`，这里今天仍然不会为它报警。真实收益在 foreach 那道守卫上。
         val collected = results.size + resultsWeapons.size + resultsCharacters.size
+        // ★ 筛选流程（artifact_scan_set）**不读**表头总数：那 974/2700 是全量持有量、不随筛选变，
+        //   与筛选后的网格不同量纲 ⇒ `total` 保持 null，本判据在筛选下自动不启用（而非误报）。
         val total = vars.total
         val sawWholeList = !vars.stopRequested || (vars.gridExhausted && !vars.matchHit) ||
             vars.stopReason == STOP_REASON_MATERIAL

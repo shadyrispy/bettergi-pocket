@@ -580,7 +580,17 @@ class TriggerForegroundService : Service() {
                 }
             }
             ACTION_DEBUG_SCAN_FLOW -> {
-                val flow = intent.getStringExtra(EXTRA_FLOW) ?: "artifact_scan"
+                // ★ 2026-10-14 套装筛选后扫描（adb 调试工具）：`--es sets HeartOfTheFurnace[,<key2>…]`
+                //   直接指定套装词典 key ⇒ 自动选 `artifact_scan_set` 流程并合成 `[{"setKey":"…"}]` 计划。
+                //   之所以传 **setKey**（而非 setName）：GOOD 导出项只有 setKey、没有 setName，且
+                //   `TaskMatch.targets` 比对的就是词典 key（失配回落原文）⇒ 传词典 key 恒可归一。
+                //   该 plan 只经 `filterTargets()` 决定 setFilter 的白名单目标集；artifact_scan 的
+                //   visit body 不读 plan ⇒ 无写副作用（不像 lock/equip 会改游戏内状态）。
+                val sets = intent.getStringExtra(EXTRA_SETS)
+                    ?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
+                    ?: emptyList()
+                val flow = intent.getStringExtra(EXTRA_FLOW)
+                    ?: if (sets.isNotEmpty()) "artifact_scan_set" else "artifact_scan"
                 // ★ 钳位与产线同口径（[maxPagesOrDefault]：0/负数 = 不限 → Int.MAX_VALUE）：
                 //   原先直传 EXTRA_MAX_PAGES 给 startScan，绕过了产线（settings.scanMaxPages）
                 //   必过的这道钳位 ⇒ 只有显式 `--ei maxPages 0` 会变成"扫 0 页"而不是"不限"。
@@ -611,16 +621,27 @@ class TriggerForegroundService : Service() {
                 }
                 // 时序覆盖：交给 startScan 单入口 apply（其余入口传 null ⇒ 复位，防跨轮残留）
                 val timingSpec = intent.getStringExtra(EXTRA_TIMING)
+                // sets ⇒ 合成 plan（只对 `artifact_scan_set` 生效）。显式把 sets 配给别的 flow 是
+                // 误用：那些流程的 plan 项形状不同（如 lock 需要 mainStatKey/subStats 才能定位，
+                // 这里只给得出 setKey）⇒ 恒匹配不到、静默空跑，故不注入并 W 出声。
+                val setsPlan = when {
+                    sets.isEmpty() -> null
+                    flow == "artifact_scan_set" -> sets.map { key -> JSONObject().put("setKey", key) }
+                    else -> {
+                        Log.w(TAG, "debug scan flow: sets=$sets 配给了 flow=$flow（非 artifact_scan_set），已忽略")
+                        null
+                    }
+                }
                 // ★ 没给内联 plan 时**回落到用户在管理器里选好的输入**（与产线 `startFlowIfReady` 同源）。
                 //   原先这条调试通道只能靠 `planB64` 喂，`DEBUG_SET_GOOD` 导入的文件它根本不读 ⇒
                 //   起跑后 `foreach` 见 `$plan` 为空，整轮"跑完了但什么都没做"（07:46 实测：
                 //   returnToHome 8 次 + `foreach: 'plan' not available or empty` + cells=0）。
                 //   与 #94 的 geoAdvance 是同一条教训：**调试入口不能走产线不走的路径**。
                 //   内联 `plan/planB64` 仍然优先 —— 标定跑要用的是"临时改一条计划"，不是换数据源。
-                val planWithFallback = plan ?: GoodRepository.planFor(applicationContext, flow)?.also {
+                val planWithFallback = plan ?: setsPlan ?: GoodRepository.planFor(applicationContext, flow)?.also {
                     Log.i(TAG, "debug scan flow: plan 取自已导入输入（${it.size} 项，flow=$flow）")
                 }
-                Log.i(TAG, "debug scan flow: flow=$flow maxPages=$maxPages timing='${timingSpec ?: ""}'")
+                Log.i(TAG, "debug scan flow: flow=$flow maxPages=$maxPages timing='${timingSpec ?: ""}' sets=$sets")
                 if (captureController.isRunning()) {
                     scriptRunner.startScan(
                         flow, maxPages,
@@ -1314,6 +1335,12 @@ class TriggerForegroundService : Service() {
         const val EXTRA_SEGS = "segments"
         const val EXTRA_METHOD = "method"
         const val EXTRA_FLOW = "flow"
+        /**
+         * 2026-10-14 套装筛选后扫描（adb 调试工具）：逗号分隔的套装词典 key
+         * （`tools/mappings.json` 的 `artifactSets[].id`，如 `HeartOfTheFurnace`）。
+         * 给了它而没显式给 [EXTRA_FLOW] ⇒ 自动选 `artifact_scan_set` 并合成 setKey 计划。
+         */
+        const val EXTRA_SETS = "sets"
         const val EXTRA_MAX_PAGES = "maxPages"
         /** §14 P4：外部任务计划 JSON 数组（明文，adb shell 会吞双引号，标定用请走 planB64）。 */
         const val EXTRA_PLAN = "plan"

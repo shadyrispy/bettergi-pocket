@@ -246,7 +246,16 @@ internal fun ScanEngine.swipeLogged(gridKey: String, x: Int, y0: Int, y1: Int, w
     return ok
 }
 
-internal suspend fun ScanEngine.setFilter(step: JSONObject) {
+/**
+ * 套装筛选：chain 打开子面板 → 清空旧条件 → 按行位 OCR 勾选目标 → 确认。
+ *
+ * @return `true` = 筛选**已生效**（已按目标确认/带筛确认）；`false` = **未生效**
+ *   （面板没打开 / 词典缺 / 无目标 / 一个都没勾上 / 部分命中被清筛改扫全量）。
+ *   调用方 `artifact_scan_set` 据此决定是否中止本轮 —— 未生效时**绝不放行成全量扫描**，
+ *   否则"筛选后扫描"就退化成了全量扫（既慢又违背意图）。既有调用点（lock/equip/标定）
+ *   忽略返回值，行为零变化。
+ */
+internal suspend fun ScanEngine.setFilter(step: JSONObject): Boolean {
     val ocrGateway = ocr
     val chain = step.getJSONArray("chain")
     // §16.4 链项解析统一走 clickChainEntry（命中 CHAIN_ANCHOR_PATHS → profile 机读坐标，
@@ -262,7 +271,7 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
         // 非激进：此时面板**很可能压根没打开**（例如游戏内 5★ 视图把漏斗禁用），
         // 按 BACK 只会把背包关掉 ⇒ 让 flow 的 assertScreen 去兜。
         leaveFilterPanels("setFilter 放弃", aggressive = false, homeHint = homeHintOf(step))
-        return
+        return false
     }
     // §12.4-① 开始筛选前先清空已选条件（filterPanel.reset）。
     // 2560 实测：setPlus 打开子面板有动画，紧接的 reset 点击落在过渡态被吞 → 游戏残留勾选
@@ -280,13 +289,13 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
     if (sel == null) {
         // 无 OCR 选择段（如 PILL 直达）→ 直接确认关闭
         confirmFilter(step)
-        return
+        return true
     }
     val gridKey = sel.optString("grid", "set_filter_popup")
     val dictKey = sel.optString("dict", "mappings.artifactSets")
     if (GoodNames.kindOf(dictKey) == null || names == null) {
         Log.w(TAG, "setFilter: dictionary '$dictKey' not loaded")
-        return
+        return false
     }
     val lookup: (String) -> String? = { text -> lookupName(dictKey, text) }
     val match = sel.optString("match", "exact")
@@ -299,16 +308,16 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
         //   ⇒ 之后 foreach/panelMatch 全程对着子面板跑（真机实测：每格 verify FAILED）。
         Log.w(TAG, "setFilter: 无筛选目标（未注入 setName/targets）⇒ 不确认、直接退出（not_applied）")
         leaveFilterPanels("无筛选目标", homeHint = homeHintOf(step))
-        return
+        return false
     }
-    val grid = profile.rawObject("grids.$gridKey") ?: return
+    val grid = profile.rawObject("grids.$gridKey") ?: return false
     val columns = grid.getJSONObject("columns")
     val rowYTop = grid.getJSONArray("rowYTop")
     val leftX = columns.getJSONObject("left").getInt("checkboxX")
     val rightX = columns.getJSONObject("right").getInt("checkboxX")
     val leftBox = columns.getJSONObject("left").getJSONArray("nameBox")
     val rightBox = columns.getJSONObject("right").getJSONArray("nameBox")
-    if (ocrGateway == null) return
+    if (ocrGateway == null) return false
     val rowHeight = grid.optInt("rowHeight", 120)
     // 行距以 `rowYTop` 相邻差为准（缺 rowYTop 时回退 profile 的 rowPitch 键）。
     // 三档实测：2244=102、2560=136、3200=136（2560 那份 2026-10-02 傍晚前是 133，
@@ -510,7 +519,7 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
     if (selected == 0) {
         Log.w(TAG, "setFilter: 一个目标都没勾上（selected=0，翻页 $turns 次）⇒ 不确认、直接退出（not_applied）")
         leaveFilterPanels("selected=0", homeHint = homeHintOf(step))
-        return
+        return false
     }
     // ★ P0-C（2026-10-08，GS 对齐 lock_manager.rs set_filter_plan 三态）：**部分命中**
     //   （勾上了部分、剩余目标没找到）⇒ **清掉筛选改扫全量**，不再"带半套筛选扫"。
@@ -524,7 +533,7 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
             // 非 lock/非计划驱动流程（防御）：保持旧行为（带半套筛选扫）
             Log.w(TAG, "setFilter: 部分命中 selected=$selected 未点完=$pending ⇒ 确认带筛扫（旧语义，非计划驱动）")
             confirmFilter(step)
-            return
+            return true
         }
         Log.w(
             TAG,
@@ -533,10 +542,11 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
         )
         vars.lockFilterPartial = true
         leaveFilterPanels("partial=$selected", homeHint = homeHintOf(step))
-        return
+        return false
     }
     Log.i(TAG, "setFilter: 已勾选全部 $selected 个目标（翻页 $turns 次）⇒ 确认筛选")
     confirmFilter(step)
+    return true
 }
 
 /** 取当前帧网格缩略图（失败返回 null），用于到底判据（差异比例阈值）。 */
