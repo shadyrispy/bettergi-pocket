@@ -406,9 +406,15 @@ class ScreenStateJudgeTest {
                 ),
             ),
         )
+        // ★ 阈值 0.75 是两轮跨档审计的结论（0.60 误报 9 帧 / 0.80 漏掉 3200 全屏变体 0.798）。
+        //   下界 0.75 防退（标题屏实测 0.694 会误报）；上界 0.79 防过紧（3200 变体 0.798 要被收进来）。
         assertTrue(
-            "pill 阈值不得低于 0.75（跨档审计：标题屏实测 0.694 会误报）",
+            "pill 阈值下界 0.75（低于它标题屏 0.694 会误报）",
             ScreenStateJudge.DISCONNECT_PILL_MIN >= 0.75,
+        )
+        assertTrue(
+            "pill 阈值上界 0.79（高于它会漏掉 3200 全屏变体实测值 0.798）",
+            ScreenStateJudge.DISCONNECT_PILL_MIN <= 0.79,
         )
         // gold 那一刀最要紧：它是排除"常驻界面奶油按钮"的关键（负例 gold 恒 ≈0）
         assertTrue(
