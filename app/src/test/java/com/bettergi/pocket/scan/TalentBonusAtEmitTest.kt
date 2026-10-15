@@ -7,6 +7,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.BeforeClass
 import org.junit.Test
 import java.io.File
 
@@ -19,6 +20,17 @@ import java.io.File
  * 只测"给定 c=6 能减对"是**空跑**（那半一直是对的），必须钉"c 晚到也对"。
  */
 class TalentBonusAtEmitTest {
+
+    companion object {
+        // 构造 ScanEngine 会分配 `panelCropBuf = Mat()` ⇒ 单类运行（--tests 过滤）时
+        // 必须先加载 native；全量跑里由先行的 ScreenStateJudgeTest 等类代劳，这里自足。
+        @JvmStatic
+        @BeforeClass
+        fun loadOpenCv() {
+            nu.pattern.OpenCV.loadLocally()
+            org.opencv.core.Mat(2, 2, org.opencv.core.CvType.CV_8UC3, org.opencv.core.Scalar.all(0.0)).release()
+        }
+    }
 
     private val dict: GoodNames by lazy {
         val f = File("src/main/assets/dsl/tools/mappings.json")
@@ -118,5 +130,44 @@ class TalentBonusAtEmitTest {
         val e = engine(listOf(10, 10, 10), 6, "NoSuchCharacter")
         e.applyTalentBonusForEmit()
         assertEquals(listOf(10, 10, 10), e.charTalents.toList())
+    }
+
+    // ── ★ 2026-10-15 #306：奇偶（Manekin/Manekina）无命座 ⇒ emit 时补归零 ──
+
+    /**
+     * 华为 10-15 实测（gt-recapture-20261015）：headerOnly 预读把名字 OCR 成「随机姓」
+     * ⇒ resolveKey=null ⇒ 命座页守卫查不到 NO_CONSTELLATION_KEYS ⇒ c=6 原样入库。
+     * emit 时 lastCharKey 已被属性页 parse 修正为权威值 ⇒ 在此归零。
+     */
+    @Test
+    fun `奇偶 c 误读 6 在 emit 时归零`() {
+        val e = engine(listOf(10, 10, 10), 6, "Manekin")
+        e.applyTalentBonusForEmit()
+        assertEquals("Manekin 无命座系统，c 必须是 0（GT 恒 0）", 0, e.charConstellation)
+        assertEquals("奇偶无命座加成 ⇒ 天赋保持面板原值 10/10/10", listOf(10, 10, 10), e.charTalents.toList())
+    }
+
+    @Test
+    fun `奇偶 Manekina 同样归零`() {
+        val e = engine(listOf(10, 10, 10), 6, "Manekina")
+        e.applyTalentBonusForEmit()
+        assertEquals(0, e.charConstellation)
+    }
+
+    @Test
+    fun `奇偶 c 已是 0 时无操作`() {
+        val e = engine(listOf(10, 10, 10), 0, "Manekin")
+        e.applyTalentBonusForEmit()
+        assertEquals(0, e.charConstellation)
+        assertEquals(listOf(10, 10, 10), e.charTalents.toList())
+    }
+
+    @Test
+    fun `非奇偶角色不受新守卫影响`() {
+        // 真有 c6 的角色不得被误归零（守卫只认 NO_CONSTELLATION_KEYS）
+        val e = engine(listOf(1, 4, 4), 6, "Barbara")
+        e.applyTalentBonusForEmit()
+        assertEquals("Barbara 的 c6 是真值，必须保留", 6, e.charConstellation)
+        assertEquals(listOf(1, 1, 1), e.charTalents.toList())
     }
 }

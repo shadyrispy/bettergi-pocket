@@ -1538,6 +1538,16 @@ internal fun ScanEngine.applyTalentBonusForEmit() {
     if (talentBonusApplied) return
     talentBonusApplied = true
     if (charTalents.all { it <= 0 }) return // 没读过天赋（判重跳过格就是这一支）⇒ 无可扣，别打日志刷计数
+    // ★ 2026-10-15 #306：**奇偶命座归零在 emit 时补一道**。`readConstellation` 末尾那次守卫
+    //   读的是 `lastCharKey`，而交替页签序下命座读取**早于**属性页 parse：headerOnly 预读把
+    //   名字 OCR 成「随机姓」（缺尾字）⇒ resolveKey=null ⇒ lastCharKey=null ⇒ 守卫查不到
+    //   NO_CONSTELLATION_KEYS ⇒ c=6 原样入库（华为 10-15 实测 Manekin c6 vs GT c0；
+    //   Manekina 那格有 `6 → 0` 日志是因为 headerOnly 恰好解析成功——纯相位运气）。
+    //   走到这里 lastCharKey 已是属性页 parse 修好的权威值 ⇒ 在此兜底。幂等：c 已是 0 时无感。
+    if (lastCharKey != null && lastCharKey in NO_CONSTELLATION_KEYS && charConstellation != 0) {
+        Log.i(TAG, "char: $lastCharKey 属奇偶（无命座，emit 时补守卫）⇒ 命座读数 $charConstellation → 0")
+        charConstellation = 0
+    }
     val c = charConstellation
     // 旅行者的 GOOD 键带元素后缀（TravelerDendro…），而词典只有一个 `Traveler` 条目 ⇒ 归一到基名再查。
     val dictKey = lastCharKey?.let { k -> if (TRAVELER_BY_ELEMENT.containsValue(k)) "Traveler" else k }

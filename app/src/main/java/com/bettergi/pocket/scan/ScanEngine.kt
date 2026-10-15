@@ -1737,6 +1737,46 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         }
 
         /**
+         * ★ 2026-10-15 #305：页末**跨页身份重放撤回**的判定（纯函数，供窄测试）。
+         *
+         * 武器的重叠区重读统一出口：同张卡在相邻两页各被读一次、各入库一次。既有三道判据
+         * 都盖不住（像素指纹 0 命中 / `weaponCellEmitted` 键含页行列挡不住位移 / 锚定时刻的
+         * 追认撤不到 idx0——那时它的身份还是生产者竞态残值）。本函数在**页末**跑：此刻
+         * `curPageIds` 已被 pipe 排水回填成权威身份，按本页实测前进量 [advanceRows] 重放
+         * 逐格比对，返回应撤的格下标（= 身份逐位等于上页对齐位的格）。
+         *
+         * 门控与 [crossPageOverlap] 同族：`advanceRows <= 0`（无跨页位移）或
+         * `>= traverseRows`（整页前进零重叠）⇒ 空集；空身份不判（读失败的格不能与空格"相等"）。
+         * 天然同款不受影响：判的是**逐位全等身份**（含词条数值），真列表里同款件相隔几十件，
+         * 不可能落进同一前进量的对齐位。
+         *
+         * @param emitted 本页**emit 过**的格下标集（复制格/未 emit 格不在内 ⇒ 天然幂等；
+         *                锚定时刻追认已撤的格其 emit 记录已 remove，同样不在内）。
+         */
+        internal fun replayWithdrawIdxs(
+            curIds: List<String>,
+            prev: List<String>,
+            cols: Int,
+            traverseRows: Int,
+            advanceRows: Int,
+            emitted: Set<Int>,
+        ): List<Int> {
+            if (advanceRows <= 0 || advanceRows >= traverseRows) return emptyList()
+            if (cols < 1 || traverseRows < 2) return emptyList()
+            val out = ArrayList<Int>(2)
+            for (idx in emitted) {
+                if (idx < 0 || idx >= curIds.size) continue
+                val id = curIds[idx]
+                if (id.isEmpty()) continue
+                val pr = idx / cols + advanceRows
+                val pc = idx % cols
+                if (pr >= traverseRows) continue
+                if (prev.getOrNull(pr * cols + pc) == id) out.add(idx)
+            }
+            return out.sorted()
+        }
+
+        /**
          * 圣遗物**身份锚定**的配对搜索（纯函数）：在本页锚点 `(i1, i2)` 与上页身份表 [prev] 之间
          * 找**逐位相邻**的落点，返回上页下标 `hit`（`i1 ≡ prev[hit]`、`i2 ≡ prev[hit+1]`），无解 -1。
          *

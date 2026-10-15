@@ -810,6 +810,43 @@ internal suspend fun ScanEngine.pagedGridCore(
             }
             cellLogs.clear()
         }
+        // ── ★ 2026-10-15 #305：页末**跨页身份重放撤回**（武器的重叠区重读统一出口）──
+        //   缺陷形状（华为 2244 全量武器实测，对账新 GT 多 5 漏 4）：
+        //   · 多 5 = 同一张卡在相邻两页各被读一次、各入库一次。三道既有判据都盖不住它：
+        //     像素指纹 0 命中（fpband 残差 89~114px 超可点带 88 ⇒ 按名义行位取不到真行）；
+        //     `weaponCellEmitted` 键含页/行/列，挡不住**跨页位移**；锚定 d=14 只跳 idx3..6，
+        //     锚定时刻的追认只撤 idx1/idx2（idx0 的身份当时还是**生产者竞态残值**，永远追不回）。
+        //   · 漏 4 = 上面的虚增把「已入库」顶过游戏计数器（166≥165）⇒ `件数达标` 提前收尾，
+        //     列表尾部 4 件没扫到。 ⇒ 撤掉虚增，计数器判据自然恢复正确。
+        //   做法：页末（pipe 排水后、页账统计前）`curPageIds` 已是**权威身份**，按本页实测
+        //   前进量 aRows 重放逐格比对：本页某格身份 ≡ 上页同列 (row+a) 行的身份 ⇒ 同一张卡
+        //   ⇒ 撤回该格入库的武器。与锚定时刻的追认**幂等衔接**（已撤的 emit 记录已 remove）。
+        //   门控：`aRows` 无锚定（-1）或 0/整页 ⇒ 无跨页位移 ⇒ 不动。只涉武器：
+        //   圣遗物走内容键去重（dedupe 挡重读）、角色有 `characterAlreadySeen`。
+        //   ⚠️ 天然同款不受影响：比对的是**逐位全等身份**（含词条数值），同款同档的两把
+        //   真武器必然只在"与上页同一位置对齐"时才判重叠 —— 而 GT 同款件在真列表里
+        //   本就隔着几十件，不可能落进同一前进量的对齐位。
+        if (gridKey == "weapon_backpack" && curAdvanceRows > 0 &&
+            prevAllCellIds != null && curPageWeaponEmit.isNotEmpty()
+        ) {
+            val victims = ScanEngine.replayWithdrawIdxs(
+                List(cols * traverseRows) { i -> curPageIds[i] ?: "" },
+                prevAllCellIds!!, cols, traverseRows, curAdvanceRows, curPageWeaponEmit.keys,
+            )
+            if (victims.isNotEmpty()) {
+                // 降序删：at 是**入库序**的绝对下标，升序删会让后面登记的 at 集体移位
+                // （与锚定时刻追认的 sortedDescending 同一条纪律）。
+                val ats = victims.mapNotNull { idx: Int ->
+                    curPageWeaponEmit.remove(idx)?.takeIf { at: Int -> at in resultsWeapons.indices }
+                }
+                ats.sortedDescending().forEach { at: Int -> resultsWeapons.removeAt(at) }
+                Log.w(
+                    TAG,
+                    "pagedGrid[$gridKey] **页末重放撤回**: page=$pageNo 撤回 ${ats.size} 件跨页重读" +
+                        "（idx=$victims 前进 $curAdvanceRows 行；身份逐位与上页对齐位相同）",
+                )
+            }
+        }
         val added = results.size + resultsWeapons.size + resultsCharacters.size - beforeCount
         // ★ #230 续：把**每页**的「时钟上限 + rec 累计成本」配成一对打出来。
         //   起/收两点读不到中途塌到多深，而"扫描中 rec 单价为什么涨"必须用**同一轮内**的
