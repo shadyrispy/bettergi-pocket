@@ -904,6 +904,28 @@ internal suspend fun ScanEngine.filterPanelState(): FilterPanelState {
     return st
 }
 
+/**
+ * 轮询 [filterPanelState] 直到读到非 UNKNOWN，或预算耗尽（返回最后一次读数，可能仍是 UNKNOWN）。
+ *
+ * 为什么需要：设备端 OCR 对同一标题条**一次读对、一次读成乱码**是常态（见 [filterPanelState] KDoc
+ * 里 `ensureSetPanel` 轮询 6 次的同源教训）。#299 真机实测：`confirmFilter` 的收尾判定用**单发**
+ * `filterPanelState()`，一次撞 title='A' ⇒ UNKNOWN ⇒ 漏关主面板 ⇒ 头几格压面板静默丢件。
+ * 收尾/露出判定改走本函数，把"侥幸读到"变成"读到为止"。
+ */
+internal suspend fun ScanEngine.pollFilterPanelState(
+    tries: Int = 4,
+    gapMs: Long = FILTER_PANEL_POLL_MS,
+): FilterPanelState {
+    var last = filterPanelState()
+    var i = 1
+    while (last == FilterPanelState.UNKNOWN && i < tries) {
+        delay(gapMs)
+        last = filterPanelState()
+        i++
+    }
+    return last
+}
+
 /** 套装子面板的按钮中心（`profiles.grids.set_filter_popup.<key>`：okBtn / clearBtn / title）。 */
 internal fun ScanEngine.setPanelCenter(key: String): IntArray? {
     val g = profile.rawObject("grids.set_filter_popup") ?: return null
@@ -1203,15 +1225,53 @@ internal suspend fun ScanEngine.confirmFilter(step: JSONObject) {
     )
     clickAt(pt[0], pt[1])
     delay(FILTER_PANEL_STEP_MS)
-    // 子面板关掉后可能**露出主面板**（背包入口是两层）⇒ 复核并收尾，否则后面会站在主面板上跑。
-    when (filterPanelState()) {
-        FilterPanelState.MAIN_PANEL, FilterPanelState.SET_PANEL -> {
-            Log.i(TAG, "confirmFilter: 仍有面板残留 ⇒ BACK 收尾")
-            leaveFilterPanels("confirmFilter 收尾", homeHint = homeHintOf(step))
+    // 子面板关掉后会**露出主面板「圣遗物筛选」**（背包入口是两层：主面板 + 套装子面板）。
+    // 必须再点一次主面板「确认」把它关掉，否则流程会站在主面板上跑网格、头几格点击被面板吃掉
+    // ⇒ 详情面板不刷新 ⇒ 陈旧帧判重静默丢件（#299 真机实测：run1 丢 3 根羽毛，run2 因判态侥幸
+    //   读到 MAIN_PANEL 才走 BACK 收尾）。旧实现只在**单发** filterPanelState 命中 MAIN/SET_PANEL
+    //   时才收尾，撞一次 OCR 乱码（title='A' ⇒ UNKNOWN）就整个跳过 ⇒ 漏关。
+    // ⚠️ 只在**确读到面板**时才点主面板「确认」——UNKNOWN 时该坐标可能正压在网格上，盲点会误触格子
+    //   （用户硬约束"不能影响网格点击"）。轮询后仍 UNKNOWN ⇒ 退回 leaveFilterPanels 的 BACK 收尾
+    //   （BACK 是系统键，绝不压网格）。仅当从子面板进来（subPt!=null）才需要关露出的主面板；
+    //   回退路（subPt==null）第一下点的本就是主面板「确认」，不再重复点。
+    if (subPt != null) {
+        when (pollFilterPanelState()) {
+            FilterPanelState.MAIN_PANEL, FilterPanelState.SET_PANEL -> {
+                val mainPt = filterPanelCenter("ok")
+                if (mainPt != null) {
+                    Log.i(TAG, "confirmFilter: 露出主面板 ⇒ 再点主面板「确认」关闭=(${mainPt[0]},${mainPt[1]})")
+                    clickAt(mainPt[0], mainPt[1])
+                    delay(FILTER_PANEL_STEP_MS)
+                    when (pollFilterPanelState()) {
+                        FilterPanelState.MAIN_PANEL, FilterPanelState.SET_PANEL -> {
+                            Log.i(TAG, "confirmFilter: 点主面板确认后仍残留 ⇒ BACK 收尾")
+                            leaveFilterPanels("confirmFilter 收尾", homeHint = homeHintOf(step))
+                        }
+                        else -> Unit
+                    }
+                } else {
+                    Log.w(TAG, "confirmFilter: 主面板 ok 未标定 ⇒ 退回 BACK 收尾")
+                    leaveFilterPanels("confirmFilter 主面板未标定", homeHint = homeHintOf(step))
+                }
+            }
+            FilterPanelState.BACKPACK ->
+                Log.i(TAG, "confirmFilter: 子面板确认后已回到背包网格 ⇒ 无需再关")
+            FilterPanelState.UNKNOWN -> {
+                Log.w(TAG, "confirmFilter: 轮询后判态仍 UNKNOWN ⇒ 不盲点主面板确认（会压网格），交 BACK 收尾")
+                leaveFilterPanels("confirmFilter UNKNOWN", homeHint = homeHintOf(step))
+            }
         }
-        else -> Unit
+    } else {
+        // 回退路：pt 就是主面板「确认」，已点过一次；复核是否还残留（含 UNKNOWN 也交 BACK 兜）。
+        when (pollFilterPanelState()) {
+            FilterPanelState.MAIN_PANEL, FilterPanelState.SET_PANEL, FilterPanelState.UNKNOWN -> {
+                Log.i(TAG, "confirmFilter: 回退路复核 ⇒ BACK 收尾")
+                leaveFilterPanels("confirmFilter 回退收尾", homeHint = homeHintOf(step))
+            }
+            else -> Unit
+        }
     }
-    // 兼容旧配置的 tailGuard 语义已在上面被"判态 + BACK"取代，step 参数保留给日志/未来扩展
+    // 兼容旧配置的 tailGuard 语义已在上面被"判态 + 收尾"取代，step 参数保留给日志/未来扩展
     if (step.optString("tailGuard").isNotEmpty()) {
         Log.i(TAG, "confirmFilter: tailGuard='${step.optString("tailGuard").take(40)}' 已由判态收尾取代")
     }
