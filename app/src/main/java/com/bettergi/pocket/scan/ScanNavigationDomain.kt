@@ -11,6 +11,8 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.ANCHOR_RETRIES
 import com.bettergi.pocket.scan.ScanEngine.Companion.ANCHOR_RETRY_DELAY_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.CHAIN_ANCHOR_PATHS
 import com.bettergi.pocket.scan.ScanEngine.Companion.CLICK_SETTLE_MS
+import com.bettergi.pocket.scan.ScanEngine.Companion.DISCONNECT_POLL_MS
+import com.bettergi.pocket.scan.ScanEngine.Companion.DISCONNECT_RELOAD_WAIT_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.ENTER_SETTLE_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.ENTRY_IDEMPOTENT_POLL_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.FILTER_PANEL_BACK_MS
@@ -125,6 +127,16 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
     /** ★ #266：整轮最多一次「点任意处进入」（标题屏兜底），不重置。 */
     var titleTapUsed = false
     while (attempt++ < maxAttempts) {
+        // ★ 2026-10-15 S4a：**先查 SDK 登录页**（优先级最高 —— 它同包名，画面判据对它全部失效）。
+        //   查到即停手 + 通知，一次都不点（项目红线：一旦冒出登录表单立刻交回用户，绝不自动填）。
+        //   判据走 Activity 类名而非画面，理由见 ScanEngine.sdkLoginOnTop 的 KDoc。
+        if (sdkLoginOnTop?.invoke() == true) {
+            Log.e(TAG, "returnToHome: 前台是 MiHoYo SDK 登录/切号页（与游戏同包名，顶号时常见）⇒ 停手不点击")
+            NoticeCenter.error("检测到米游社登录/切号页，已停止自动流程（需你手动登录后重试）")
+            vars.stopRequested = true
+            vars.stopReason = "sdkLoginRequired"
+            return
+        }
         val frame = freshFrame()
         val atHome: Boolean?
         val pt: FramePoint
@@ -132,6 +144,7 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
         val beforeThumb: ByteArray?
         val screenClass: ScreenStateJudge.ScreenClass?
         val photometric: ScreenStateJudge.Photometric?
+        val disconnectBox: ScreenStateJudge.DisconnectBox?
         try {
             atHome = atHomeScreen(frame)
             // 模板未注册/配置未加载时 match 返回 score=-1 → 无法判据，直接放弃归位
@@ -144,12 +157,28 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
             //   按 OTHER 走既有刹车链 ⇒ 最坏情况与改动前逐位一致。
             photometric = ScreenStateJudge.photometric(frame)
             screenClass = photometric?.let { ScreenStateJudge.classify(it) }
+            // ★ 2026-10-15 S4b：断线/被顶号模态框。**必须排在 HOME 判定之前** ——
+            //   断线框压在世界上时 paimon 仍在（实测 0.937~0.941）⇒ atHomeScreen 会判 true，
+            //   于是归位早早 return、把断线框当"已就绪"交给业务步，业务步在框上瞎点。
+            //   判据只用框自己的三特征（框压在世界/背包/洞穴上都成立）。
+            disconnectBox = ScreenStateJudge.disconnectBox(frame)
+                ?.takeIf { ScreenStateJudge.isDisconnectBox(it) }
             beforeThumb = VoteJudges.screenThumb(frame)
             val (p, tmpl) = returnButtonPoint(frame)
             pt = p
             fromTemplate = tmpl
         } finally {
             frame.release()
+        }
+        if (disconnectBox != null) {
+            Log.i(TAG, "returnToHome: 判出断线/被顶号模态框（$disconnectBox）⇒ 点「确认」等它 reload")
+            // ★ 2026-10-15 上机修正（同 WAIT 分支那次的同类错误）：处置成功**必须回主循环重判**，
+            //   不能 return。实测（BS 13:41）：点完确认 → 框消失 → 下一态是 **SDK 登录页**
+            //   （`SdkActivity`，因为断线重连要重新走登录）—— 直接 return 会让归位放弃，
+            //   紧随的 enterScreen 就在登录页上点背包入口（锚点三次不中 → 最后 frame timeout）。
+            //   continue 后下一轮：S4a 探针会先命中（本轮新增）⇒ 干净停手。
+            if (dismissDisconnectBox()) continue
+            return
         }
         if (atHome) {
             Log.i(TAG, "returnToHome: 已在主界面（第 $attempt 次判定）")
@@ -247,6 +276,77 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
     NoticeCenter.error("自动归位 $maxAttempts 次未达主界面，已停止点击")
     vars.stopRequested = true
     vars.stopReason = "returnHomeStuck"
+}
+
+/**
+ * **处置断线/被顶号模态框**（S4b，2026-10-15）：点「确认」→ 等游戏自动 reload → 交回归位重判。
+ *
+ * 语义依据（`device-log-20260924-20261006.md` 两处实测）：
+ *  - 该框的「确认」点下去**不会退出游戏**；游戏自动 reload 到标题屏，
+ *    再点「点击进入」即回世界，**全程用已存 token、不出现账号密码框**。
+ *  - 「重新连接服务器」那个按钮**才是**需要授权的动作（会把账号在**另一台设备**踢下线，
+ *    见 `device-log` 10-02 节）——那个**不在本函数处理范围**，且本框上并没有它。
+ *
+ * 点击落点 = **(0.500W, 0.752H)**（实测药丸中心；修正了 device-log 记的 `(1121,840)`，
+ * 按帧比例该值对应 y=0.778、与实测差 26px。标定见 [ScreenStateJudge.DisconnectBox] 的 KDoc）。
+ *
+ * ⚠️ 与"点任意处进入"同款：**走零位移 stroke**（华为游戏面把带位移的 stroke 读成拖拽 ——
+ * 2026-10-13 实测 `input tap` 关不掉框、`input swipe x y x y 60` 一次成功）。
+ *
+ * 返回 `true` = 框已消失（游戏 reload 中或已回标题屏，由调用方下一轮重判决定下一步）；
+ * `false` = 失败（**stopReason 已由本函数处置**，调用方只需 return）。
+ */
+internal suspend fun ScanEngine.dismissDisconnectBox(): Boolean {
+    // 点前过安全守卫：框若已变形成「确认退出游戏」那一类，守卫会拦住（绝不点掉退出框）
+    if (!safetyGuard()) {
+        Log.w(TAG, "dismissDisconnectBox: 安全闸拒绝 ⇒ 停手（成因见 safetyGuard 自己的日志）")
+        return false
+    }
+    val tap = try {
+        val f = freshFrame()
+        try {
+            (f.cols() * 0.5).toInt() to (f.rows() * 0.752).toInt()
+        } finally {
+            f.release()
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+    if (tap == null) {
+        Log.e(TAG, "dismissDisconnectBox: 取不到帧 ⇒ 点不了确认，停手")
+        NoticeCenter.error("断线框处置取不到帧，已停手")
+        vars.stopRequested = true
+        vars.stopReason = "disconnectStuck"
+        return false
+    }
+    Log.i(TAG, "dismissDisconnectBox: 点「确认」(${tap.first},${tap.second})（零位移 stroke）")
+    actions.tap(tap.first, tap.second)
+    // 等游戏自动 reload：每拍重判"框还在不在"。框一消失就交回（下一轮重判三态/主界面）。
+    val until = clock() + DISCONNECT_RELOAD_WAIT_MS
+    while (clock() < until) {
+        if (vars.stopRequested) {
+            Log.w(TAG, "dismissDisconnectBox: 被外部停手（stopReason=${vars.stopReason}）⇒ 不再改判")
+            return false
+        }
+        delay(DISCONNECT_POLL_MS)
+        val f = runCatchingCancellable { freshFrame() }.getOrNull() ?: continue
+        val box = try {
+            ScreenStateJudge.disconnectBox(f)
+        } finally {
+            f.release()
+        }
+        if (box == null || !ScreenStateJudge.isDisconnectBox(box)) {
+            Log.i(TAG, "dismissDisconnectBox: 框已消失（reload 中）⇒ 交回归位重判")
+            return true
+        }
+    }
+    Log.e(TAG, "dismissDisconnectBox: 点了「确认」后 ${DISCONNECT_RELOAD_WAIT_MS}ms 框仍在 ⇒ 停手")
+    NoticeCenter.error("断线框点了确认后仍未消失，已停手")
+    vars.stopRequested = true
+    vars.stopReason = "disconnectStuck"
+    return false
 }
 
 /**
@@ -562,6 +662,17 @@ internal suspend fun ScanEngine.assertScreen(step: JSONObject) {
  * 角色筛选面板每步等待的**生效值**：`timing=panel=NNNN` 优先，未给则用 [PANEL_SETTLE_MS]（与改动前逐位一致）。
  */
 internal suspend fun ScanEngine.enterScreen(step: JSONObject, isRetry: Boolean = false) {
+    // ★ 2026-10-15 S4a：入口链开链前先查 SDK 登录/切号页（与 returnToHome/pagedGrid 同源）。
+    //   为什么这条必须有（BS 13:42 实测）：断线重连后会先落到 SDK 登录页，而它**同包名**
+    //   ⇒ 若此刻正走到 enterScreen，锚点轮询会一路空转到 `anchor not reached` 崩轮
+    //   （历史事故：2026-10-14 06:10 那条 `/元素/`）。查到即停手，绝不盲点入口。
+    if (sdkLoginOnTop?.invoke() == true) {
+        Log.e(TAG, "enterScreen: 前台是 MiHoYo SDK 登录/切号页 ⇒ 不点入口链，停手")
+        NoticeCenter.error("检测到米游社登录/切号页，已停止自动流程（需你手动登录后重试）")
+        vars.stopRequested = true
+        vars.stopReason = "sdkLoginRequired"
+        return
+    }
 
     if (enterScreenStep == null) enterScreenStep = step
     // §14 P2 preReset：到达前参数复位（auto_equip D7 定稿「排序→重置→确认」）。
@@ -793,6 +904,13 @@ internal suspend fun ScanEngine.assertAnchor(anchor: JSONObject?, step: JSONObje
         return // 重跑内 assertAnchor 已再验证；仍失败则抛
     }
     // 断言失败 = 界面未到达：继续扫描只会全错，终止比带病跑偏好
+    // ★ 2026-10-15：但若已经有人**干净地喊停**（S4a 登录页 / 看门狗 / 用户按停），
+    //   就不该再抛异常 —— 抛出去会让收尾报 `anchor not reached`（假归因：真因是"停手了"），
+    //   与 2026-10-13 那条"归属错了的日志比没有日志更坏"同族。静默返回，由收尾按 stopReason 报。
+    if (vars.stopRequested) {
+        Log.w(TAG, "assertAnchor: 锚点未达但已有停止请求（stopReason=${vars.stopReason}）⇒ 不再抛，交收尾按该原因报")
+        return
+    }
     throw ScanAbortedException("enterScreen anchor not reached: /$expect/")
 }
 

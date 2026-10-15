@@ -93,6 +93,21 @@ class ScanEngine(
      * 而用户口径是**游戏切后台本来就会断线重登** ⇒ 这一轮已经没有继续的意义，应当立刻停轮报出来。
      */
     internal val foregroundOk: (() -> Boolean?)? = null,
+    /**
+     * ★ 2026-10-15 S4a：**同包名的 MiHoYo SDK 登录/切号页探针** —— 返回 true = 前台是登录页。
+     * 默认 null = 不判（单测/离线跑不接无障碍）。
+     *
+     * 为什么必须单独一条（不能并进 [foregroundOk]）：SDK 登录页与游戏**同包名**
+     * （`com.miHoYo.Yuanshen/com.miHoYo.sdk.platform.SdkActivity`），前台闸按包名判恒为"是原神"
+     * ⇒ 放行。2026-10-14 06:10 真机实测：被顶号后 SDK 页冒出来，character_scan 当场崩在
+     * `anchor not reached: /元素/`（`20261014_huawei_283/evidence/`）—— 注入侧虽已拦（#283），
+     * 但引擎不知道，会一路重试到超时。
+     *
+     * 处置口径 = **停手 + 通知**（项目红线：一旦冒出登录表单立刻交回用户，绝不自动填）。
+     * 判据走 Activity **类名**（`GenshinPackages.isSdkActivity`），不是画面 —— 画面级判据
+     * 对同包名的登录页无效（详见 `ScreenStateJudge` 顶部"为什么画面判据不够"）。
+     */
+    internal val sdkLoginOnTop: (() -> Boolean?)? = null,
     /** 翻 N 页早停（调试翻页准确性用；默认不限制）。 */
     internal val maxPages: Int = Int.MAX_VALUE,
     /** 单测注入真实时钟用：JVM 里 SystemClock 被 returnDefaultValues 恒返回 0（会挂死轮询）。 */
@@ -1470,6 +1485,17 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          */
         const val WAIT_SCREEN_BUDGET_MS = 90_000L
         const val WAIT_SCREEN_POLL_MS = 2000L
+
+        /**
+         * ★ 2026-10-15 S4b：断线框点「确认」后**等游戏自动 reload** 的预算与步长。
+         *
+         * reload 是"游戏自己重连 + 回标题屏"，实测（`device-log` 10-03/10-06 两节）点完
+         * "自动 reload 到标题屏"、再点「点击进入」即回世界。等待上限取 30s：
+         * 网络正常时 reload 在秒级完成；30s 还没消失说明不是普通断线（可能真掉登录），
+         * 那就该停手报出来而不是继续等。每拍重判"框还在不在"，一消失立刻交回。
+         */
+        const val DISCONNECT_RELOAD_WAIT_MS = 30_000L
+        const val DISCONNECT_POLL_MS = 1500L
         // §15 P0-1：左侧菜单切页后的稳定等待（长于普通点击，动画约 600~800ms）
         /**
          * 页签切换后的等待。**2026-09-12 由 900 → 700**（档位实测：屏幕侧内容就绪 397~529ms；

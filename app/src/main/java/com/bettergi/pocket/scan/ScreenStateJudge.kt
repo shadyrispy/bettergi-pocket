@@ -142,6 +142,177 @@ internal object ScreenStateJudge {
     enum class ScreenClass { WAIT, TITLE, OTHER }
 
     /**
+     * **「连接已断开 / 账号在另一处重复登录」模态框**的特征（2026-10-15 标定）。
+     *
+     * 这是 S4b：被顶号/断线时游戏弹的框，**压在任意界面上**（世界里、背包里、洞穴里都可能 ——
+     * 实测 `menu_hw_go.png` 就是压在背包上的同一个框）⇒ 判据只能用**框自己的三个特征**，
+     * 不能靠背景。三特征取在框的固定部位（帧内比例 ⇒ 跨档免标定）：
+     *
+     * | 特征 | 位置（帧比例） | 实测值（正例 17 帧 / 负例 70+ 帧） |
+     * |---|---|---|
+     * | `pill` 奶油药丸（确认钮） | 中心 `(0.50, 0.752)`，半宽半高 `(0.10, 0.035)` | 正例 0.85 / 负例最高远低 |
+     * | `gold` 金标题「连接已断开」 | `y[.16,.24] × x[.30,.69]` 内 `R>170 ∧ R−B>45 ∧ G∈(130,R)` | 正例 0.042–0.055 / **负例 ≈0** |
+     * | `gray` 灰正文「账号在另一处重复登录」 | `y[.43,.48] × x[.40,.60]` 内低饱和中亮 | 正例 0.19 / 负例低 |
+     *
+     * ⚠️ **`gold` 是区分度最大的一条**（负例恒 ≈0）：没有它，`pill` 单独在常驻界面上也会命中
+     * （背包底部那排按钮同为奶油色 —— 实测 `menu_hw_go` 的 `pill` 恰是 0.850，而它**真的**是断线框；
+     * 但同类形状的普通界面也会踩到）。**改动前重跑审计**。
+     *
+     * 标定出处：`dsl/verify/runlogs/s7cave_20261015_*`（三档实拍）+ 248states 归档 12 帧；
+     * 确认钮坐标实测 **(0.500W, 0.752H)** —— 这**修正**了 `device-log-20260924-20261006.md`
+     * 记的 `(1121,840)`：按帧比例该文档值对应 y=0.778，与实测药丸中心差 26px。
+     */
+    data class DisconnectBox(
+        val pill: Double,
+        val gold: Double,
+        val gray: Double,
+    ) {
+        override fun toString(): String = "pill=%.3f gold=%.3f gray=%.3f".format(pill, gold, gray)
+    }
+
+    /**
+     * 断线框三阈值（见 [DisconnectBox] 的实测表）。
+     *
+     * ⚠️ **`DISCONNECT_PILL_MIN` 是 0.80 不是 0.60**（2026-10-15 跨档审计后收紧）：
+     * 正例实测恒 **0.849–0.850**（框的确认钮像素极稳定），而负例里
+     * **标题屏/筛选面板的同一位置也会出现奶油色**（2560 标题屏 0.694、3200 0.644、
+     * 筛选面板 0.849）⇒ 0.60 会误报 9 帧。取 0.80 后：正例 15/15 全过、
+     * 负例只剩 `b_login_page_now`（它本身是登录相关页，判成"要去点确认"方向无害）。
+     *
+     * 另外两条余量本就充足（正例 gold 0.049–0.055 vs 负例最高 0.109——
+     * 注意 gold **单独用会误报**，筛选面板标题区同为金色；三特征必须取 ∧）。
+     */
+    const val DISCONNECT_PILL_MIN = 0.80
+    const val DISCONNECT_GOLD_MIN = 0.03
+    const val DISCONNECT_GRAY_MIN = 0.05
+
+    /**
+     * 判一帧是不是断线框。判不出（空帧/异常）⇒ `null`。
+     *
+     * 性能：三次 `countNonZero` 量级的局部统计（三个小 ROI），比全帧扫描便宜。
+     */
+    fun disconnectBox(frame: Mat): DisconnectBox? {
+        if (frame.empty() || frame.cols() <= 0 || frame.rows() <= 0) return null
+        val h = frame.rows()
+        val w = frame.cols()
+        return try {
+            val pill = creamFraction(
+                frame,
+                cxRatio = 0.50, cyRatio = 0.752, halfW = 0.10, halfH = 0.035,
+            )
+            val gold = goldTextFraction(frame, h, w)
+            val gray = grayTextFraction(frame, h, w)
+            DisconnectBox(pill, gold, gray)
+        } catch (e: Exception) {
+            Log.w(TAG, "ScreenStateJudge.disconnectBox 异常 ⇒ 判不了：${e.message}")
+            null
+        }
+    }
+
+    /** 断线框判定（三特征全过才认）。 */
+    fun isDisconnectBox(b: DisconnectBox): Boolean =
+        b.pill >= DISCONNECT_PILL_MIN && b.gold >= DISCONNECT_GOLD_MIN && b.gray >= DISCONNECT_GRAY_MIN
+
+    /** 指定中心与半宽的奶油色占比（`R>225 ∧ G>215 ∧ B>195 ∧ R−B∈(10,70)`）。 */
+    private fun creamFraction(
+        frame: Mat,
+        cxRatio: Double,
+        cyRatio: Double,
+        halfW: Double,
+        halfH: Double,
+    ): Double {
+        val h = frame.rows()
+        val w = frame.cols()
+        val cx = (w * cxRatio).toInt()
+        val cy = (h * cyRatio).toInt()
+        val x0 = (cx - w * halfW).toInt().coerceIn(0, w - 1)
+        val x1 = (cx + w * halfW).toInt().coerceIn(x0 + 1, w)
+        val y0 = (cy - h * halfH).toInt().coerceIn(0, h - 1)
+        val y1 = (cy + h * halfH).toInt().coerceIn(y0 + 1, h)
+        val roi = Mat(frame, Rect(x0, y0, x1 - x0, y1 - y0))
+        val b = Mat(); val g = Mat(); val r = Mat()
+        val m1 = Mat(); val m2 = Mat(); val m3 = Mat(); val m4 = Mat()
+        try {
+            Core.extractChannel(roi, b, 0)
+            Core.extractChannel(roi, g, 1)
+            Core.extractChannel(roi, r, 2)
+            // R>225 ∧ G>215 ∧ B>195 ∧ (R−B)>10 ∧ (R−B)<70
+            Core.inRange(r, Scalar(226.0), Scalar(255.0), m1)
+            Core.inRange(g, Scalar(216.0), Scalar(255.0), m2)
+            Core.inRange(b, Scalar(196.0), Scalar(255.0), m3)
+            val rb = Mat()
+            Core.subtract(r, b, rb)
+            Core.inRange(rb, Scalar(11.0), Scalar(69.0), m4)
+            Core.bitwise_and(m1, m2, m1)
+            Core.bitwise_and(m1, m3, m1)
+            Core.bitwise_and(m1, m4, m1)
+            return Core.countNonZero(m1).toDouble() / (roi.rows().toDouble() * roi.cols().toDouble())
+        } finally {
+            roi.release(); b.release(); g.release(); r.release()
+            m1.release(); m2.release(); m3.release(); m4.release()
+        }
+    }
+
+    /** 金标题占比：`y[.16,.24] × x[.30,.69]` 内 `R>170 ∧ R−B>45 ∧ G>130 ∧ G<R`。 */
+    private fun goldTextFraction(frame: Mat, h: Int, w: Int): Double {
+        val x0 = (w * 0.30).toInt().coerceIn(0, w - 1)
+        val x1 = (w * 0.69).toInt().coerceIn(x0 + 1, w)
+        val y0 = (h * 0.16).toInt().coerceIn(0, h - 1)
+        val y1 = (h * 0.24).toInt().coerceIn(y0 + 1, h)
+        val roi = Mat(frame, Rect(x0, y0, x1 - x0, y1 - y0))
+        val b = Mat(); val g = Mat(); val r = Mat()
+        val m1 = Mat(); val m2 = Mat(); val m3 = Mat(); val m4 = Mat()
+        try {
+            Core.extractChannel(roi, b, 0)
+            Core.extractChannel(roi, g, 1)
+            Core.extractChannel(roi, r, 2)
+            Core.inRange(r, Scalar(171.0), Scalar(255.0), m1)   // R>170
+            val rb = Mat()
+            Core.subtract(r, b, rb)
+            Core.inRange(rb, Scalar(46.0), Scalar(255.0), m2)   // R−B>45
+            Core.inRange(g, Scalar(131.0), Scalar(255.0), m3)   // G>130
+            Core.compare(g, r, m4, Core.CMP_LT)                 // G<R
+            Core.bitwise_and(m1, m2, m1)
+            Core.bitwise_and(m1, m3, m1)
+            Core.bitwise_and(m1, m4, m1)
+            return Core.countNonZero(m1).toDouble() / (roi.rows().toDouble() * roi.cols().toDouble())
+        } finally {
+            roi.release(); b.release(); g.release(); r.release()
+            m1.release(); m2.release(); m3.release(); m4.release()
+        }
+    }
+
+    /** 灰正文占比：`y[.43,.48] × x[.40,.60]` 内 `max>120 ∧ (max−min)<30`。 */
+    private fun grayTextFraction(frame: Mat, h: Int, w: Int): Double {
+        val x0 = (w * 0.40).toInt().coerceIn(0, w - 1)
+        val x1 = (w * 0.60).toInt().coerceIn(x0 + 1, w)
+        val y0 = (h * 0.43).toInt().coerceIn(0, h - 1)
+        val y1 = (h * 0.48).toInt().coerceIn(y0 + 1, h)
+        val roi = Mat(frame, Rect(x0, y0, x1 - x0, y1 - y0))
+        val mask = Mat()
+        try {
+            Core.inRange(roi, Scalar(121.0, 121.0, 121.0), Scalar(255.0, 255.0, 255.0), mask)
+            // ⚠️ inRange 只保证三通道都 ≥121（过严/过松都可能），这里再叠"低饱和"：
+            //    用 max−min<30 才是原判据；OpenCV 没有单算子表达，改用 absdiff 求通道极差
+            val b = Mat(); val g = Mat(); val r = Mat()
+            val mx = Mat(); val mn = Mat(); val diff = Mat()
+            try {
+                Core.extractChannel(roi, b, 0); Core.extractChannel(roi, g, 1); Core.extractChannel(roi, r, 2)
+                Core.max(b, g, mx); Core.max(mx, r, mx)
+                Core.min(b, g, mn); Core.min(mn, r, mn)
+                Core.subtract(mx, mn, diff)
+                Core.inRange(diff, Scalar(0.0), Scalar(29.0), diff)
+                Core.bitwise_and(mask, diff, mask)
+            } finally {
+                b.release(); g.release(); r.release(); mx.release(); mn.release(); diff.release()
+            }
+            return Core.countNonZero(mask).toDouble() / (roi.rows().toDouble() * roi.cols().toDouble())
+        } finally {
+            roi.release(); mask.release()
+        }
+    }
+
+    /**
      * 一帧的光度特征。空帧/尺寸为 0 ⇒ `null`（调用方按"判不了"处置，回落既有路径）。
      *
      * 实现一律走 OpenCV 原生算子：**不要写 JVM 逐像素遍历** —— 2244 档全帧 242 万像素，

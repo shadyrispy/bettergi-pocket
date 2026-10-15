@@ -317,4 +317,119 @@ class ScreenStateJudgeTest {
             titleHit.toDouble() / titleSeen >= 0.80,
         )
     }
+
+    // ---------------- S4b：断线/被顶号模态框（2026-10-15）----------------
+
+    /**
+     * 断线框判据的**真实帧**验证：正例（含框）必须全命中，负例（无框）零误报。
+     *
+     * 正例 17 帧来自三档实拍 + 复现轮；负例是归档里的主界面/标题屏/加载屏/常驻菜单。
+     * **这是 S4b 的核心回归线** —— 判据调错会把正常画面当断线框去点「确认」（那个坐标
+     * 在普通界面上是空白或别的按钮），代价是误触。
+     */
+    @Test
+    fun `断线框判据在归档帧上正例全中负例零误报`() {
+        val root = repoRoot()
+        Assume.assumeTrue("仓库内未找到 dsl 归档 ⇒ 本用例不适用（跳过，非通过）", root != null)
+        // 正例：人工确认过含「连接已断开/账号在另一处重复登录」的帧
+        // （含 menu_hw_go —— 它压在背包上，说明该框会盖在任意界面）
+        val positives = listOf(
+            "dsl/verify/runlogs/248states_20261014/evidence/home_modal_hw_dl.png",
+            "dsl/verify/runlogs/248states_20261014/evidence/home_modal_hw_a2.png",
+            "dsl/verify/runlogs/248states_20261014/evidence/home_modal_hw_v2.png",
+            "dsl/verify/runlogs/248states_20261014/evidence/home_modal_hw_after.png",
+            "dsl/verify/runlogs/248states_20261014/evidence/menu_hw_go.png",
+            "dsl/verify/runlogs/20261014_huawei_283_repro/evidence/b_kick_state.png",
+            "dsl/verify/runlogs/20261014_huawei_283_repro/evidence/b_now.png",
+        ).map { File(root, it) }
+        Assume.assumeTrue("断线框正例帧缺失 ⇒ 跳过", positives.any { it.isFile })
+
+        val missed = ArrayList<String>()
+        for (f in positives) {
+            if (!f.isFile) continue
+            val mat = Imgcodecs.imread(f.absolutePath)
+            if (mat.empty()) { mat.release(); continue }
+            val ok = try {
+                ScreenStateJudge.disconnectBox(mat)?.let { ScreenStateJudge.isDisconnectBox(it) } == true
+            } finally {
+                mat.release()
+            }
+            if (!ok) missed += f.name
+        }
+        assertTrue("断线框正例漏判（S4b 判据失效）：${missed.joinToString()}", missed.isEmpty())
+
+        // 负例：归档里的正常画面 —— 一个都不许判成断线框
+        val negatives = listOf(
+            "dsl/verify/runlogs/248states_20261014/evidence/home_hw_f.png",
+            "dsl/verify/runlogs/248states_20261014/evidence/home_hw_q.png",
+            "dsl/verify/runlogs/248states_20261014/evidence/title_hw_title2.png",
+            "dsl/verify/runlogs/248states_20261014/evidence/loading_hw_a3.png",
+            "dsl/verify/runlogs/s7cave_2244_20261015_100427/evidence/s7_quitconfirm_cave_2244.png",
+            "dsl/verify/runlogs/s7cave_2244_20261015_100427/evidence/home_cave_clean_2244.png",
+        ).map { File(root, it) }
+        val falsePositives = ArrayList<String>()
+        var negSeen = 0
+        for (f in negatives) {
+            if (!f.isFile) continue
+            negSeen++
+            val mat = Imgcodecs.imread(f.absolutePath)
+            if (mat.empty()) { mat.release(); continue }
+            val hit = try {
+                ScreenStateJudge.disconnectBox(mat)?.let { ScreenStateJudge.isDisconnectBox(it) } == true
+            } finally {
+                mat.release()
+            }
+            if (hit) falsePositives += f.name
+        }
+        Assume.assumeTrue("负例帧缺失 ⇒ 跳过误报断言", negSeen > 0)
+        assertTrue(
+            "正常画面被误判成断线框（会去点「确认」⇒ 误触）：${falsePositives.joinToString()}",
+            falsePositives.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `断线框三阈值边界各自生效`() {
+        // 全过 ⇒ 命中（pill 取正例实测的下界 0.85，紧贴真值）
+        assertTrue(
+            ScreenStateJudge.isDisconnectBox(
+                ScreenStateJudge.DisconnectBox(pill = 0.85, gold = 0.05, gray = 0.19),
+            ),
+        )
+        // 任一不过 ⇒ 不命中（逐条验，防"某一刀被删掉"）
+        // ★ pill 那一刀 = 0.80：负例（标题屏/筛选面板在同意位置也有奶油色，实测最高 0.849）
+        //   要求它足够高才不会误报。这里断言"低于阈值不命中" + 阈值本身 ≥0.75。
+        assertTrue(
+            !ScreenStateJudge.isDisconnectBox(
+                ScreenStateJudge.DisconnectBox(
+                    pill = ScreenStateJudge.DISCONNECT_PILL_MIN - 0.01, gold = 0.05, gray = 0.19,
+                ),
+            ),
+        )
+        assertTrue(
+            "pill 阈值不得低于 0.75（跨档审计：标题屏实测 0.694 会误报）",
+            ScreenStateJudge.DISCONNECT_PILL_MIN >= 0.75,
+        )
+        // gold 那一刀最要紧：它是排除"常驻界面奶油按钮"的关键（负例 gold 恒 ≈0）
+        assertTrue(
+            !ScreenStateJudge.isDisconnectBox(
+                ScreenStateJudge.DisconnectBox(
+                    pill = 0.85, gold = ScreenStateJudge.DISCONNECT_GOLD_MIN - 0.01, gray = 0.19,
+                ),
+            ),
+        )
+        assertTrue(
+            !ScreenStateJudge.isDisconnectBox(
+                ScreenStateJudge.DisconnectBox(
+                    pill = 0.85, gold = 0.05, gray = ScreenStateJudge.DISCONNECT_GRAY_MIN - 0.01,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `断线框判据对空帧安全返回 null`() {
+        assertNull(ScreenStateJudge.disconnectBox(Mat()))
+        assertNull(ScreenStateJudge.disconnectBox(Mat(0, 0, CvType.CV_8UC3)))
+    }
 }

@@ -346,6 +346,10 @@ class ScriptRunner(
                     // #83：页首前台闸门。null（无障碍未连接/还没观察到窗口切换）= 放行，
                     // 与注入侧 `allowInject` 对"未知"的口径一致 —— 拦它会把整条流程变全 false。
                     foregroundOk = { InputAccessibilityService.isGenshinInForeground() ?: true },
+                    // ★ 2026-10-15 S4a：同包名的 SDK 登录/切号页探针（顶号时常见）。
+                    //   不能并进上面那条 —— 那条按**包名**判，而 SDK 页与游戏同包名 ⇒ 恒放行；
+                    //   这条走**类名**（GenshinPackages.isSdkActivity，与 #283 起跑闸同源）。
+                    sdkLoginOnTop = { InputAccessibilityService.sdkLoginOnTop() },
                 )
                 // ★ 2026-09-14：取消扫描期常驻穿透，回到逐点 prepare/restore（OverlayWindowController
                 //   内调用点均健在）。e63f7a4 引入常驻穿透是为防悬浮窗盖住操作区时手势 UP 不穿透；

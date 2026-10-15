@@ -260,6 +260,15 @@ internal suspend fun ScanEngine.pagedGridCore(
                 break
             }
         }
+        // ★ 2026-10-15 S4a：SDK 登录/切号页与游戏**同包名**，上面那条包名闸门会放行它
+        //   ⇒ 必须单独查一次类名。查到即停手（项目红线：冒出登录表单立刻交回用户，绝不自动填）。
+        //   2026-10-14 06:10 真机实测过这个缺口：被顶号后整轮崩在 `anchor not reached: /元素/`。
+        if (sdkLoginOnTop?.invoke() == true) {
+            vars.stopRequested = true
+            vars.stopReason = "sdkLoginRequired"
+            Log.e(TAG, "pagedGrid[$gridKey]: page=$pageNo 检测到 MiHoYo SDK 登录/切号页 ⇒ 停止本轮（已入库照常导出）")
+            break
+        }
         // ★ 批2-B（D5/T1，2026-10-03）：投影只在**起跑时**查过一次，之后一路不查；
         //   而它会在中途被收回（旋转、通知栏停止投屏、授权到期）。取帧侧此时退回最后一帧旧图
         //   ⇒ "没有画面"被伪装成"画面没变"。每页复查一次，与上面的前台闸同口径。
