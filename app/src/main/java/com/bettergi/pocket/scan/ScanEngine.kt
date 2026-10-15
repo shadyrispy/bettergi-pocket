@@ -1425,6 +1425,10 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          */
         val PIPE_DEFAULT_BY_FLOW: Map<String, Int> = mapOf(
             "artifact_scan" to 2,
+            // ★ 2026-10-15 #307：套装筛选流程与全量同一条读背包链（visit 步序一字不差，
+            //   只多一个 setFilter 前置），华为四臂 -10.8% 的依据同样适用；此前漏登记 ⇒
+            //   筛选轮一直跑 pipe=0（2026-10-15 实测 timing 行 pipe=0 而全量是 2）。
+            "artifact_scan_set" to 2,
             "weapon_scan" to 2,
         )
         const val ENTER_SETTLE_MS = 1200L

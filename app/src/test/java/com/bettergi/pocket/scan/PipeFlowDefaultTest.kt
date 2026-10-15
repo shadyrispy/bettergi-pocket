@@ -97,7 +97,7 @@ class PipeFlowDefaultTest {
     fun `表里只有读背包的两条，写类与角色按构造不在其中`() {
         assertEquals(
             "管道默认只能给「只读背包」的流程；写操作/角色一格多帧都不能开",
-            setOf("artifact_scan", "weapon_scan"),
+            setOf("artifact_scan", "artifact_scan_set", "weapon_scan"),
             ScanEngine.PIPE_DEFAULT_BY_FLOW.keys,
         )
     }
@@ -106,6 +106,7 @@ class PipeFlowDefaultTest {
     fun `五条流程各自拿到的默认深度`() {
         val expected = mapOf(
             "artifact_scan" to 2,
+            "artifact_scan_set" to 2,   // ★ 2026-10-15 #307：筛选流程与全量同一条读背包链
             "weapon_scan" to 2,
             "character_scan" to 0,
             "artifact_lock" to 0,

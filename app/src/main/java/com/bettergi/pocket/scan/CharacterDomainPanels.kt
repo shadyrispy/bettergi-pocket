@@ -885,9 +885,12 @@ internal suspend fun ScanEngine.parseCharacterPanel(
      *  天赋页上 name/level 矩形读的是天赋名/天赋等级（脏值）⇒ 只判 key、**不写角色草案字段**、
      *  不进重读循环；正式采集由随后的属性页 parse 完成。 */
     headerOnly: Boolean = false,
+    /** ★ 2026-10-15 #308：**属性页判重短路**——先只读 header 判重，命中已见 key ⇒ 整段返回。 */
+    earlyDedupe: Boolean = false,
 ) {
     // 步声明可覆盖（visitParsePanel 经 step 传入，无需改调用点签名）
     val headerOnlyEffective = headerOnly || step.optBoolean("headerOnly", false)
+    val earlyDedupeEffective = earlyDedupe || step.optBoolean("earlyDedupe", false)
     val gateway = ocr
     if (gateway == null) {
         Log.w(TAG, "parseCharacterPanel: OCR 未接入，跳过")
@@ -896,8 +899,36 @@ internal suspend fun ScanEngine.parseCharacterPanel(
     val frame = ctx?.acquire { freshFrame() } ?: freshFrame()
     val owned = ctx?.frame != null
     try {
+        // ★ 2026-10-15 #308 属性页判重短路（earlyDedupe）：回卷区的重复件占全轮 ~45%（华为
+        //   170 格里 77 格跳过），旧实现仍付整份 5 矩形 parse + 名字重读循环（≈1.5s/格），
+        //   而那些字段对"不入库的重复件"毫无消费者。此处先只读 header 一个矩形判重（与
+        //   headerOnly 同一读法——属性页 header 同样是「X元素/名字」，三页签同位）：
+        //   命中已见 key ⇒ 只写判重所需字段就返回；未命中 / key=null ⇒ 照旧完整 parse
+        //   （同帧已抓，多花的只有 header 那 1 矩形的推理宽度，且这类格本来就要付全价）。
+        //   解析只走昵称表 + 词典两档（与下方 resolveKey 前两档同口径；旅行者元素规则
+        //   **故意不进早判**——早判 miss 无损失，命中反而可能把换元素的旅行者错并；旅行者
+        //   格照旧全价 parse）。
+        //   ⚠️ key=null 必须照旧——判不了身份就不能跳（宁可慢不可丢，CharDupJudge 教训）。
+        //   ⚠️ charName 必须填：emitCharacter 开头「charName 为空 ⇒ return」在
+        //   noteDupAndMaybeStop（回卷止扫判据）之前——空着会让判据断粮、列表滚不停。
+        if (earlyDedupeEffective && !headerOnlyEffective) {
+            val hTexts = gateway.readRois(frame, listOf(profile.rect("panels.char_profile.header")))
+            val headerText = StatParser.clean(hTexts.getOrElse(0) { "" })
+            val headerCjk = Regex("[\\u4e00-\\u9fa5/／]+").findAll(headerText).map { it.value }.joinToString("")
+            val hEl = Regex("^(.+?)元素").find(headerCjk)?.groupValues?.getOrNull(1)
+            val hName = headerCjk.substringAfter('/', headerCjk)
+            val hKey = nameOverrides.characterKeyOf(hName)
+                ?: lookupName(dictKeyOf(step, "name") ?: DEFAULT_CHAR_DICT, hName, dictFuzzy(step))
+            if (hKey != null && characterAlreadySeen(hKey)) {
+                charKey = hKey
+                lastCharKey = hKey
+                charName = hName
+                Log.i(TAG, "char: 判重短路 header='$headerText' ⇒ $hKey 已入库，跳过整份属性页 parse")
+                return
+            }
+        }
         // ★★ 2026-10-10 headerOnly 预读（交替序反序格）：**只读 header 一个矩形**——天赋页上
-        //   name/level 矩形是天赋名/天赋等级（脏值），bottomBar/titleBar 是属性页判据（天赋页无意义）
+        //   name/level 矩形读的是天赋名/天赋等级（脏值），bottomBar/titleBar 是属性页判据（天赋页无意义）
         //   ⇒ 4 个矩形全是浪费的推理宽度。预读只需要 header 出名字判重。
         //   正常格读 5 矩形：[0]=name [1]=level [2]=header [3]=bottomBar [4]=titleBar。
         val rects = if (headerOnlyEffective) {

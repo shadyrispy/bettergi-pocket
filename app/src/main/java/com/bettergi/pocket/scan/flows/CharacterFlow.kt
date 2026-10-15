@@ -82,9 +82,12 @@ internal object CharacterFlow {
         .put("retries", 2)
         .put("onFail", "continue")
 
-    /** 原 visit[4]：解析角色概览面板（dict 平移：name=mappings.characters, fuzzy=1）。 */
+    /** 原 visit[4]：解析角色概览面板（dict 平移：name=mappings.characters, fuzzy=1）。
+     *  ★ 2026-10-15 #308：earlyDedupe——回卷区的重复件只读 header 判重（命中即跳过整份
+     *  5 矩形 parse + 名字重读循环 ≈1.5s/格）；key=null / 新角色照旧全量 parse。 */
     val PARSE_CHAR: JSONObject = FlowDicts.step("parsePanel")
         .put("panel", "char_profile")
+        .put("earlyDedupe", true)
         .put("dict", JSONObject().put("name", "mappings.characters").put("fuzzy", 1))
 
     /**
@@ -233,10 +236,15 @@ internal suspend fun ScanEngine.runCharacterSteps() {
                         visitParsePanel(CharacterFlow.PARSE_CHAR, CharacterFlow.GRID, col, row, idx, ctx, prof)
                         CharacterFlow.reverse = false
                     } else {
-                        // 跳过格：level 没读过 ⇒ 必须回属性页补一次完整 parse（否则该角色 level=0 入库 ✗）
-                        navigate(CharacterFlow.NAV_ATTRIBUTES)
-                        visitParsePanel(CharacterFlow.PARSE_CHAR, CharacterFlow.GRID, col, row, idx, ctx, prof)
-                        Log.i(TAG, "visit cell($col,$row) idx=$idx 已判重 ⇒ 属性页补读后跳过两跳")
+                        // 跳过格：★ 2026-10-15 #308 起不再回属性页补读——那份 parse 的唯一用途
+                        //   是 level/name，但重复件在 emitCharacter 的 dup 分支**不入库**（resetCharDraft
+                        //   后丢弃），level 从未被消费；判重需要的 key 天赋页 headerOnly 已给出。
+                        //   ⚠️ 但 emitCharacter 开头有「charName 为空 ⇒ return」短路，而
+                        //   noteDupAndMaybeStop（回卷止扫判据）在它**之后**——不补 name 会让
+                        //   判据断粮、列表一直滚。这里用 key 原文填 name（只进日志与不入库的
+                        //   GoodCharacter.name，两处都无害）。
+                        if (charName.isEmpty() && charKey != null) charName = charKey!!
+                        Log.i(TAG, "visit cell($col,$row) idx=$idx 已判重 ⇒ 跳过两跳（免属性页补读）")
                         CharacterFlow.reverse = false
                     }
                     stopWhenRegisterDuplicateStreak(3, 2)
