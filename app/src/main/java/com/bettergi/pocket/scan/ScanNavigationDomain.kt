@@ -22,6 +22,8 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.RETURN_HOME_BLIND_MAX
 import com.bettergi.pocket.scan.ScanEngine.Companion.RETURN_HOME_SETTLE_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.TITLE_ENTER_POLL_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.TITLE_ENTER_WAIT_MS
+import com.bettergi.pocket.scan.ScanEngine.Companion.WAIT_SCREEN_BUDGET_MS
+import com.bettergi.pocket.scan.ScanEngine.Companion.WAIT_SCREEN_POLL_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SCREEN_SETTLE_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_FRAME_TIMEOUT_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
@@ -128,6 +130,8 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
         val pt: FramePoint
         val fromTemplate: Boolean
         val beforeThumb: ByteArray?
+        val screenClass: ScreenStateJudge.ScreenClass?
+        val photometric: ScreenStateJudge.Photometric?
         try {
             atHome = atHomeScreen(frame)
             // 模板未注册/配置未加载时 match 返回 score=-1 → 无法判据，直接放弃归位
@@ -136,6 +140,10 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
                 Log.w(TAG, "returnToHome: 派蒙判定不可用（paimonBtn 未标定/帧异常），跳过归位")
                 return
             }
+            // ★ 2026-10-15：同一帧上再跑一次三态光度判据（零额外取帧）。判不出（null）⇒
+            //   按 OTHER 走既有刹车链 ⇒ 最坏情况与改动前逐位一致。
+            photometric = ScreenStateJudge.photometric(frame)
+            screenClass = photometric?.let { ScreenStateJudge.classify(it) }
             beforeThumb = VoteJudges.screenThumb(frame)
             val (p, tmpl) = returnButtonPoint(frame)
             pt = p
@@ -145,6 +153,29 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
         }
         if (atHome) {
             Log.i(TAG, "returnToHome: 已在主界面（第 $attempt 次判定）")
+            return
+        }
+        // ★ 2026-10-15 三态分流（只在这两类上抢在刹车链**之前**；OTHER 一字不动）：
+        //    · WAIT  ⇒ 版号屏/加载屏：**一次都不点**，轮询等它自己过去
+        //    · TITLE ⇒ 标题屏：直接点底部中带，跳过"点返回×3 + BACK"那 4 步无效动作
+        //   两者都是**正面判据**（能指着画面说出"这是哪种屏"），不是"不是主界面"的倒推；
+        //   判据与阈值见 ScreenStateJudge 的 KDoc（98 帧离线审计 0 误判）。
+        if (photometric != null && screenClass == ScreenStateJudge.ScreenClass.WAIT) {
+            Log.i(TAG, "returnToHome: 判出等待类屏（$photometric）⇒ 不点击，等它自己过去")
+            // ★ 2026-10-15 上机修正（BS 实测暴露）：等待结束后**必须回到主循环重判**，
+            //   不能 return。原因：等待类屏结束后的下一态**不是**主界面，而是**标题屏**
+            //   （冷启动链 版号屏→加载屏→标题屏→[点击进入]→世界）；直接 return 会让归位放弃，
+            //   紧随其后的 `enterScreen` 就在**标题屏**上点背包入口 ⇒ 整条级联失败
+            //   （BS 11:42 实测：点 (1966,70) → 锚点三次不中 → BACK → 落到 SDK ConfirmActivity）。
+            //   `continue` 之后本轮 attempt 已消耗，下一轮会重判三态 —— 是标题屏就走 TITLE 快路径。
+            if (awaitScreenLeave(photometric)) continue
+            // 超时/被外部停手 —— awaitScreenLeave 内部已处置 stopReason 与通知
+            return
+        }
+        if (screenClass == ScreenStateJudge.ScreenClass.TITLE) {
+            Log.i(TAG, "returnToHome: 判出标题屏（$photometric）⇒ 直接「点任意处进入」，跳过返回钮盲点链")
+            // enterFromTitleScreen 内部已处置失败路径（stopReason + 通知）；成功即归位完成
+            enterFromTitleScreen()
             return
         }
         if (!fromTemplate) {
@@ -201,74 +232,7 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
             //   "右上角那一带"当兜底（那里是派蒙钮）。整轮只试一次，试完仍无进展照旧停手。
             if (!titleTapUsed) {
                 titleTapUsed = true
-                val tap = try {
-                    val f = freshFrame()
-                    try {
-                        f.cols() / 2 to f.rows() * 9 / 10
-                    } finally {
-                        f.release()
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    null
-                }
-                if (tap == null) {
-                    Log.e(TAG, "returnToHome: 取不到帧 ⇒ 连「点任意处进入」这一试也不做，停手")
-                    NoticeCenter.error("自动归位取不到帧，已停手")
-                    vars.stopRequested = true
-                    vars.stopReason = "returnHomeStuck"
-                    return
-                }
-                Log.w(TAG, "returnToHome: 返回钮与 BACK 均无进展 ⇒ 试一次「点任意处进入」(${tap.first},${tap.second})（标题屏常态）")
-                // ⚠️ **走 `tap`（零位移 stroke）而不是 `click`**：华为游戏面把带位移的 stroke 读成**拖拽**，
-                //   标题屏那一试就此被吞。2026-10-13 实测（同一台机、同一屏）：
-                //   `adb shell input tap`（带默认位移）没能关掉「确认退出游戏」框，
-                //   而 `input swipe x y x y 60`（同点零位移）一次成功 —— 与 `ActionGateway.tap` 的
-                //   KDoc 记的是同一件事（char_popup 卡片对 2px 微滑识别为拖拽，equip18/19）。
-                //   本函数早前还试过 `clickAt`，那还额外踩了 base→frame 二次缩放（见下）。
-                if (safetyGuard()) actions.tap(tap.first, tap.second) else {
-                    // ★ 复核（2026-10-13）：守卫**拒了**这一步（它已经置过 `stopReason="safety"` 并发过通知），
-                    //   这里必须当场收手 —— 否则会白等满 30s、然后报一句"仍未到主界面"（假话）、
-                    //   把 stopReason 从 safety 覆写成 returnHomeStuck、再发第二条通知。
-                    //   归属错了的日志比没有日志更坏：事后看 stopReason 会去查归位，而真因是安全闸。
-                    Log.w(TAG, "returnToHome: 安全闸拒绝「点任意处进入」⇒ 停手（成因见 safetyGuard 自己的日志）")
-                    return
-                }
-                // ★ 这一试之后**轮询等进主界面**，不等就是白点：华为实测标题屏 → 世界的加载
-                //   远大于 `RETURN_HOME_SETTLE_MS`，08:38 那一轮就是"点打了、下一轮立刻被
-                //   『盲点 3 次』那条闸截住 ⇒ 仍然 returnHomeStuck"。
-                //   等不到就当场停手（本函数到此为止，不再回到盲点循环 —— 这一试是最后一步）。
-                val until = clock() + TITLE_ENTER_WAIT_MS
-                var entered = false
-                while (clock() < until && !vars.stopRequested) {
-                    delay(TITLE_ENTER_POLL_MS)
-                    val f = runCatchingCancellable { freshFrame() }.getOrNull()
-                    if (f == null) continue
-                    val home = try {
-                        atHomeScreen(f)
-                    } finally {
-                        f.release()
-                    }
-                    if (home == true) {
-                        entered = true
-                        break
-                    }
-                }
-                if (entered) {
-                    Log.i(TAG, "returnToHome: 「点任意处进入」后到达主界面（标题屏已恢复）")
-                    return
-                }
-                // ★ 复核（2026-10-13）：等窗还没走完就跳出循环 = 有别人喊停（看门狗/前台丢失/用户按停），
-                //   那不是"标题屏没救回来"。同样不许覆写 stopReason、不许发误导通知。
-                if (vars.stopRequested && clock() < until) {
-                    Log.w(TAG, "returnToHome: 等进主界面期间被外部停手（stopReason=${vars.stopReason}）⇒ 不再改判")
-                    return
-                }
-                Log.e(TAG, "returnToHome: 「点任意处进入」后 ${TITLE_ENTER_WAIT_MS}ms 内仍未到主界面 ⇒ 停手")
-                NoticeCenter.error("自动归位点在标题屏后仍未进游戏，已停手")
-                vars.stopRequested = true
-                vars.stopReason = "returnHomeStuck"
+                if (enterFromTitleScreen()) return
                 return
             }
             Log.e(TAG, "returnToHome: 返回钮与 BACK 均无进展 ⇒ 停手（不再盲点漂移）")
@@ -283,6 +247,124 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
     NoticeCenter.error("自动归位 $maxAttempts 次未达主界面，已停止点击")
     vars.stopRequested = true
     vars.stopReason = "returnHomeStuck"
+}
+
+/**
+ * **「点任意处进入」+ 等进主界面**（标题屏的唯一正确动作）—— 单一真值函数。
+ *
+ * 为什么抽出来：这条动作此前**只有一份实现**（嵌在 [returnToHome] 的无进展分支里，即 #266 兜底）；
+ * 2026-10-15 加三态分流后，"正面判出标题屏"也要走同一动作。**不抽就会有两份真值**——
+ * 而 #299 的丢件事故正是"同一决策两处实现"导致的（见 `dsl/docs/filter-panel-states-20261015.md` §0）。
+ *
+ * 契约：返回 `true` = 已到达主界面；`false` = 各种失败（**stopReason 已由本函数处置**，
+ * 调用方只需 return，不要覆写、不要补发通知）。
+ *
+ * 语义细节全部继承原实现（逐条都有实测出处，勿改）：
+ *  - 落点取**底部中带** `(w/2, h·9/10)`：标题屏的「点击进入」就在那一条上；背包/角色页同位置
+ *    是页码点/空白，不是任何功能钮 —— #139 的教训是不能拿"右上角那一带"当兜底（那里是派蒙钮）。
+ *  - 走 `actions.tap`（**零位移** stroke）而不是 `click`：华为游戏面把带位移的 stroke 读成**拖拽**，
+ *    标题屏那一试曾被吞（2026-10-13 实测：`input tap` 关不掉退出框、`input swipe x y x y 60` 一次成功）。
+ *  - 点前过 `safetyGuard()`：拒绝 ⇒ 当场收手且**不覆写 stopReason**（守卫已置 `safety` 并发过通知；
+ *    覆写会把归因带偏 —— 2026-10-13 复核）。
+ *  - 点后**轮询等进主界面**（`TITLE_ENTER_WAIT_MS=45s`）：华为实测标题屏 → 世界的加载远大于
+ *    `RETURN_HOME_SETTLE_MS(900)`，不轮询就是白点。
+ *  - 等窗未走完就跳出 = 有别人喊停（看门狗/前台丢失/用户按停）⇒ 同样不改判、不发通知。
+ */
+internal suspend fun ScanEngine.enterFromTitleScreen(): Boolean {
+    val tap = try {
+        val f = freshFrame()
+        try {
+            f.cols() / 2 to f.rows() * 9 / 10
+        } finally {
+            f.release()
+        }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (_: Exception) {
+        null
+    }
+    if (tap == null) {
+        Log.e(TAG, "enterFromTitleScreen: 取不到帧 ⇒ 连「点任意处进入」这一试也不做，停手")
+        NoticeCenter.error("自动归位取不到帧，已停手")
+        vars.stopRequested = true
+        vars.stopReason = "returnHomeStuck"
+        return false
+    }
+    Log.w(TAG, "enterFromTitleScreen: 「点任意处进入」(${tap.first},${tap.second})（标题屏常态）")
+    if (!safetyGuard()) {
+        Log.w(TAG, "enterFromTitleScreen: 安全闸拒绝 ⇒ 停手（成因见 safetyGuard 自己的日志）")
+        return false
+    }
+    actions.tap(tap.first, tap.second)
+    val until = clock() + TITLE_ENTER_WAIT_MS
+    var entered = false
+    while (clock() < until && !vars.stopRequested) {
+        delay(TITLE_ENTER_POLL_MS)
+        val f = runCatchingCancellable { freshFrame() }.getOrNull() ?: continue
+        val home = try {
+            atHomeScreen(f)
+        } finally {
+            f.release()
+        }
+        if (home == true) {
+            entered = true
+            break
+        }
+    }
+    if (entered) {
+        Log.i(TAG, "enterFromTitleScreen: 「点任意处进入」后到达主界面（标题屏已恢复）")
+        return true
+    }
+    if (vars.stopRequested && clock() < until) {
+        Log.w(TAG, "enterFromTitleScreen: 等进主界面期间被外部停手（stopReason=${vars.stopReason}）⇒ 不再改判")
+        return false
+    }
+    Log.e(TAG, "enterFromTitleScreen: 「点任意处进入」后 ${TITLE_ENTER_WAIT_MS}ms 内仍未到主界面 ⇒ 停手")
+    NoticeCenter.error("自动归位点在标题屏后仍未进游戏，已停手")
+    vars.stopRequested = true
+    vars.stopReason = "returnHomeStuck"
+    return false
+}
+
+/**
+ * **等待类屏（版号屏/加载屏）的轮询**：一次都不点，等它自己过去。
+ *
+ * 返回 `true` = 屏幕已经不是等待类（可能是标题屏/主界面/常驻界面 —— 由调用方的下一轮重判决定）；
+ * `false` = 超时或外部停手（**stopReason 已由本函数处置**）。
+ *
+ * 为什么"重判三态"而不是睡满：加载屏 → 标题屏的转换必须被抓住 —— 睡满 90s 会把
+ * "其实 12s 就该点标题屏了"变成"白等 90s 后报超时"。每拍 `WAIT_SCREEN_POLL_MS=2000`。
+ *
+ * 为什么不用固定 sleep 或帧差：帧差判据已被项目实测否决（`home_gate.py:43-49`：过场是**静帧**、
+ * 主界面才有动画，方向正好反着）；三态判据是**正面**的，直接问"这还是不是近白屏"。
+ */
+internal suspend fun ScanEngine.awaitScreenLeave(firstReading: ScreenStateJudge.Photometric): Boolean {
+    val until = clock() + WAIT_SCREEN_BUDGET_MS
+    var reading = firstReading
+    while (clock() < until) {
+        if (vars.stopRequested) {
+            Log.w(TAG, "awaitScreenLeave: 被外部停手（stopReason=${vars.stopReason}）⇒ 不再改判")
+            return false
+        }
+        delay(WAIT_SCREEN_POLL_MS)
+        val f = runCatchingCancellable { freshFrame() }.getOrNull() ?: continue
+        val next = try {
+            ScreenStateJudge.photometric(f)
+        } finally {
+            f.release()
+        }
+        if (next == null) continue
+        reading = next
+        if (ScreenStateJudge.classify(next) != ScreenStateJudge.ScreenClass.WAIT) {
+            Log.i(TAG, "awaitScreenLeave: 等待类屏已结束（$next）⇒ 交回归位重判")
+            return true
+        }
+    }
+    Log.e(TAG, "awaitScreenLeave: ${WAIT_SCREEN_BUDGET_MS}ms 内一直是等待类屏（$reading）⇒ 停手")
+    NoticeCenter.error("游戏一直在加载/版号屏（${WAIT_SCREEN_BUDGET_MS / 1000}s 未变化），已停手")
+    vars.stopRequested = true
+    vars.stopReason = "waitScreenTimeout"
+    return false
 }
 
 /**

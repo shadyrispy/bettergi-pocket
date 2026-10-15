@@ -1454,6 +1454,22 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          */
         const val TITLE_ENTER_WAIT_MS = 45_000L
         const val TITLE_ENTER_POLL_MS = 1500L
+
+        /**
+         * ★ 2026-10-15：`returnToHome` 判出 **WAIT 类**（版号屏/加载屏，`near_white ≥ 0.90`）时
+         * 的等待预算与步长。
+         *
+         * 为什么必须"等"而不是点：[ScreenStateJudge] 的 KDoc 记着——这类屏是游戏**自己还在渲染**，
+         * 点它只会打断加载。改动前它们落进"非主界面"，归位链会先烧 3 次盲点返回 + 1 次 BACK
+         * 才轮到 `#266` 的点屏幕（华为实测 41.2s）。
+         *
+         * 预算取 90s：覆盖冷启动从版号屏到世界的最长实测（`startupcapture` 三档冷启动观测
+         * 从版号屏到标题屏约 12~15s，标题屏到世界另有 27.7s 的钳频实测）⇒ 90s 有充足余量，
+         * 且 < `ScriptRunner.SESSION_STALL_MS(120s)`（不会触发会话看门狗抢跑）。
+         * 每拍**重判三态**而不是睡满：加载屏 → 标题屏的转换必须被抓住（否则白等到超时）。
+         */
+        const val WAIT_SCREEN_BUDGET_MS = 90_000L
+        const val WAIT_SCREEN_POLL_MS = 2000L
         // §15 P0-1：左侧菜单切页后的稳定等待（长于普通点击，动画约 600~800ms）
         /**
          * 页签切换后的等待。**2026-09-12 由 900 → 700**（档位实测：屏幕侧内容就绪 397~529ms；
