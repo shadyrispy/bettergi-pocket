@@ -24,6 +24,229 @@
         android:textColor="@color/pocket_text"
         android:textSize="24sp" />
 
+    <!-- ★ #310/M4 后台模式区块（runMode==BACKGROUND 才显示，默认 GONE）：
+         从上到下是用户动线本身 —— 选模式 → 引导卡（Shizuku 四态之一，恰好一个下一步）
+         → 虚拟屏监视区（就绪后接管）→ 一句边界提示。结构（行/圆点/文案）照抄
+         status_card 与 swipe_row 的既有写法，不引入新样式。 -->
+    <LinearLayout
+        android:id="@+id/bg_section"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <!-- 运行模式行：标签 + 横排 RadioGroup（结构与 swipe_card 的方法选择同款） -->
+        <LinearLayout
+            android:id="@+id/runmode_row"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:background="@drawable/bg_pocket_card_outline"
+            android:gravity="center_vertical"
+            android:minHeight="52dp"
+            android:orientation="horizontal"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="运行模式"
+                android:textColor="@color/pocket_text"
+                android:textSize="14sp" />
+
+            <RadioGroup
+                android:id="@+id/runmode_group"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="horizontal">
+
+                <RadioButton
+                    android:id="@+id/rb_mode_foreground"
+                    android:contentDescription="前台模式（原形态）"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="前台"
+                    android:textColor="@color/pocket_text"
+                    android:textSize="13sp" />
+
+                <RadioButton
+                    android:id="@+id/rb_mode_background"
+                    android:contentDescription="后台模式（虚拟显示器 + Shizuku 提权）"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="后台"
+                    android:textColor="@color/pocket_text"
+                    android:textSize="13sp" />
+            </RadioGroup>
+        </LinearLayout>
+
+        <!-- Shizuku 引导卡：四态机渲染目标（phase != READY 时显示） -->
+        <LinearLayout
+            android:id="@+id/shizuku_card"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_pocket_card_outline"
+            android:gravity="center_vertical"
+            android:minHeight="52dp"
+            android:orientation="horizontal"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp">
+
+            <View
+                android:id="@+id/shizuku_status_dot"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:background="@drawable/bg_overlay_status_dot" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:id="@+id/shizuku_status_text"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/pocket_text"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/shizuku_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="1dp"
+                    android:text="重启手机后需重新打开 Shizuku 启动服务，属正常现象"
+                    android:textColor="@color/pocket_text_muted"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/shizuku_action_btn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <!-- 虚拟屏监视区：Shizuku READY 后接管（M4：预览与帧率是占位，M5 接帧流） -->
+        <LinearLayout
+            android:id="@+id/vd_monitor"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_pocket_card_outline"
+            android:orientation="vertical"
+            android:paddingStart="14dp"
+            android:paddingTop="10dp"
+            android:paddingEnd="14dp"
+            android:paddingBottom="10dp">
+
+            <LinearLayout
+                android:id="@+id/vd_status_row"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <View
+                    android:id="@+id/vd_status_dot"
+                    android:layout_width="8dp"
+                    android:layout_height="8dp"
+                    android:background="@drawable/bg_overlay_status_dot" />
+
+                <TextView
+                    android:id="@+id/vd_status_text"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_weight="1"
+                    android:text="待机"
+                    android:textColor="@color/pocket_text"
+                    android:textSize="14sp" />
+
+                <TextView
+                    android:id="@+id/vd_fps_text"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="-- fps"
+                    android:textColor="@color/pocket_text_muted"
+                    android:textSize="12sp" />
+            </LinearLayout>
+
+            <ImageView
+                android:id="@+id/vd_preview"
+                android:layout_width="match_parent"
+                android:layout_height="200dp"
+                android:layout_marginTop="8dp"
+                android:background="@color/black"
+                android:scaleType="fitCenter"
+                android:contentDescription="虚拟屏画面预览" />
+
+            <TextView
+                android:id="@+id/vd_preview_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:gravity="center"
+                android:text="预览（M5 接帧流）"
+                android:textColor="@color/pocket_text_muted"
+                android:textSize="12sp" />
+
+            <LinearLayout
+                android:id="@+id/vd_actions"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btn_vd_start"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="启动虚拟屏"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btn_vd_stop"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:text="关闭虚拟屏"
+                    android:textSize="13sp" />
+
+                <Button
+                    android:id="@+id/btn_vd_front"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:layout_weight="1"
+                    android:text="游戏调回前台"
+                    android:textSize="13sp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/bg_hint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:lineSpacingExtra="3dp"
+            android:text="后台模式期间请保持本页可见以查看预览；预览不采集时扫描照常进行"
+            android:textColor="@color/pocket_text_muted"
+            android:textSize="12sp" />
+    </LinearLayout>
+
     <LinearLayout
         android:id="@+id/status_card"
         android:contentDescription="无障碍与悬浮窗状态，点击去开启无障碍"

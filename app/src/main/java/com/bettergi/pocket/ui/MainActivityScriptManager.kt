@@ -20,19 +20,30 @@ import com.bettergi.pocket.input.SwipeMethod
 import com.bettergi.pocket.input.SwipeTestRunner
 import com.bettergi.pocket.scan.GoodRepository
 import com.bettergi.pocket.scan.NameOverrides
+import com.bettergi.pocket.settings.RunMode
 import com.bettergi.pocket.settings.TriggerSettings
 import com.bettergi.pocket.settings.TriggerSettingsRepository
+import com.bettergi.pocket.shizuku.BgiRemoteManager
+import com.bettergi.pocket.shizuku.ShizukuInstallHelper
+import com.bettergi.pocket.shizuku.ShizukuPhase
+import com.bettergi.pocket.shizuku.ShizukuState
 import com.bettergi.pocket.pcdata.CaptureSession
 import com.bettergi.pocket.service.TriggerForegroundService
 import androidx.appcompat.widget.SwitchCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import com.esc.irminsul.capture.CaptureResult
 import com.esc.irminsul.capture.IrminsulCapture
 import com.esc.irminsul.capture.PermissionKind
 import androidx.core.widget.doAfterTextChanged
 import com.bettergi.pocket.capture.CapturePermissionActivity
 import com.bettergi.pocket.ui.MainActivity.Companion.SWIPE_TEST_BACK_DELAY_MS
+import rikka.shizuku.Shizuku
 
 /*
  * Stage 3.6：脚本管理器屏（ScriptManager 屏）从 MainActivity.kt 抽出（扩展函数，函数体一字未改）。
@@ -53,6 +64,7 @@ internal fun MainActivity.showScriptManager() {
     runCatching { com.bettergi.pocket.bridge.OverlayBridge(this).collapse() }
     findViewById<TextView>(R.id.btn_back_overlay).setOnClickListener { launchOverlayAndExit() }
     findViewById<android.view.View>(R.id.status_card).setOnClickListener { openA11yIfNeeded() }
+    bindBackgroundModeSection()
     bindCalibrateRow()
     bindGoodSection()
     watchScanState()
@@ -241,6 +253,510 @@ internal fun MainActivity.openCaptureFix(kind: PermissionKind) {
     }
 }
 
+// ---- ★ #310/M4 后台模式区块（virtualdisplay 分支）：运行模式 + Shizuku 引导 + 虚拟屏监视 ----
+//
+// 区块结构见 activity_scripts.xml 的 bg_section 注释；三个绑定函数各管一段用户动线：
+// [bindRunModeSection]（选模式）→ [bindShizukuCard]（装/启/授权引导）→ [bindVdMonitor]（就绪后起虚拟屏）。
+// 全部 findViewById 走可空接收（?: return / ?.),与 bindCaptureTest 等既有绑定同惯例 ——
+// 竖屏/横屏两份布局由 dsl 纪律保证 id 集合一致（M4 已同步插入两份），缺 id 时静默退化为不绑定。
+
+/** 后台模式下的目标游戏包名（M4 硬编码原神国服，与悬浮窗既有启动语义一致）。 */
+private const val BG_GAME_PACKAGE = "com.miHoYo.Yuanshen"
+
+/** Shizuku 授权请求码（本页与结果监听配对用，任意正数即可，与官方 demo 的 0 同义）。 */
+private const val SHIZUKU_PERMISSION_REQUEST_CODE = 31001
+
+/** Shizuku 四态轮询节奏（1s，见 [bindShizukuCard] KDoc 的"轮询而非监听"论证）。 */
+private const val SHIZUKU_POLL_INTERVAL_MS = 1_000L
+
+/** 预览刷新节奏（M4 占位骨架的实际轮询间隔；M5 接帧流后按帧率重定）。 */
+private const val PREVIEW_POLL_INTERVAL_MS = 1_000L
+
+/** 「启动虚拟屏」链路各步的等待上限（bind 握手/远端调用都走 binder，1s 内应答；给余量）。 */
+private const val VD_STEP_TIMEOUT_MS = 10_000L
+
+/** 监视区三态（M4：RUNNING = VD 已建且游戏已发上屏；PENDING/STANDBY 只渲染文案）。 */
+private enum class VdUiState { STANDBY, PENDING, RUNNING }
+
+/**
+ * 后台模式区块的**本页 UI 态**（每 [MainActivity] 实例一份，随实例死亡自动清）。
+ *
+ * 为什么是 WeakHashMap 容器而不是 MainActivity 上的 var：M4 纪律**不动 MainActivity.kt**，
+ * 而扩展属性没有 backing field；Activity 重建即丢、重新 showScriptManager 即重建，
+ * 无跨实例泄漏面。
+ */
+private class BgUiState {
+    /** 四态机最后一次评估结果（按钮分派与监视区可见性的依据）。 */
+    var shizukuPhase: ShizukuPhase? = null
+
+    /** 监视区渲染态。 */
+    var vdState: VdUiState = VdUiState.STANDBY
+
+    /** 「启动虚拟屏」链路在途标记（防重复点击）。 */
+    var vdStarting = false
+
+    /** createDisplay 返回的 displayId（-1 = 未创建/失败），repin / startAppOnDisplay 用。 */
+    var vdDisplayId = -1
+
+    /** Shizuku 四态轮询任务（onResume 起 / onPause 停）。 */
+    var shizukuPoll: Runnable? = null
+
+    /** 预览刷新轮询任务（M4 占位骨架，随绑定起）。 */
+    var previewPoll: Runnable? = null
+}
+
+private val bgUiStates = java.util.WeakHashMap<MainActivity, BgUiState>()
+
+private fun MainActivity.bgState(): BgUiState = bgUiStates.getOrPut(this) { BgUiState() }
+
+/** 轮询共用的主线程 Handler（延迟初始化，见 [pollHandler]）。 */
+private val mainPollHandler by lazy { Handler(Looper.getMainLooper()) }
+
+private fun MainActivity.pollHandler(): Handler = mainPollHandler
+
+/** 本页取设置仓库（bg_section 不在布局时返回 null，调用方安全退化）。 */
+private fun MainActivity.settingsRepo(): TriggerSettingsRepository? =
+    if (findViewById<LinearLayout?>(R.id.bg_section) != null) TriggerSettingsRepository.app(this) else null
+
+/**
+ * 「运行模式」行：初始态读设置仓库，RadioGroup 切换即落盘 + 切换 bg_section 主体可见性。
+ *
+ * ⚠️ 循环防线：`isChecked = ...` 回填也会触发监听器，与 nameOverrideRow 的
+ * 「先 setText 再挂监听」同款先例 —— 这里先回填、后挂监听，杜绝「回填把自己写的值
+ * 再写一遍」的回环（值虽然不变不会真落盘，但会多触发一轮监听分发）。
+ */
+internal fun MainActivity.bindRunModeSection() {
+    val bg = findViewById<LinearLayout?>(R.id.bg_section) ?: return
+    val fg = findViewById<RadioButton?>(R.id.rb_mode_foreground) ?: return
+    val bk = findViewById<RadioButton?>(R.id.rb_mode_background) ?: return
+    val group = findViewById<android.widget.RadioGroup?>(R.id.runmode_group) ?: return
+    val repo = TriggerSettingsRepository.app(this)
+    val applyVisibility = { mode: RunMode ->
+        bg.visibility = if (mode == RunMode.BACKGROUND) View.VISIBLE else View.GONE
+    }
+    // 先回填初始态，再挂监听（防回填触发监听的回环，见 KDoc）
+    when (repo.get().runMode) {
+        RunMode.BACKGROUND -> bk.isChecked = true
+        RunMode.FOREGROUND -> fg.isChecked = true
+    }
+    applyVisibility(repo.get().runMode)
+    group.setOnCheckedChangeListener { _, checkedId ->
+        val mode = if (checkedId == R.id.rb_mode_background) RunMode.BACKGROUND else RunMode.FOREGROUND
+        repo.setRunMode(mode)
+        applyVisibility(mode)
+        NoticeCenter.info(
+            if (mode == RunMode.BACKGROUND) "已切换到后台模式（虚拟显示器 + Shizuku 提权）" else "已切换到前台模式",
+        )
+    }
+}
+
+/**
+ * Shizuku 引导卡：1s 轮询四态机，按 [ShizukuPhase] 渲染状态点 / 文案 / 按钮。
+ *
+ * 轮询而非监听的理由（M4 口径）：四态里的「安装」与「运行」没有 app 进程内的变更
+ * 回调（装完 apk / 用户在 Shizuku 应用里点启动都发生在别的进程），binder 粘性监听
+ * 只覆盖「服务连通」一段；1s 轮询一次 assess 便宜（一次 PM 查询 + 两次 binder 探测），
+ * 换来全四态的统一刷新路径。轮询只在管理器页前台跑（onResume 起 / onPause 停，挂钩
+ * 见 [attachBgSectionLifecycle]）。
+ */
+internal fun MainActivity.bindShizukuCard() {
+    val card = findViewById<LinearLayout?>(R.id.shizuku_card) ?: return
+    val dot = findViewById<View?>(R.id.shizuku_status_dot) ?: return
+    val text = findViewById<TextView?>(R.id.shizuku_status_text) ?: return
+    val btn = findViewById<Button?>(R.id.shizuku_action_btn) ?: return
+
+    /** 按 phase 渲染整卡（文案/颜色规格见 M4 设计稿；READY 时卡片收起）。 */
+    fun render(phase: ShizukuPhase) {
+        card.visibility = if (phase == ShizukuPhase.READY) View.GONE else View.VISIBLE
+        val (dotColor, statusText, action) = when (phase) {
+            ShizukuPhase.NOT_INSTALLED -> Triple(
+                R.color.pocket_text_muted,
+                "Shizuku 未安装：后台模式需要它获得提权",
+                "安装 Shizuku",
+            )
+            ShizukuPhase.NOT_RUNNING -> Triple(
+                R.color.pocket_warn,
+                "Shizuku 未运行：打开 Shizuku 应用启动服务（需无线调试配对，安卓 11+）",
+                "打开 Shizuku 应用",
+            )
+            ShizukuPhase.NOT_GRANTED -> Triple(
+                R.color.pocket_warn,
+                "Shizuku 已运行但未授权本应用",
+                "请求授权",
+            )
+            ShizukuPhase.READY -> Triple(
+                R.color.pocket_ok,
+                "Shizuku 已就绪（adb/root）",
+                null,
+            )
+        }
+        dot.backgroundTintList = android.content.res.ColorStateList.valueOf(
+            ContextCompat.getColor(this, dotColor),
+        )
+        text.text = statusText
+        if (action != null) {
+            btn.visibility = View.VISIBLE
+            btn.text = action
+        } else {
+            btn.visibility = View.GONE
+        }
+    }
+
+    btn.setOnClickListener {
+        // 按钮语义由"最近一次轮询到的 phase"决定（渲染与点击之间状态可能再变，
+        // 以轮询快照为准比以按钮文案为准更不撒谎 —— 文案就是那轮快照渲染的）。
+        when (bgState().shizukuPhase) {
+            ShizukuPhase.NOT_INSTALLED -> installShizuku()
+            ShizukuPhase.NOT_RUNNING -> openShizukuApp()
+            ShizukuPhase.NOT_GRANTED -> requestShizukuPermission()
+            else -> Unit // READY 时按钮已 GONE，防御性 no-op
+        }
+    }
+
+    startShizukuPoll { phase ->
+        bgState().shizukuPhase = phase
+        render(phase)
+    }
+}
+
+/**
+ * 四态轮询的启动/停止：onResume 起、onPause 停（本页前台才轮询）。挂在 lifecycle
+ * 事件上（[attachBgSectionLifecycle] 注册一次），重复调用先摘旧任务防双跑。
+ * M4 简化：onResume 不主动补拍 —— 绑定时的首拍已经覆盖"进页面"场景。
+ */
+private fun MainActivity.startShizukuPoll(onPhase: (ShizukuPhase) -> Unit) {
+    val state = bgState()
+    state.shizukuPoll?.let { mainPollHandler.removeCallbacks(it) }
+    val task = object : Runnable {
+        override fun run() {
+            val phase = ShizukuState.assess(this@startShizukuPoll).phase
+            onPhase(phase)
+            mainPollHandler.postDelayed(this, SHIZUKU_POLL_INTERVAL_MS)
+        }
+    }
+    state.shizukuPoll = task
+    mainPollHandler.post(task)
+}
+
+private fun MainActivity.stopShizukuPoll() {
+    bgState().shizukuPoll?.let { mainPollHandler.removeCallbacks(it) }
+    bgState().shizukuPoll = null
+}
+
+/** 预览轮询的启动/停止（M4 占位骨架，函数体 TODO；onPause 一样要停）。 */
+private fun MainActivity.startPreviewPoll() {
+    val state = bgState()
+    state.previewPoll?.let { mainPollHandler.removeCallbacks(it) }
+    val task = object : Runnable {
+        override fun run() {
+            refreshPreview()
+            mainPollHandler.postDelayed(this, PREVIEW_POLL_INTERVAL_MS)
+        }
+    }
+    state.previewPoll = task
+    mainPollHandler.post(task)
+}
+
+private fun MainActivity.stopPreviewPoll() {
+    bgState().previewPoll?.let { mainPollHandler.removeCallbacks(it) }
+    bgState().previewPoll = null
+}
+
+/**
+ * 轮询生命周期挂钩（幂等，showScriptManager 里绑定时注册一次）：
+ * RESUME ⇒ 四态轮询与预览轮询起；PAUSE ⇒ 双双停。用 LifecycleEventObserver 而不是
+ * 覆写 MainActivity.onResume/onPause —— 本文件是扩展函数集合，宿主文件不动（M4 纪律）。
+ */
+private fun MainActivity.attachBgSectionLifecycle() {
+    if (bgLifecycleHooked) return
+    bgLifecycleHooked = true
+    lifecycle.addObserver(LifecycleEventObserver { _, event ->
+        when (event) {
+            Lifecycle.Event.ON_RESUME -> {
+                startShizukuPoll { phase ->
+                    bgState().shizukuPhase = phase
+                    // phase 变化时若监视区已渲染，顺带刷新其可见性（READY ⇒ 显出 vd_monitor）
+                    refreshMonitorVisibility()
+                }
+                startPreviewPoll()
+            }
+            Lifecycle.Event.ON_PAUSE -> {
+                stopShizukuPoll()
+                stopPreviewPoll()
+            }
+            else -> Unit
+        }
+    })
+}
+
+/** lifecycle 挂钩的幂等标记（进程级，Activity 重建后 lifecycle 是新实例，重挂无害）。 */
+private var bgLifecycleHooked = false
+
+/** 四态最新值驱动 vd_monitor 的显隐（READY 才显；与 bindVdMonitor 首绑共用一份逻辑）。 */
+private fun MainActivity.refreshMonitorVisibility() {
+    val monitor = findViewById<LinearLayout?>(R.id.vd_monitor) ?: return
+    monitor.visibility =
+        if (bgState().shizukuPhase == ShizukuPhase.READY) View.VISIBLE else View.GONE
+}
+
+/**
+ * 「安装 Shizuku」：优先内置 apk 导出 + 系统安装器；资产缺失（[ShizukuInstallHelper.isBundled]
+ * = false）退回 GitHub releases 页 —— 与 ShizukuInstallHelper KDoc 预留的 UI 侧回退路径一致。
+ */
+internal fun MainActivity.installShizuku() {
+    if (ShizukuInstallHelper.isBundled(this)) {
+        val exported = ShizukuInstallHelper.exportInstaller(this)
+        if (exported != null && ShizukuInstallHelper.launchInstaller(this, exported)) {
+            NoticeCenter.info("已导出安装包到下载目录，请在系统安装器中确认")
+            return
+        }
+        NoticeCenter.warn("内置安装包导出失败，改跳浏览器下载")
+    }
+    val url = "https://github.com/RikkaApps/Shizuku/releases"
+    runCatching {
+        startActivity(
+            Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    }.onFailure { NoticeCenter.error("打不开浏览器，请手动前往：$url") }
+}
+
+/** 「打开 Shizuku 应用」：拉起 Shizuku 主界面（用户在里头无线调试 / Root 启动服务）。 */
+internal fun MainActivity.openShizukuApp() {
+    val launch = packageManager.getLaunchIntentForPackage(ShizukuState.SHIZUKU_PACKAGE)
+    if (launch == null) {
+        NoticeCenter.warn("找不到 Shizuku 应用（可能刚卸载）")
+        return
+    }
+    launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    runCatching { startActivity(launch) }
+        .onFailure { NoticeCenter.error("拉起 Shizuku 失败：${it.message}") }
+}
+
+/**
+ * 「请求授权」：`Shizuku.requestPermission` + 一次性结果监听（官方 API）。
+ * 回调到达即自注销（监听器只服务这一次请求）；轮询 1s 内也会把授权结果刷进卡片，
+ * 监听只负责「弹窗落定的那一刻」给一句明确反馈。
+ */
+internal fun MainActivity.requestShizukuPermission() {
+    // 监听器要引用自身来注销 ⇒ object 表达式拿 `this` 即自身引用（SAM 转换 lambda 拿不到）
+    val selfRef = object : Shizuku.OnRequestPermissionResultListener {
+        override fun onRequestPermissionResult(requestCode: Int, grantResult: Int) {
+            if (requestCode != SHIZUKU_PERMISSION_REQUEST_CODE) return
+            runCatching { Shizuku.removeRequestPermissionResultListener(this) }
+            NoticeCenter.post(
+                if (grantResult == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    NoticeCenter.Level.INFO
+                } else {
+                    NoticeCenter.Level.WARN
+                },
+                if (grantResult == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                    "Shizuku 授权成功，虚拟屏监视区已就位"
+                } else {
+                    "Shizuku 授权被拒绝，后台模式用不了"
+                },
+            )
+        }
+    }
+    runCatching { Shizuku.addRequestPermissionResultListener(selfRef) }
+        .onFailure { NoticeCenter.error("Shizuku binder 未连接，稍后再试：${it.message}") }
+        .onSuccess {
+            runCatching { Shizuku.requestPermission(SHIZUKU_PERMISSION_REQUEST_CODE) }
+                .onFailure {
+                    runCatching { Shizuku.removeRequestPermissionResultListener(selfRef) }
+                    NoticeCenter.error("发起授权失败：${it.message}")
+                }
+        }
+}
+
+/**
+ * 虚拟屏监视区：启动链（bind → createDisplay → startAppOnDisplay）、状态点渲染与
+ * 预览占位。
+ *
+ * M4 边界（本里程碑刻意收窄，别"顺手"扩）：
+ * - 预览：JPEG 帧传输走 AIDL 尚未加（M5），[refreshPreview] 留 TODO，界面只显示
+ *   布局里那张黑底 + "预览（M5 接帧流）"的占位 —— 但 Handler 骨架就位，M5 只补函数体。
+ * - 帧率：同上，恒显示 "-- fps"。
+ * - 停止：**不显式 destroy**（会话收尾 = M5），只落日志 + 状态回待机；「关闭虚拟屏」
+ *   在 M4 语义 = "不再盯它"，VD 与游戏进程保持原样。
+ * - 「游戏调回前台」：发起即可，失败打 NoticeCenter（三级 repin 防漂移的服务端实现在
+ *   VirtualDisplayManager.repin，本侧不做重试）。
+ */
+internal fun MainActivity.bindVdMonitor() {
+    val dot = findViewById<View?>(R.id.vd_status_dot) ?: return
+    val status = findViewById<TextView?>(R.id.vd_status_text) ?: return
+    val fps = findViewById<TextView?>(R.id.vd_fps_text) ?: return
+    val btnStart = findViewById<Button?>(R.id.btn_vd_start) ?: return
+    val btnStop = findViewById<Button?>(R.id.btn_vd_stop) ?: return
+    val btnFront = findViewById<Button?>(R.id.btn_vd_front) ?: return
+
+    /** 三态渲染：运行中（VD 已建 + 游戏已发上屏）/ 待执行 / 待机。后两态 M4 只有文案。 */
+    fun renderVd(state: VdUiState) {
+        val (dotColor, text) = when (state) {
+            VdUiState.RUNNING -> R.color.pocket_ok to "游戏运行中"
+            VdUiState.PENDING -> R.color.pocket_warn to "待执行"
+            VdUiState.STANDBY -> R.color.pocket_warn to "待机"
+        }
+        dot.backgroundTintList = android.content.res.ColorStateList.valueOf(
+            ContextCompat.getColor(this, dotColor),
+        )
+        status.text = text
+        // M4 占位：帧率来自轮询，JPEG 帧流 M5 接（见 bindVdMonitor KDoc 边界）
+        fps.text = "-- fps"
+    }
+
+    fun render() {
+        refreshMonitorVisibility()
+        renderVd(bgState().vdState)
+        btnStart.isEnabled = !bgState().vdStarting
+        btnStart.alpha = if (bgState().vdStarting) 0.4f else 1f
+    }
+
+    // 先回填当前态再挂监听（与 bindRunModeSection 的回环防线同理由）
+    render()
+    btnStart.setOnClickListener {
+        if (bgState().vdStarting) {
+            NoticeCenter.info("启动已在进行，稍等")
+            return@setOnClickListener
+        }
+        startVdChain(::render)
+    }
+    btnStop.setOnClickListener {
+        // M4：不做会话收尾（M5）。service() 在或不在都只是"不盯了"。
+        val svc = BgiRemoteManager.service()
+        android.util.Log.i(
+            "BetterGI.VD",
+            "关闭虚拟屏（M4 不 destroy）：remote=${svc != null}，状态回待机",
+        )
+        bgState().vdState = VdUiState.STANDBY
+        render()
+    }
+    btnFront.setOnClickListener {
+        val svc = BgiRemoteManager.service()
+        val displayId = bgState().vdDisplayId
+        if (svc == null || displayId < 0) {
+            NoticeCenter.warn("虚拟屏还没起来，先点「启动虚拟屏」")
+            return@setOnClickListener
+        }
+        // AIDL repinToDisplay：把游戏 task 拉回 VD 显示（M4 简化：发起，失败打提醒）
+        val ok = runCatching { svc.repinToDisplay(BG_GAME_PACKAGE, displayId) }
+            .onFailure { android.util.Log.w("BetterGI.VD", "repinToDisplay failed", it) }
+            .getOrDefault(false)
+        if (ok) NoticeCenter.info("已发起：游戏调回虚拟屏前台")
+        else NoticeCenter.error("游戏调回前台失败（详见日志）")
+    }
+}
+
+/**
+ * 「启动虚拟屏」全链路（M4 规格）：`BgiRemoteManager.start` → 等 CONNECTED（状态监听）
+ * → `createDisplay` → `startAppOnDisplay(原神)`。每步结果都打 NoticeCenter；链路跑在
+ * pageScope 协程里（binder 调用短平快，等 CONNECTED 用回调桥成挂起，不占主线程）。
+ *
+ * 失败即停在中断点：状态回待机 + 误差文案上横幅，用户重按按钮重来（BgiRemoteManager
+ * 的幂等语义保证 start 可重复发起）。
+ */
+private fun MainActivity.startVdChain(render: () -> Unit) {
+    val state = bgState()
+    state.vdStarting = true
+    state.vdState = VdUiState.PENDING
+    render()
+    pageScope.launch {
+        var failure: String? = null
+        // ① 前置：Shizuku 四态必须 READY（BgiRemoteManager.start 内部也校验，这里先给用户一句人话）
+        val phase = state.shizukuPhase ?: ShizukuState.assess(this@startVdChain).phase
+        if (phase != ShizukuPhase.READY) {
+            failure = "Shizuku 未就绪（当前 $phase），先完成上面的引导"
+        } else {
+            // ② bindUserService；已连接时 start 返回 false 但服务可用 ⇒ 按"已在"继续
+            val started = BgiRemoteManager.start(this@startVdChain)
+            val alreadyConnected = !started && BgiRemoteManager.state == BgiRemoteManager.RemoteServiceState.CONNECTED
+            if (!started && !alreadyConnected) {
+                NoticeCenter.warn("远程服务绑定未发起：请确认 Shizuku 状态")
+            }
+            // ③ 等 CONNECTED（状态监听桥成挂起；已 CONNECTED 直接过）
+            if (alreadyConnected || awaitRemoteConnected(VD_STEP_TIMEOUT_MS)) {
+                val svc = BgiRemoteManager.service()
+                if (svc == null) {
+                    failure = "远程服务握手未完成（binder 为空），请重试"
+                } else {
+                    // ④ createDisplay → displayId
+                    val id = runCatching { withContext(Dispatchers.IO) { svc.createDisplay() } }
+                        .onFailure { android.util.Log.w("BetterGI.VD", "createDisplay failed", it) }
+                        .getOrDefault(-1)
+                    if (id < 0) {
+                        failure = "虚拟屏创建失败（displayId=-1）"
+                    } else {
+                        state.vdDisplayId = id
+                        android.util.Log.i("BetterGI.VD", "虚拟屏已建 displayId=$id")
+                        // ⑤ startAppOnDisplay(原神)
+                        val launched = runCatching {
+                            withContext(Dispatchers.IO) { svc.startAppOnDisplay(BG_GAME_PACKAGE, id) }
+                        }.onFailure { android.util.Log.w("BetterGI.VD", "startAppOnDisplay failed", it) }
+                            .getOrDefault(false)
+                        if (launched) {
+                            state.vdState = VdUiState.RUNNING
+                            NoticeCenter.info("虚拟屏已启动（displayId=$id），原神已发上屏")
+                        } else {
+                            state.vdState = VdUiState.PENDING
+                            failure = "虚拟屏已建（displayId=$id）但原神启动未受理"
+                        }
+                    }
+                }
+            } else {
+                failure = "远程服务连接超时（${VD_STEP_TIMEOUT_MS / 1000}s），请重试"
+            }
+        }
+        failure?.let { NoticeCenter.error(it) }
+        state.vdStarting = false
+        render()
+    }
+}
+
+/**
+ * 等 BgiRemoteManager 进 CONNECTED（状态监听桥成挂起）：
+ * - 注册即回放当前态（sticky）⇒ 已连接时立即完成；
+ * - withTimeoutOrNull 包住挂起点：超时即取消挂起并经 invokeOnCancellation 注销监听，
+ *   返回 false（调用方给"连接超时"文案）。
+ */
+private suspend fun MainActivity.awaitRemoteConnected(timeoutMs: Long): Boolean {
+    val connected = withTimeoutOrNull(timeoutMs) {
+        kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+            // listener 要在自身回调里自注销 ⇒ object 表达式（lambda 自引用在初始化期不可见）
+            val listener = object : (BgiRemoteManager.RemoteServiceState) -> Unit {
+                override fun invoke(s: BgiRemoteManager.RemoteServiceState) {
+                    if (s == BgiRemoteManager.RemoteServiceState.CONNECTED) {
+                        BgiRemoteManager.removeStateListener(this)
+                        if (cont.isActive) cont.resume(Unit, onCancellation = null)
+                    }
+                }
+            }
+            BgiRemoteManager.addStateListener(listener)
+            cont.invokeOnCancellation { BgiRemoteManager.removeStateListener(listener) }
+        }
+    }
+    return connected != null
+}
+
+/**
+ * 预览刷新（M4 占位：JPEG 帧传输走 AIDL 尚未加，M5 在这里接
+ * VirtualDisplayFrameSource 的帧流并 setImageBitmap；现在什么都不做 —— 界面上
+ * 就是布局里那张黑底 ImageView + "预览（M5 接帧流）"占位文字）。
+ */
+private fun MainActivity.refreshPreview() {
+    // TODO(#310/M5): 轮询/订阅帧源 JPEG → BitmapFactory.decodeByteArray → vd_preview.setImageBitmap
+}
+
+/**
+ * 绑定后台模式区块时的总入口（showScriptManager 调）：三个绑定 + lifecycle 挂钩。
+ * 拆出来是因为挂钩只想做一次，而三个绑定函数会被独立调用（横竖屏重建路径）。
+ */
+internal fun MainActivity.bindBackgroundModeSection() {
+    if (findViewById<LinearLayout?>(R.id.bg_section) == null) return
+    attachBgSectionLifecycle()
+    bindRunModeSection()
+    bindShizukuCard()
+    bindVdMonitor()
+}
 // ---- 首次启动引导（只做竖屏：走到这里说明还没启动原神，设备是竖持的）----
 
 internal fun MainActivity.openA11yIfNeeded() {

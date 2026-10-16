@@ -811,11 +811,15 @@ class TriggerForegroundService : Service() {
     private fun updateForegroundNotification(progressText: String) {
         try {
             val manager = getSystemService(NotificationManager::class.java)
+            // ★ #310/M4：后台模式的进度带「后台·」前缀（读权威设置，与运行模式切换同源）——
+            //   扫描在虚拟屏上跑时通知栏一眼可辨，与前台模式进度区分。
+            val prefix =
+                if (settingsRepository.get().runMode == com.bettergi.pocket.settings.RunMode.BACKGROUND) "后台·" else ""
             manager.notify(
                 NOTIFICATION_ID,
                 buildNotification(
                     sharing = captureController.isRunning(),
-                    progressText = progressText,
+                    progressText = prefix + progressText,
                 ),
             )
         } catch (e: Exception) {
