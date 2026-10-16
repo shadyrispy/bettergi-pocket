@@ -94,6 +94,19 @@ dependencies {
     // 抓包数据源（irminsul-android :capture）：VPN 取包 + 会话解密 + proto 解析，
     // 与 OCR 扫描并列为第二数据源。版本 = 该仓库 gradle.properties 的 captureVersion。
     implementation("com.esc.irminsul:capture:1.10.1")
+    // ★ #310/M0 后台模式（virtualdisplay 分支）：Shizuku 提权通道（Apache-2.0）。
+    //   api = rikka.shizuku.Shizuku 静态面（pingBinder/checkSelfPermission/getUid/
+    //   requestPermission + UserService 绑定，M2 起用）；provider = ShizukuProvider
+    //   （Manifest 已声明，v13 自动初始化 binder 接收器）。
+    //   参考形态：MAA-Meow ShizukuManager（已验证的同款调用序列）。
+    val shizukuVersion = "13.1.5"
+    implementation("dev.rikka.shizuku:api:$shizukuVersion")
+    implementation("dev.rikka.shizuku:provider:$shizukuVersion")
+    // hidden API 访问（Shizuku 官方推荐）：UserService 进程里反射
+    // DisplayManager/InputManager 需要绕 hidden-API 限制；refine 做 hidden API
+    // 编译期引用，hiddenapibypass 处理运行时元数据反射（P+ 的 hidden API 检查）。
+    implementation("dev.rikka.tools.refine:runtime:4.4.0")
+    implementation("org.lsposed.hiddenapibypass:hiddenapibypass:4.3")
     testImplementation(libs.junit)
     // JVM 版 onnxruntime：本地单测跑真实推理（速度/精度对拍），不进 Android 主包
     testImplementation(libs.onnxruntime.jvm)

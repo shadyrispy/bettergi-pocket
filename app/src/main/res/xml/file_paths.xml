@@ -4,9 +4,19 @@
      逐一核对代码里全部 getUriForFile 调用后确认**唯一**共享点是 GOOD 导出
      （MainActivity.shareGood，分享前已把导出快照拷进 filesDir/good_exports/），
      故这里只登记该子目录。脚本库（files/scripts/good/）、昵称表、日志等
-     私有文件不再可被 FileProvider 分享。 -->
+     私有文件不再可被 FileProvider 分享。
+     ★ #310/M0 新增 shizuku_installer：ShizukuInstallHelper 把内置 shizuku.apk
+     导出到公共 Downloads 后拉起系统安装器（ACTION_VIEW + FLAG_GRANT_READ）。
+     只登记**那一个文件**而非 Download/ 整个目录（FileProvider 的 belongsToRoot
+     是 startsWith(root + "/") 匹配，对单文件 root 成立——androidx.core 1.17.0
+     SimplePathStrategy 字节码实证，canonical path 解析后精确命中该文件）。
+     24~28 的旧 File 路径即 Environment.getExternalStorageDirectory()/Download，
+     正是 external-path 的根，两条版本路径共用本条目。 -->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <files-path
         name="good_exports"
         path="good_exports/" />
+    <external-path
+        name="shizuku_installer"
+        path="Download/bettergi-pocket-shizuku-installer.apk" />
 </paths>

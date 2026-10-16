@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import java.util.concurrent.CopyOnWriteArrayList
+import com.bettergi.pocket.settings.RunMode
 import com.bettergi.pocket.settings.SettingsGateway
 import com.bettergi.pocket.settings.SettingsWire
 import com.bettergi.pocket.settings.TriggerSettings
@@ -114,6 +115,11 @@ class BridgeSettingsRepository(private val context: Context) : SettingsGateway {
     override fun setScanMaxPages(pages: Int) = setField(
         SettingsWire.F_SCAN_MAX_PAGES, Bundle().apply { putInt(SettingsBridgeProvider.KEY_VALUE, pages) },
     ) { it.copy(scanMaxPages = pages) }
+
+    /** ★ #310/M0：运行模式（前台/后台）。跨进程语义同其他 setter。 */
+    override fun setRunMode(mode: RunMode) = setField(
+        SettingsWire.F_RUN_MODE, Bundle().apply { putString(SettingsBridgeProvider.KEY_VALUE, mode.wire) },
+    ) { it.copy(runMode = mode) }
 
     /**
      * 把一条日志写给主进程（**单一日志源**在主进程）。

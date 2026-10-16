@@ -81,6 +81,11 @@ class TriggerSettingsRepository(context: Context) : SettingsGateway {
         update { it.copy(scanMaxPages = pages) }
     }
 
+    /** ★ #310/M0：运行模式（前台/后台）。prefs 键 runMode，缺省 foreground。 */
+    override fun setRunMode(mode: RunMode) {
+        update { it.copy(runMode = mode) }
+    }
+
     private fun update(transform: (TriggerSettings) -> TriggerSettings) {
         val newValue: TriggerSettings
         synchronized(lock) {
@@ -120,6 +125,7 @@ class TriggerSettingsRepository(context: Context) : SettingsGateway {
         scanEnabled = prefs.getBoolean(KEY_SCAN, false),
         scanFlow = prefs.getString(KEY_SCAN_FLOW, "artifact_scan") ?: "artifact_scan",
         scanMaxPages = prefs.getInt(KEY_SCAN_MAX_PAGES, 0),
+        runMode = RunMode.fromWire(prefs.getString(KEY_RUN_MODE, null)),
     )
 
     companion object {
@@ -133,6 +139,7 @@ class TriggerSettingsRepository(context: Context) : SettingsGateway {
         private const val KEY_SCAN = "scanEnabled"
         private const val KEY_SCAN_FLOW = "scanFlow"
         private const val KEY_SCAN_MAX_PAGES = "scanMaxPages"
+        private const val KEY_RUN_MODE = "runMode"
 
         fun settingsUri(context: Context): Uri =
             Uri.parse("content://${context.packageName}$AUTHORITY_SUFFIX/settings")
