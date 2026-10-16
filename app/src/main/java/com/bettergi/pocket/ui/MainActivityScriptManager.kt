@@ -269,8 +269,8 @@ private const val SHIZUKU_PERMISSION_REQUEST_CODE = 31001
 /** Shizuku 四态轮询节奏（1s，见 [bindShizukuCard] KDoc 的"轮询而非监听"论证）。 */
 private const val SHIZUKU_POLL_INTERVAL_MS = 1_000L
 
-/** 预览刷新节奏（M4 占位骨架的实际轮询间隔；M5 接帧流后按帧率重定）。 */
-private const val PREVIEW_POLL_INTERVAL_MS = 1_000L
+/** 预览刷新节奏（M5：500ms 一拍，与 fps 显示同拍——一次轮询里一起取）。 */
+private const val PREVIEW_POLL_INTERVAL_MS = 500L
 
 /** 「启动虚拟屏」链路各步的等待上限（bind 握手/远端调用都走 binder，1s 内应答；给余量）。 */
 private const val VD_STEP_TIMEOUT_MS = 10_000L
@@ -574,9 +574,9 @@ internal fun MainActivity.requestShizukuPermission() {
  * 预览占位。
  *
  * M4 边界（本里程碑刻意收窄，别"顺手"扩）：
- * - 预览：JPEG 帧传输走 AIDL 尚未加（M5），[refreshPreview] 留 TODO，界面只显示
- *   布局里那张黑底 + "预览（M5 接帧流）"的占位 —— 但 Handler 骨架就位，M5 只补函数体。
- * - 帧率：同上，恒显示 "-- fps"。
+ * - 预览：~~JPEG 帧传输走 AIDL 尚未加（M5），[refreshPreview] 留 TODO~~ ★ M5 已接
+ *   （AIDL `capturePreviewJpeg`，500ms 轮询，见 [refreshPreview]）。
+ * - 帧率：★ M5 已接（AIDL `getGameFps`，服务端 1s 采样差分，-- fps = 无样本）。
  * - 停止：**不显式 destroy**（会话收尾 = M5），只落日志 + 状态回待机；「关闭虚拟屏」
  *   在 M4 语义 = "不再盯它"，VD 与游戏进程保持原样。
  * - 「游戏调回前台」：发起即可，失败打 NoticeCenter（三级 repin 防漂移的服务端实现在
@@ -601,7 +601,7 @@ internal fun MainActivity.bindVdMonitor() {
             ContextCompat.getColor(this, dotColor),
         )
         status.text = text
-        // M4 占位：帧率来自轮询，JPEG 帧流 M5 接（见 bindVdMonitor KDoc 边界）
+        // ★ M5：帧率来自预览轮询（refreshPreview 每拍更新；此处只兜首帧前的占位）
         fps.text = "-- fps"
     }
 
@@ -738,12 +738,39 @@ private suspend fun MainActivity.awaitRemoteConnected(timeoutMs: Long): Boolean 
 }
 
 /**
- * 预览刷新（M4 占位：JPEG 帧传输走 AIDL 尚未加，M5 在这里接
- * VirtualDisplayFrameSource 的帧流并 setImageBitmap；现在什么都不做 —— 界面上
- * 就是布局里那张黑底 ImageView + "预览（M5 接帧流）"占位文字）。
+ * 预览刷新（★ #310/M5 接帧流）：AIDL `capturePreviewJpeg` → decodeByteArray → setImageBitmap。
+ * - binder 调用走 pageScope 的 IO 分支（JPEG 传输 + 解码在主线程会卡顿）；
+ * - 服务返回 null/空（VD 未建/帧缓存空/远端异常）⇒ 按「预览不可用」处理：清空 ImageView
+ *   + hint 文案提示（不误显示成黑帧——黑帧是服务端**有意**发的全 0 帧，解码出来也是黑图，
+ *   二者用 hint 文案区分语义）；
+ * - fps 同拍顺带：`getGameFps()` → "N fps"（-1 = 尚无样本，显示 "-- fps"）。
  */
 private fun MainActivity.refreshPreview() {
-    // TODO(#310/M5): 轮询/订阅帧源 JPEG → BitmapFactory.decodeByteArray → vd_preview.setImageBitmap
+    val svc = BgiRemoteManager.service() ?: return // 未连接：保持占位，不动 UI
+    pageScope.launch(Dispatchers.IO) {
+        val jpeg = runCatching { svc.capturePreviewJpeg() }
+            .onFailure { android.util.Log.w("BetterGI.VD", "capturePreviewJpeg failed", it) }
+            .getOrNull()
+        val bmp = jpeg?.takeIf { it.isNotEmpty() }?.let { bytes ->
+            runCatching { android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                .getOrNull()
+        }
+        val fps = runCatching { svc.getGameFps() }.getOrDefault(-1)
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+            val preview = findViewById<android.widget.ImageView?>(R.id.vd_preview)
+            val hint = findViewById<TextView?>(R.id.vd_preview_hint)
+            if (bmp != null) {
+                preview?.setImageBitmap(bmp)
+                hint?.text = "预览"
+            } else {
+                // 预览不可用：清掉旧帧（防止显示陈旧画面假装活着）+ 文案明示
+                preview?.setImageBitmap(null)
+                hint?.text = "预览不可用（虚拟屏未出帧或服务未建显示器）"
+            }
+            findViewById<TextView?>(R.id.vd_fps_text)?.text =
+                if (fps >= 0) "$fps fps" else "-- fps"
+        }
+    }
 }
 
 /**

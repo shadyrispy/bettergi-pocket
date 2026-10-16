@@ -57,6 +57,11 @@ class KeepAlive(
     private var thread: HandlerThread? = null
     private var handler: Handler? = null
 
+    /** ★ #310/M5：外部周期观察者（fps 估计器等共用本线程；handler 生命周期跟随 start/stop）。 */
+    private val observers = mutableListOf<ObserverEntry>()
+
+    private class ObserverEntry(val task: Runnable, val periodMs: Long)
+
     /** 活跃拍数（观测/测试用；@Volatile 供跨线程读）。 */
     @Volatile
     var ticks: Long = 0
@@ -82,6 +87,8 @@ class KeepAlive(
         thread = t
         handler = Handler(t.looper)
         isRunning = true
+        // ★ #310/M5：start（重新）挂上已注册的观察者（stop 会摘掉它们的任务）
+        for (o in observers) scheduleObserver(o, 0L)
         Log.i(TAG, "keep-alive 启动（displayId=$displayId, 每 ${intervalMs}ms）")
         if (kick) scheduleTick(0L) else scheduleTick(intervalMs)
     }
@@ -96,6 +103,31 @@ class KeepAlive(
         thread?.quitSafely()
         thread = null
         Log.i(TAG, "keep-alive 停止（共 $ticks 拍）")
+    }
+
+    /**
+     * ★ #310/M5：注册外部周期观察者（本 HandlerThread 上 postDelayed 自续，不新建线程）。
+     * 注册时若已在跑则立即起拍；stop→start 循环会自动重挂。异常吞掉（观察者只做采样，
+     * 不许拖垮 keep-alive 拍子）。
+     */
+    @Synchronized
+    fun addPeriodicObserver(observer: (wallMs: Long) -> Unit, periodMs: Long) {
+        val entry = ObserverEntry(
+            task = Runnable {
+                runCatching { observer(android.os.SystemClock.elapsedRealtime()) }
+            },
+            periodMs = periodMs,
+        )
+        observers += entry
+        if (isRunning) scheduleObserver(entry, 0L)
+    }
+
+    private fun scheduleObserver(entry: ObserverEntry, delayMs: Long) {
+        val h = handler ?: return
+        h.postDelayed({
+            entry.task.run()
+            if (isRunning) scheduleObserver(entry, entry.periodMs)
+        }, delayMs)
     }
 
     private fun scheduleTick(delayMs: Long) {

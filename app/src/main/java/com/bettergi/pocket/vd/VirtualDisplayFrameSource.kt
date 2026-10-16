@@ -44,6 +44,12 @@ class VirtualDisplayFrameSource(
     companion object {
         private const val TAG = "BetterGI.VD"
         private const val MAX_IMAGES = 5
+
+        /**
+         * ★ #310/M5：黑帧的代数标记（正常代数 = capture 时刻 elapsedRealtime ns，恒 > 0；
+         * 只有 [publishBlackFrame] 写入的快照才带 -1，消费方可据此识别"已知黑"）。
+         */
+        const val BLACK_FRAME_GENERATION: Long = -1L
     }
 
     private val readerThread = HandlerThread("vd-frame-reader").also { it.start() }
@@ -111,6 +117,45 @@ class VirtualDisplayFrameSource(
 
     /** Surface 供 VirtualDisplayManager.create 用（本 reader 的 surface）。 */
     fun surface(): android.view.Surface = reader.surface
+
+    /**
+     * ★ #310/M5：最新 RGBA 快照的**只读借用**（JPEG 预览用，避免为了压图再拷一遍全帧）。
+     * ⚠️ 借用不拷贝：返回后回调线程可能随时换掉缓存槽引用（旧数组不被改写，读到的
+     * 内容要么旧要么新、无撕裂——与缓存槽的 @Volatile 引用切换同一语义）。预览侧若
+     * 撞上帧切换，至多 JPEG 内容混代（下一拍轮询自然修正），不值得为它加锁拷贝。
+     */
+    fun latestRgbaSnapshot(): Snapshot? = cached
+
+    /**
+     * ★ #310/M5：把缓存槽替换成**全 0 RGBA 黑帧**（VdBlackFrameGuard 确认游戏死透后的
+     * 止血动作——下游看到的是一块已知黑，而不是无限旧的最后一帧）。
+     *
+     * TOCTOU 校验：进入时快照 [genBefore]，提交前再读一次当前代数——期间有新帧落地
+     * （游戏又出帧了）⇒ 返回 false **不覆盖**（这正是"自然恢复"路径，黑帧不许把它盖掉）。
+     * 成功发布 ⇒ generation = [BLACK_FRAME_GENERATION]（-1，特殊标记；guard 看到代数
+     * 变化会清 streak，游戏回来后新帧自然覆盖黑帧）。
+     *
+     * @return true = 已发布；false = 帧源已停 / 无缓存帧（无内容可黑）/ TOCTOU 拒绝
+     */
+    fun publishBlackFrame(): Boolean {
+        if (!running) return false
+        val genBefore = generation
+        if (genBefore == BLACK_FRAME_GENERATION) return false // 已经是黑帧，不重复发布
+        val current = cached ?: return false // 无帧可黑（空缓存：预览本来就没有，无需止血）
+        val black = ByteArray(current.rgba.size) // 全 0 = RGBA(0,0,0,255)? 否——0,0,0,0 透明。
+        // ⚠️ RGBA 全 0 的 alpha=0，JPEG 压后仍是黑（JPEG 无 alpha，压前合成到黑底），
+        //   BGR 转换后也是 (0,0,0)。保持全 0：分配即清零，最大快照 1280x720x4 ≈ 3.5MB，
+        //   不额外再填一遍 alpha。
+        val genAfter = generation
+        if (genAfter != genBefore) {
+            Log.d(TAG, "publishBlackFrame：TOCTOU 拒绝（gen $genBefore -> $genAfter，帧又动了）")
+            return false
+        }
+        cached = Snapshot(black, current.width, current.height, current.rowStride)
+        generation = BLACK_FRAME_GENERATION
+        Log.w(TAG, "缓存槽已替换为黑帧（${current.width}x${current.height}，generation=-1）")
+        return true
+    }
 
     /** RGBA 快照的 BGR Mat 转换（像素运算独立成函数：可单测、可复用于签名）。 */
     private fun snapshotToBgr(s: Snapshot): Mat {

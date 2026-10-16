@@ -428,7 +428,12 @@ class ScriptRunner(
                 //   （华为实测加载屏可整段 0 新帧）。覆盖盲区 = "投影死了但游戏活着"
                 //   （华为投影服务偶发收回：前台闸看游戏，这条看我们的取帧流）。
                 //   动作 = 每会话一次 W 日志（`fpsAdvised` 旗标），不停止不重启。
-                var fpsLastGen = captureController.frameGeneration()
+                //   ★ #310/M5：代数改从 [frameSource] 读（原 captureController）——后台模式
+                //   下 captureController 是投影（没开，恒 0），帧源才是 VD ImageReader。
+                //   前台模式零变化：装配处 frameSource = ProjectionFrameSource(controller)，
+                //   其 frameGeneration() 转发到同一个 controller.frameGeneration()（读代码
+                //   确认引用等价）。
+                var fpsLastGen = frameSource.frameGeneration()
                 var fpsLastWall = android.os.SystemClock.elapsedRealtime()
                 val fpsWindow = ArrayDeque<Long>(FPS_WINDOW_SIZE)
                 var fpsAdvised = false
@@ -441,9 +446,13 @@ class ScriptRunner(
                         }
                         if (wdStop.get()) return@Thread
                         // ★ #309 死亡哨兵先于挂死判定（它 10s 就该响，不该等 120s）。
-                        //   isGenshinInForeground 为 null（无障碍断开）折叠成 UNKNOWN = 不判死。
+                        //   状态经 [probe] 取（★ #310/M5：原直呼 InputAccessibilityService.
+                        //   isGenshinInForeground）——后台模式下无障碍可能没开，直呼恒 null
+                        //   ⇒ 哨兵永不上岗。probe 收口后：前台实现（ACCESSIBILITY）转发到
+                        //   同一个方法（行为零变化）；后台实现（VdStateProbe）查 VD 任务表。
+                        //   null 仍折叠成 UNKNOWN = 不判死（保守语义不变）。
                         if (deathSentinel.onTick(
-                                GameDeathSentinel.fold(InputAccessibilityService.isGenshinInForeground()),
+                                GameDeathSentinel.fold(probe.isGameInForeground()),
                             )
                         ) {
                             Log.e(TAG, "游戏死亡哨兵触发 ⇒ 中止本轮并抢救导出")
@@ -462,7 +471,9 @@ class ScriptRunner(
                         //   只在变化时采样的话，死投影永远填不满窗口 ⇒ 恰好告不出它要告的东西。
                         run {
                             val now = android.os.SystemClock.elapsedRealtime()
-                            val gen = captureController.frameGeneration()
+                            // ★ #310/M5：同上，代数从 [frameSource] 读（后台模式 = VD 帧源；
+                            //   前台模式 ProjectionFrameSource 转发 controller，引用等价）。
+                            val gen = frameSource.frameGeneration()
                             val fps = if (gen != fpsLastGen && now > fpsLastWall) {
                                 (gen - fpsLastGen) * 1000.0 / (now - fpsLastWall)
                             } else 0.0
