@@ -1,5 +1,6 @@
 package com.bettergi.pocket.ui
 
+import com.bettergi.pocket.vd.BackgroundSession
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
@@ -303,6 +304,9 @@ private class BgUiState {
 
     /** 预览刷新轮询任务（M4 占位骨架，随绑定起）。 */
     var previewPoll: Runnable? = null
+
+    /** ★ #310/M6-audit：当前后台会话（帧源在 app 进程；起扫装配与预览都取它）。 */
+    var bgSession: com.bettergi.pocket.vd.BackgroundSession? = null
 }
 
 private val bgUiStates = java.util.WeakHashMap<MainActivity, BgUiState>()
@@ -622,12 +626,15 @@ internal fun MainActivity.bindVdMonitor() {
         startVdChain(::render)
     }
     btnStop.setOnClickListener {
-        // M4：不做会话收尾（M5）。service() 在或不在都只是"不盯了"。
-        val svc = BgiRemoteManager.service()
-        android.util.Log.i(
-            "BetterGI.VD",
-            "关闭虚拟屏（M4 不 destroy）：remote=${svc != null}，状态回待机",
-        )
+        // ★ #310/M6-audit：真正收尾——停帧源 + 服务端 destroyDisplay + 清进程级会话。
+        //   （M4 的"只落日志不 destroy"语义作废：装配接线后会话被起扫消费，必须真收。）
+        runCatching {
+            bgState().bgSession?.stop()
+            BackgroundSession.current?.stop()
+        }.onFailure { android.util.Log.w("BetterGI.VD", "stop session failed", it) }
+        BackgroundSession.clear()
+        bgState().bgSession = null
+        bgState().vdDisplayId = -1
         bgState().vdState = VdUiState.STANDBY
         render()
     }
@@ -679,27 +686,20 @@ private fun MainActivity.startVdChain(render: () -> Unit) {
                 if (svc == null) {
                     failure = "远程服务握手未完成（binder 为空），请重试"
                 } else {
-                    // ④ createDisplay → displayId
-                    val id = runCatching { withContext(Dispatchers.IO) { svc.createDisplay() } }
-                        .onFailure { android.util.Log.w("BetterGI.VD", "createDisplay failed", it) }
-                        .getOrDefault(-1)
-                    if (id < 0) {
-                        failure = "虚拟屏创建失败（displayId=-1）"
+                    // ★ #310/M6-audit：改用 BackgroundSession——app 进程建 ImageReader（帧源），
+                    //   Surface 经 AIDL 给服务进程建 VD ⇒ 扫描引擎直接吃 VD 帧（零跨进程传输）。
+                    //   旧路径 svc.createDisplay()（服务端自建 Surface）保留给纯预览场景。
+                    val s = BackgroundSession().also { bgState().bgSession = it }
+                    val fail = withContext(Dispatchers.IO) { s.start() }
+                    if (fail == null) {
+                        state.vdDisplayId = s.displayId
+                        state.vdState = VdUiState.RUNNING
+                        NoticeCenter.info("虚拟屏已启动（displayId=${s.displayId}），原神已发上屏")
                     } else {
-                        state.vdDisplayId = id
-                        android.util.Log.i("BetterGI.VD", "虚拟屏已建 displayId=$id")
-                        // ⑤ startAppOnDisplay(原神)
-                        val launched = runCatching {
-                            withContext(Dispatchers.IO) { svc.startAppOnDisplay(BG_GAME_PACKAGE, id) }
-                        }.onFailure { android.util.Log.w("BetterGI.VD", "startAppOnDisplay failed", it) }
-                            .getOrDefault(false)
-                        if (launched) {
-                            state.vdState = VdUiState.RUNNING
-                            NoticeCenter.info("虚拟屏已启动（displayId=$id），原神已发上屏")
-                        } else {
-                            state.vdState = VdUiState.PENDING
-                            failure = "虚拟屏已建（displayId=$id）但原神启动未受理"
-                        }
+                        state.vdState = VdUiState.PENDING
+                        failure = fail
+                        s.stop()
+                        state.bgSession = null
                     }
                 }
             } else {
@@ -746,16 +746,13 @@ private suspend fun MainActivity.awaitRemoteConnected(timeoutMs: Long): Boolean 
  * - fps 同拍顺带：`getGameFps()` → "N fps"（-1 = 尚无样本，显示 "-- fps"）。
  */
 private fun MainActivity.refreshPreview() {
-    val svc = BgiRemoteManager.service() ?: return // 未连接：保持占位，不动 UI
+    // ★ #310/M6-audit：预览改从**扫描实际使用的 app 进程帧源**取（BackgroundSession），
+    //   不再走服务端自建 Surface 的 AIDL JPEG——两者是不同的 VD（服务端那个只服务纯预览，
+    //   装配接线后扫描用的是 app Surface 那条）。预览与扫描画面必须是同一块屏。
+    val session = bgState().bgSession ?: BackgroundSession.current ?: return
     pageScope.launch(Dispatchers.IO) {
-        val jpeg = runCatching { svc.capturePreviewJpeg() }
-            .onFailure { android.util.Log.w("BetterGI.VD", "capturePreviewJpeg failed", it) }
-            .getOrNull()
-        val bmp = jpeg?.takeIf { it.isNotEmpty() }?.let { bytes ->
-            runCatching { android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
-                .getOrNull()
-        }
-        val fps = runCatching { svc.getGameFps() }.getOrDefault(-1)
+        val bmp = session.previewBitmap()
+        val fps = session.fpsEstimate()
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
             val preview = findViewById<android.widget.ImageView?>(R.id.vd_preview)
             val hint = findViewById<TextView?>(R.id.vd_preview_hint)
@@ -763,9 +760,8 @@ private fun MainActivity.refreshPreview() {
                 preview?.setImageBitmap(bmp)
                 hint?.text = "预览"
             } else {
-                // 预览不可用：清掉旧帧（防止显示陈旧画面假装活着）+ 文案明示
                 preview?.setImageBitmap(null)
-                hint?.text = "预览不可用（虚拟屏未出帧或服务未建显示器）"
+                hint?.text = "预览不可用（虚拟屏未出帧）"
             }
             findViewById<TextView?>(R.id.vd_fps_text)?.text =
                 if (fps >= 0) "$fps fps" else "-- fps"

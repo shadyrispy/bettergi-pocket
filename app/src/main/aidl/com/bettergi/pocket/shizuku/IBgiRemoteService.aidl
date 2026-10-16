@@ -99,5 +99,28 @@ interface IBgiRemoteService {
      */
     int getGameFps() = 11;
 
+    // ── ★ #310/M6-audit：装配接线补口（version 4 追加，id 12..15）──
+    //   架构定案：Surface 跨进程传递（app 建 ImageReader → Surface 经 AIDL 给服务进程），
+    //   帧留在 app 进程零传输；注入/顶层查询反向走 AIDL（需 shell uid）。
+
+    /**
+     * 用 app 进程传入的 Surface 建 VD（帧回流 app 侧 ImageReader）。
+     * 与 createDisplay()（服务端自建 Surface，预览用）并存；装配扫描用本方法。
+     * 返回 displayId（-1 失败）。
+     */
+    int createDisplayWithSurface(in android.view.Surface surface, int width, int height, int dpi) = 12;
+
+    /** 销毁当前 VD（幂等）。 */
+    void destroyDisplay() = 13;
+
+    /**
+     * VD 上顶层 task 的 [packageName, className]；VD 空（无 task）返回空数组；
+     * 判不出返回 null。**必须跑在提权进程**——getRunningTasks 对普通 app 只返回自己。
+     */
+    String[] topActivityOnDisplay(int displayId) = 14;
+
+    /** VD 上的系统返回键（KEYCODE_BACK 注入）。 */
+    boolean backOnDisplay(int displayId) = 15;
+
     void destroy() = 16777114;
 }

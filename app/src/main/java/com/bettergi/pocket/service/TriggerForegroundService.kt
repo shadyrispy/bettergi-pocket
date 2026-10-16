@@ -187,6 +187,42 @@ class TriggerForegroundService : Service() {
             captureController = captureController,
             overlayController = overlayController,
             listener = scanListener,
+            // ★ #310/M6-audit：按 runMode 解析本轮装配（RunMode 的最终消费方）。
+            //   前台 ⇒ null 语义（Foreground object）⇒ ScriptRunner 内置链，行为逐位不变；
+            //   后台 ⇒ BackgroundSession 三件套；会话缺失/断线 ⇒ BackgroundNotReady 拒绝
+            //   （绝不静默退化成前台——那会把游戏按到主屏上点，与用户意图相反）。
+            assemblyResolver = {
+                when (settingsRepository.get().runMode) {
+                    com.bettergi.pocket.settings.RunMode.FOREGROUND ->
+                        com.bettergi.pocket.scan.AssemblyResolution.Foreground
+                    com.bettergi.pocket.settings.RunMode.BACKGROUND -> {
+                        val session = com.bettergi.pocket.vd.BackgroundSession.current
+                        when {
+                            session == null -> com.bettergi.pocket.scan.AssemblyResolution.BackgroundNotReady(
+                                "后台模式已选但虚拟屏未启动（先在页顶点「启动虚拟屏」）",
+                            )
+                            !session.isHealthy() ->
+                                com.bettergi.pocket.scan.AssemblyResolution.BackgroundNotReady(
+                                    "后台会话不健康（Shizuku 断线或帧源停止）⇒ 点「关闭虚拟屏」后重新启动",
+                                )
+                            else -> com.bettergi.pocket.scan.AssemblyResolution.Background(
+                                frameSource = session.frameSource!!,
+                                probe = session.probe,
+                                actions = session.actions,
+                                readiness = {
+                                    // VD 就绪校验：帧源活 + 游戏在 VD 上（probe 三态折叠——
+                                    // 判不出(null)按放行，与前台 fail-open 同口径）。不查
+                                    // "游戏在物理屏前台"——后台模式它就是不该在前台。
+                                    when (val fg = session.probe.isGameInForeground()) {
+                                        false -> "虚拟屏上没看到原神（先点「启动虚拟屏」或用「游戏调回前台」）"
+                                        else -> null
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            },
         )
         settingsRepository.addListener(settingsListener)
         // ⚠️ 2026-09-18 上机实测：无障碍重连后**悬浮窗不会自己回来**（旧窗口随服务销毁，

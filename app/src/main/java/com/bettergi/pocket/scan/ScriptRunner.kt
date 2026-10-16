@@ -45,7 +45,35 @@ class ScriptRunner(
      * 逐位一致）⇒ 既有调用方零改动；后台模式（virtualdisplay）届时在装配处注入 probeDisplay 轮询实现。
      */
     private val probe: GenshinStateProbe = GenshinStateProbe.ACCESSIBILITY,
+    /**
+     * ★ #310/M6-audit：按 runMode 的**装配解析器**（TriggerForegroundService 注入）。
+     * 每次 startScan 入口调一次、扫描期冻结；null = 恒前台（单测/未接线时的行为，逐位不变）。
+     */
+    private val assemblyResolver: (() -> AssemblyResolution)? = null,
 ) {
+    // ── ★ #310/M6-audit：本轮的生效装配（applyAssembly 写入；扫描单飞保证并发安全）──
+    private var activeFrameSource: FrameSource = frameSource
+    private var activeProbe: GenshinStateProbe = probe
+    private var activeActions: ScanEngine.ActionGateway? = null
+    private var activeReadiness: (() -> String?)? = null
+
+    /** 解析并应用本轮装配。null/未就绪的处置在 startScan 里（本函数只做应用）。 */
+    private fun applyAssembly(res: AssemblyResolution?) {
+        when (res) {
+            is AssemblyResolution.Background -> {
+                activeFrameSource = res.frameSource
+                activeProbe = res.probe
+                activeActions = res.actions
+                activeReadiness = res.readiness
+            }
+            else -> {
+                activeFrameSource = frameSource
+                activeProbe = probe
+                activeActions = null
+                activeReadiness = null
+            }
+        }
+    }
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -73,7 +101,8 @@ class ScriptRunner(
         learnedPrefs().edit().putBoolean("lock_confirm_absent", true).apply()
     }
 
-    private val actions = object : ScanEngine.ActionGateway {
+    /** 无障碍动作实现（前台模式；后台 override 时不被使用）。 */
+    private val a11yActions = object : ScanEngine.ActionGateway {
         override fun tap(x: Int, y: Int): Boolean {
             val dispatched = dispatchOnMain {
                 val needPassthrough = overlayController.prepareClickPassthrough(x, y)
@@ -129,7 +158,9 @@ class ScriptRunner(
         }
 
         private fun onActionDispatched(ok: Boolean): Boolean {
-            if (ok) frameSource.markActionAt(SystemClock.elapsedRealtime())
+            // ★ #310/M6-audit：打点必须落在**本轮生效的帧源**上（后台=VD 源）——
+            //   写错源 ⇒ 该源的动作阈值不更新 ⇒ 引擎把动作前的旧帧当新帧。
+            if (ok) activeFrameSource.markActionAt(SystemClock.elapsedRealtime())
             return ok
         }
 
@@ -157,6 +188,9 @@ class ScriptRunner(
             )
         }
     }
+
+    /** ★ #310/M6-audit：本会话生效的动作实现（后台装配 > a11y）。 */
+    private val actions: ScanEngine.ActionGateway get() = activeActions ?: a11yActions
 
     /**
      * 只读计时装饰器（2026-09-12 探针）：在 [actions] 外面包一层，把 click/swipe 的**真实注入耗时**
@@ -236,6 +270,31 @@ class ScriptRunner(
             listener.onFinished("already_running")
             return
         }
+        // ★ #310/M6-audit：按 runMode 解析本轮装配（每轮一次、扫描期冻结）。
+        when (val res = assemblyResolver?.invoke()) {
+            is AssemblyResolution.BackgroundNotReady -> {
+                Log.w(TAG, "后台模式未就绪，拒绝起扫：${res.reason}")
+                listener.onFinished("background_not_ready")
+                return
+            }
+            else -> applyAssembly(res)
+        }
+        // ★ #310/M6-audit：就绪校验分叉——后台模式走 readinessOverride（VD 帧源就绪 +
+        //   VdStateProbe 前台判定 + VD 上帧尺寸），前台模式走下方原校验链（逐位不变）。
+        //   `frameSize` 是两分支的公共产物（后续 profile 装载用）⇒ 提到分叉之前声明。
+        val frameSize: Pair<Int, Int>
+        if (activeReadiness != null) {
+            val reason = activeReadiness!!()
+            if (reason != null) {
+                Log.w(TAG, "起扫就绪校验（后台模式）拒绝：$reason")
+                listener.onFinished(reason)
+                return
+            }
+            frameSize = activeFrameSource.capturedSize() ?: run {
+                listener.onFinished("no_frame_size")
+                return
+            }
+        } else {
         if (!captureController.isRunning()) {
             Log.w(TAG, "scan requires screen projection")
             listener.onFinished("no_projection")
@@ -298,6 +357,8 @@ class ScriptRunner(
             listener.onFinished("no_frame_size")
             return
         }
+        frameSize = size
+        } // ★ #310/M6-audit：end else（前台校验链）
         // flowName 单一事实源 = ScriptStore.KEYS（与 ScanEngine.run() 分派同源，防三处漂移）
         if (flowName !in ScriptStore.KEYS) {
             Log.w(TAG, "unknown flow $flowName; default to artifact_scan")
@@ -316,8 +377,8 @@ class ScriptRunner(
             val exported = java.util.concurrent.atomic.AtomicBoolean(false)
             var exportResults: (() -> Unit)? = null
             try {
-                val profile = ScreenProfile.loadFor(appContext.assets, size.first, size.second)
-                profile.calibrate(size.first, size.second)
+                val profile = ScreenProfile.loadFor(appContext.assets, frameSize.first, frameSize.second)
+                profile.calibrate(frameSize.first, frameSize.second)
                 // ★ simple 阶段3（spec §1/§4）：flow JSON 装载与 FlowValidator 门禁随 DSL 运行时
                 //   下线 —— 引擎 run() 按 flowName 分派到 scan/flows/* 的原生步序。
                 //   flowJson 只承载 returnHome 语义：真机启动路径默认开启前置归位
@@ -336,7 +397,7 @@ class ScriptRunner(
                 val engine = ScanEngine(
                     flowJson = flow,
                     profile = profile,
-                    frameSource = frameSource,
+                    frameSource = activeFrameSource,
                     actions = timedActions, // 只读计时装饰器（委托 actions，行为不变）
                     ocr = OcrGatewayImpl(),
                     names = names,
@@ -433,7 +494,7 @@ class ScriptRunner(
                 //   前台模式零变化：装配处 frameSource = ProjectionFrameSource(controller)，
                 //   其 frameGeneration() 转发到同一个 controller.frameGeneration()（读代码
                 //   确认引用等价）。
-                var fpsLastGen = frameSource.frameGeneration()
+                var fpsLastGen = activeFrameSource.frameGeneration()
                 var fpsLastWall = android.os.SystemClock.elapsedRealtime()
                 val fpsWindow = ArrayDeque<Long>(FPS_WINDOW_SIZE)
                 var fpsAdvised = false
@@ -473,7 +534,7 @@ class ScriptRunner(
                             val now = android.os.SystemClock.elapsedRealtime()
                             // ★ #310/M5：同上，代数从 [frameSource] 读（后台模式 = VD 帧源；
                             //   前台模式 ProjectionFrameSource 转发 controller，引用等价）。
-                            val gen = frameSource.frameGeneration()
+                            val gen = activeFrameSource.frameGeneration()
                             val fps = if (gen != fpsLastGen && now > fpsLastWall) {
                                 (gen - fpsLastGen) * 1000.0 / (now - fpsLastWall)
                             } else 0.0
@@ -596,7 +657,7 @@ class ScriptRunner(
      */
     suspend fun ocrDetProbe(): String {
         if (!captureController.isRunning()) return "no projection"
-        val frame = frameSource.grabFresh(0L, 2500L)
+        val frame = activeFrameSource.grabFresh(0L, 2500L)
         return try {
             val t0 = System.nanoTime()
             val res = OcrFactory.default.recognize(frame)
@@ -624,7 +685,7 @@ class ScriptRunner(
         val size = captureController.capturedSize() ?: return null
         val profile = ScreenProfile.loadFor(appContext.assets, size.first, size.second)
         profile.calibrate(size.first, size.second)
-        val frame = frameSource.grabFresh(0L, 2500L)
+        val frame = activeFrameSource.grabFresh(0L, 2500L)
         return try {
             GridAlign.measureError(frame, profile, gridKey)
         } finally {
