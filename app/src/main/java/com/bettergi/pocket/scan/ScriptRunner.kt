@@ -8,6 +8,7 @@ import android.util.Log
 import com.bettergi.pocket.capture.FrameSource
 import com.bettergi.pocket.capture.ScreenCaptureController
 import com.bettergi.pocket.input.InputAccessibilityService
+import com.bettergi.pocket.notice.NoticeCenter
 import com.bettergi.pocket.log.RecognitionLog
 import com.bettergi.pocket.bridge.OverlayBridge
 import com.bettergi.pocket.core.FlowSource
@@ -406,6 +407,23 @@ class ScriptRunner(
                 }
                 // 交给 try 外的 catch 用：异常发生时本轮已识别的结果不能跟着一起没了（P2-3）。
                 exportResults = { exportNow("aborted") }
+                // ★ 2026-10-16 #309：**游戏死亡哨兵**（与看门狗同线程同拍，判定逻辑在
+                //   [GameDeathSentinel]，纯函数、判定表可单测）。动机：游戏被系统杀/被顶号
+                //   闪退后投影流可能吐静止缓存帧，引擎在 #196 决策表下反复取帧失败直到
+                //   会话看门狗 120s 兜底——空转两分钟且有对着死画面 OCR 的脏读数风险。
+                //   哨兵用前台闸连续 2 拍非游戏（≈10s）提前了断。保守三原则（判死要确认 /
+                //   UNKNOWN 不计次不清零 / 首见 IN_GAME 前不判死）见该类 KDoc。
+                val deathSentinel = GameDeathSentinel()
+                // ★ 2026-10-16 #309b：**投影帧率哨兵**（借鉴 MAA-Meow GameFpsWatcher/Advisor 的
+                //   分层：纯可观测、无控制动作）。帧计数差分采样（`frameGeneration` 原子读），
+                //   15 窗占比式判定——**占比而非均值**：转场/加载时几秒的深谷不该触发
+                //   （华为实测加载屏可整段 0 新帧）。覆盖盲区 = "投影死了但游戏活着"
+                //   （华为投影服务偶发收回：前台闸看游戏，这条看我们的取帧流）。
+                //   动作 = 每会话一次 W 日志（`fpsAdvised` 旗标），不停止不重启。
+                var fpsLastGen = captureController.frameGeneration()
+                var fpsLastWall = android.os.SystemClock.elapsedRealtime()
+                val fpsWindow = ArrayDeque<Long>(FPS_WINDOW_SIZE)
+                var fpsAdvised = false
                 val wd = Thread {
                     while (!wdStop.get()) {
                         try {
@@ -414,6 +432,49 @@ class ScriptRunner(
                             return@Thread
                         }
                         if (wdStop.get()) return@Thread
+                        // ★ #309 死亡哨兵先于挂死判定（它 10s 就该响，不该等 120s）。
+                        //   isGenshinInForeground 为 null（无障碍断开）折叠成 UNKNOWN = 不判死。
+                        if (deathSentinel.onTick(
+                                GameDeathSentinel.fold(InputAccessibilityService.isGenshinInForeground()),
+                            )
+                        ) {
+                            Log.e(TAG, "游戏死亡哨兵触发 ⇒ 中止本轮并抢救导出")
+                            runCatching {
+                                engine.vars.stopRequested = true
+                                if (engine.vars.stopReason == null) engine.vars.stopReason = "gameDied"
+                            }
+                            NoticeCenter.error("游戏已退出/被切走（前台连续非原神）⇒ 自动收尾，已入库结果照常导出")
+                            exportNow("gameDied")
+                            wdStop.set(true)
+                            return@Thread
+                        }
+                        // ★ #309b 帧率采样（在挂死判定之前，纯观测；先于 last<=0 的 continue——
+                        //   起跑早期 lastProgressAtMs 还没打点，但投影帧率此刻就该被观测）。
+                        //   gen 没变也要记一拍 fps=0：投影停更的形态就是"gen 恒不变"，
+                        //   只在变化时采样的话，死投影永远填不满窗口 ⇒ 恰好告不出它要告的东西。
+                        run {
+                            val now = android.os.SystemClock.elapsedRealtime()
+                            val gen = captureController.frameGeneration()
+                            val fps = if (gen != fpsLastGen && now > fpsLastWall) {
+                                (gen - fpsLastGen) * 1000.0 / (now - fpsLastWall)
+                            } else 0.0
+                            fpsLastGen = gen
+                            fpsLastWall = now
+                            fpsWindow.addLast(fps.toLong())
+                            if (fpsWindow.size > FPS_WINDOW_SIZE) fpsWindow.removeFirst()
+                            if (!fpsAdvised && fpsWindow.size == FPS_WINDOW_SIZE) {
+                                val low = fpsWindow.count { it < FPS_LOW_FPS }
+                                if (low >= (FPS_WINDOW_SIZE * FPS_LOW_FRACTION).toInt()) {
+                                    fpsAdvised = true
+                                    Log.w(
+                                        TAG,
+                                        "投影帧率哨兵：近 ${FPS_WINDOW_SIZE} 拍里 $low 拍 < ${FPS_LOW_FPS}fps" +
+                                            "（中位 ${fpsWindow.sorted()[FPS_WINDOW_SIZE / 2]}）⇒ 投影可能已停更/被收回" +
+                                            "（游戏进程可能仍活着）。只告警不动作；引擎侧表现为取帧超时增多。",
+                                    )
+                                }
+                            }
+                        }
                         val last = engine.lastProgressAtMs
                         if (last <= 0L) continue
                         val idle = android.os.SystemClock.elapsedRealtime() - last
@@ -563,6 +624,14 @@ class ScriptRunner(
          */
         const val SESSION_STALL_MS = 120_000L
         const val MAIN_DISPATCH_TIMEOUT_MS = 5000L
+
+        // ── ★ #309b 投影帧率哨兵（纯观测）────────────────────────────
+        /** 帧率滑动窗拍数（5s/拍 ⇒ 15 拍 = 75s 观测窗，MAA Advisor 用 15 个 1s 样本）。 */
+        const val FPS_WINDOW_SIZE = 15
+        /** 低于此帧率算"低"：投影流健康时 ≥15fps（游戏 60fps、引擎空闲时也远高于此）。 */
+        const val FPS_LOW_FPS = 10L
+        /** 触发占比：≥80% 的拍都低才告警（转场/加载的深谷不该触发，MAA `minFraction=0.8` 同款）。 */
+        const val FPS_LOW_FRACTION = 0.8
 
         /**
          * A15：stop() 等待旧扫描协程真正终结的上限（几百 ms 量级）。
