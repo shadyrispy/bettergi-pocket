@@ -23,6 +23,12 @@ android {
         versionName = "1.0"
     }
 
+    // ★ #310/M1b：AIDL 源集默认关闭（AGP 8 起需显式开启）——
+    //   src/main/aidl 的 IBgiRemoteService（Shizuku UserService 契约）要参与编译。
+    buildFeatures {
+        aidl = true
+    }
+
     splits {
         abi {
             isEnable = true
