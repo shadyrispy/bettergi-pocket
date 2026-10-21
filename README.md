@@ -12,7 +12,7 @@
 - **自动对话**：识别剧情对话后自动点击选项；可选「快速点击跳过」
 - **自动拾取**：周期点击屏幕下方拾取
 - **自动扫描**：圣遗物/武器背包全量扫描 → GOOD v3 JSON 导出（artifacts + weapons 双数组）
-  - DSL 驱动：`app/src/main/assets/dsl/profiles.json`（坐标唯一事实源）+ `flows/*.json`（**26 do 原语解释器**）
+  - DSL 驱动：`app/src/main/assets/dsl/profiles.json`（坐标唯一事实源）+ `flows/*.json`（**28 do 原语解释器**：顶层分发 22 + visit 专用 6，与 `primitives.schema.json` 的 enum 逐条对齐）
   - 像素投票判据（锁/收藏/祝圣/稀有度/星带逐格/武器金条）+ ONNX PaddleOCR（PP-OCRv6 tiny）字段槽解析（rec-only 批量 ~2ms/槽）
   - set_name 反推词典（276 件/56 套）+ 武器词典（236 件）+ 角色词典（121），**三级匹配：精确 → 包含 → 单字 Dice ≥0.55**
   - 3★/2★ 止扫标识（rarity=-1 哨兵保护）、指纹判到底、跨页去重、**详情切换等待**（防读旧件）
@@ -52,7 +52,7 @@ TriggerForegroundService（生命周期 + settingsListener + 前台通知）
 │    · grabFresh(afterTs)：动作后取新帧（markActionAt 快照动作前末帧 ns 时间戳）
 ├─ TriggerEngine（100ms 节拍，实时触发：AutoPick/AutoSkip，依赖 FrameSource 零行为变化）
 ├─ ScriptRunner（独立协程单步循环，不进节拍；startScan(flowName, maxPages)）
-│    └─ ScanEngine（DSL 解释器，26 do 原语；**已按域拆分为扩展函数**，见下）
+│    └─ ScanEngine（DSL 解释器，28 do 原语；**已按域拆分为扩展函数**，见下）
 │        顶层: enterScreen/dualStateButton/readCount/pagedGrid/dialog/ocrWithRetry/
 │              navigate/foreach/setFilter/exit/verify/emit/rosterFind/clicks/filterReset/
 │              assertScreen/readConstellation/clickSlotTab/planSummary
@@ -119,13 +119,17 @@ JAVA_HOME=$(mise where java) ./gradlew -p <abs-path> :app:testDebugUnitTest :app
 
 干跑仍占 98% ⇒ 分层：
 
-| 跑什么 | 命令 | 实测（2026-10-01） |
+| 跑什么 | 命令 | 实测（2026-10-02） |
 |---|---|---|
-| 默认闸门（纯逻辑 + 解析 + profile 对账，**跳过干跑**） | `./gradlew :app:testDebugUnitTest` | 68 类 / 492 条 / 测试 6s 级 |
-| **含干跑全量** —— 改了 `ScanEngine` 或 `dsl/json/flows` 必须带 | `./gradlew :app:testDebugUnitTest -Pdryrun` | 69 类 / 509 条 / 约 5.4min |
+| 默认闸门（纯逻辑 + 解析 + profile 对账，**跳过干跑**） | `./gradlew :app:testDebugUnitTest` | 72 类 / 548 条 / 10s |
+| **含干跑全量** —— 改了 `ScanEngine` 或 `dsl/json/flows` 必须带 | `./gradlew :app:testDebugUnitTest -Pdryrun` | 73 类 / 565 条 / 5m25s |
 | 只跑干跑 | `./gradlew :app:testDebugUnitTest -PdryrunOnly` | 干跑类（约 316s） |
 
-⚠️ 数字随提交漂移，**以当轮 `TEST-*.xml` 解析为准**，别照抄本表。
+⚠️ 数字随提交漂移，**以当轮 `TEST-*.xml` 解析为准，别照抄本表**（本表两行均 2026-10-02 实测）；
+（#174 轮：默认闸门 21:54 实测 72/548/0；含干跑 22:41 实测 73/565/0，其中干跑 17 条。
+上一批 #173 轮是 21:14 的 73/563/0 与 72/546/0 —— 差的 2 条就是 #174 新添的两条 profile 用例）；
+且**别只看加总** —— `--tests` 过滤跑只覆写部分 XML，结果目录会是**混合态**
+（判绿前先核各 `TEST-*.xml` 的 `timestamp` 是否同批、是否晚于最后一次源码改动）。
 
 跳过时 Gradle 会打一行 `BetterGI: 已跳过 …ScanEngineDryRunTest` —— **别把"默认闸门绿"当成"引擎 e2e 绿"**。
 
@@ -152,7 +156,9 @@ JAVA_HOME=$(mise where java) ./gradlew -p <abs-path> :app:testDebugUnitTest :app
 | TalentLevelParseTest | 天赋读数锚定解析 + 多数票合并（#153） |
 | 其余（几何/滑动/身份/对账/app 级单元） | 每页 21 格、落地位移、跨页身份、锁态判据等逐条回归 |
 
-**交付 APK 前必须 `unzip -l <apk> | grep assets/dsl` 复验关键资产在包内**（当前应 **24** 个文件；git clean ≠ 磁盘文件存在）。
+**交付 APK 前必须 `unzip -l <apk> | grep assets/dsl` 复验关键资产在包内**（当前应 **22** 个文件；#168 把
+`good_names.json`/`char_talent_bonus.json` 收口进 `mappings.json` 后由 24 降为 22 —— 2026-10-02 三份 ABI APK
+实测均 22。git clean ≠ 磁盘文件存在）。
 
 ## dsl 资产同步
 
@@ -160,13 +166,17 @@ JAVA_HOME=$(mise where java) ./gradlew -p <abs-path> :app:testDebugUnitTest :app
 ⚠️ `app/assets/`（无 src/main 前缀）不是 assets 目录——文件放那里不进 APK（fix45 教训：mappings.json 曾因此全部 unavailable）。
 dsl 变更后须手动重拷并跑守门测试；同步机制 P4 订阅管理解决。
 
-**名称词典只有一份**：`tools/good_names.json`（角色/武器/套装/圣遗物单件/词条/部位），
-由 `../dsl/scripts/gen_good_names.py` 生成并同步。`../dsl/tools/mappings.json` 与
-`artifactSetPieces.json` 只是 dsl 侧的**生成源**，不再拷进 app（守门测试钉死：出现即红）。
+**名称词典只有一份**：`tools/mappings.json`（角色/武器/套装/圣遗物单件/词条/部位/七元素），
+由 `../dsl/scripts/gen_mappings.py` 一步生成并同步进 app assets。
+★ 2026-10-01（#168）方向换过一次：以前"唯一运行时词典"是 `good_names.json`，由
+`gen_good_names.py` 从 mappings.json **re-encode** 出来 —— 同一套名字典两种形状就是两个真相，
+#155 正是这么丢的（那一层静默丢掉了 mappings 里一直有的 c3/c5）。现在生成器与运行时同形，
+`gen_good_names.py` / `good_names.json` / `char_talent_bonus.json` 一起退役，
+`primitives.schema.json` 也不再进 assets（编辑器用）。守门测试钉死：这些出现在 assets 即红。
 
 ## 路线
 
-- ~~P0 原语层~~ / ~~P1 扫描核心~~ / ~~P3 脚本化（26 do 原语全实现 + DoCoverageTest 守门）~~
+- ~~P0 原语层~~ / ~~P1 扫描核心~~ / ~~P3 脚本化（28 do 原语全实现 + DoCoverageTest 守门）~~
 - **真机验收**（进行中）：emit 率/settle/坐标精度标定 + GOOD vs irminsul 对账 + 滑动参数回填
 - P2 悬浮窗迁移（TYPE_ACCESSIBILITY_OVERLAY 零权限；桥模式已验证，探针结论待真机 z 序确认）
 - P4 订阅管理（脚本仓库 / 一键更新 / plan 规则注入 → ifMatch/setFilter 激活）

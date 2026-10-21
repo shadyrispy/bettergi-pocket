@@ -89,6 +89,21 @@
             android:taskAffinity=""
             android:theme="@style/Theme.BetterGIPocket.Transparent" />
 
+        <!-- 「导入 JSON」透明中转页（#205）：SAF 选择器必须由前台 Activity 发起，但不必
+             把用户顶到管理器页。由 :a11y 进程直接拉起，选完自己 finish。
+             ⚠️ 别照着上面两页补 noHistory —— 真机 A/B 量过，证据逐行在
+             dsl/verify/runlogs/20261004_205_nohistory_ab_evidence.log：带 noHistory 时
+             DocumentsUI 起来后 0.368s 就 removeAppToken 把本页销毁 ⇒ 选完文件既没有 picked
+             回执也不落盘（表现＝"点了导入没反应"）；去掉后选中/取消两臂都验过。
+             投影/VPN 两页保留 noHistory 成立，是因为授权框盖在同一任务上、不把发起页整页顶掉
+             （同机 51 次 request→result 配对里最长 8.74s 仍收到回调）。 -->
+        <activity
+            android:name=".ui.GoodImportActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.BetterGIPocket.Transparent" />
+
         <service
             android:name=".service.TriggerForegroundService"
             android:exported="false"

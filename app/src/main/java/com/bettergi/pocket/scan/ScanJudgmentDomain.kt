@@ -925,81 +925,223 @@ internal suspend fun ScanEngine.gridThumbOf(gridKey: String): ByteArray? {
 }
 
 /**
- * 筛选列表单行匹配：OCR 名称 → 词典反查 → 命中且 checkbox 未勾选则点选（§12.4-③ 防误取消）。
- */
-/**
- * 筛选弹窗**首行**（某一列）是否是 [expectKey] 那一套 —— 用来**正向**确认"真的在顶页"。
+ * 筛选弹窗**首行**（某一列）读到的是哪一套 —— **只打一行诊断读数，不判决**（返回 Unit）。
  *
- * 为什么需要：`swipeGridToTop` 的到顶判据是"画面没变"（松阈值，理由见其注释），
- * 而**那一下滑动被吞时画面同样没变** ⇒ 两者同形。2026-09-29 真机实测出现过
- * "判已到顶、其实停在半路"（diff=0.211 落进静止态抖动带）⇒ 翻满 5 页零命中 ⇒
- * `not_applied` ⇒ **静默退化成无筛全量扫**，目标必然找不到，而日志一片正常。
- * 读不出（OCR 全烂）返回 false：宁可让它再回顶一次，也不认一个没有证据的"在顶"。
+ * 名字史（2026-10-02 审计纠正，别再当判据用）：原名 `filterTopRowIs` 返回 Boolean，本意是
+ * **正向**确认"真的在顶页"——`swipeGridToTop` 的到顶判据是"画面没变"（松阈值），而那一下滑动被吞时
+ * 画面同样没变 ⇒ 两者同形；09-29 实测过"判已到顶、其实停在半路"（diff=0.211 落进静止态抖动带）
+ * ⇒ 翻满 5 页零命中 ⇒ `not_applied` ⇒ 静默退化成无筛全量扫。
+ * ⛔ **但该立意已被实测推翻**（2026-09-29 21:29，见 profile `set_filter_popup.topRowKeyNote` 与
+ * `dsl/verify/_char_filter_probe/README.md` §K）：回顶后首行读到的是「流浪大地的乐团」还是
+ * 「华馆梦醒形骸记 / 角斗士的终幕礼」随轮次漂 ⇒ 那些读数**本身就不代表顶页**，基于坏测量的判据
+ * 会把本来能用的筛选判死。⇒ 引擎侧降级为只打读数，判决仍归 `swipeGridToTop`；两处调用点本来
+ * 就把返回值丢掉，如今把这点写进签名（`Unit`），免得下一个读到 `…Is` 又把它当判据接回去。
+ *
+ * ★ #169（2026-10-02）：**删掉名义行带回退**。原来量不到相位时用 `FrameRect(x0, y, x1, y+rowHeight)`
+ *   硬读 —— 落点偏时那 90px 名义带里装的是**相邻卡被裁掉的下半截字**，照样能"认出"一个套名，
+ *   于是这行诊断日志会给出**看起来可信的错行读数**（正是 §5 记的那类"保守回退反而更危险"）。
+ *   `textLineCrop` 的 KDoc 明令"调用方不许拿名义行带凑数"，本函数是当时唯一的违反者。
  */
-internal suspend fun ScanEngine.filterTopRowIs(
+internal suspend fun ScanEngine.logTopRowRead(
     gateway: OcrGateway,
     lookup: (String) -> String?,
     box: JSONArray,
     y: Int,
     rowHeight: Int,
+    rowPitch: Int,
+    labelAnchor: Int,
     expectKey: String,
-): Boolean {
-    val rect = if (box.length() >= 4) FrameRect(box.getInt(0), y, box.getInt(2), y + rowHeight)
-    else FrameRect(box.getInt(0), y, box.getInt(1), y + rowHeight)
+) {
+    val x0 = box.getInt(0)
+    val x1 = if (box.length() >= 4) box.getInt(2) else box.getInt(1)
     repeat(2) { attempt ->
         val frame = freshFrame()
+        val crop = GridAlign.textLineCrop(frame, x0, x1 - x0, y, rowHeight, rowPitch, labelAnchor)
+        if (crop == null) {
+            // 量不到 ⇒ 不读：宁可这行日志缺席，也不留一条"错行但能认名"的假证据
+            frame.release()
+            Log.d(TAG, "setFilter 顶页锚[${if (attempt == 0) "首读" else "重读"}] y=$y 行位没量到 ⇒ 不读")
+            if (attempt == 0) delay(250)
+            return@repeat
+        }
+        val readRect = FrameRect(crop.crop.x, crop.crop.y, crop.crop.right, crop.crop.bottom)
         val text = try {
-            gateway.readLines(frame, listOf(rect)).joinToString(" ")
+            gateway.readLines(frame, listOf(readRect)).joinToString(" ")
         } finally {
             frame.release()
         }
         val key = lookup(StatParser.clean(text))
-        Log.i(TAG, "setFilter 顶页锚[${if (attempt == 0) "首读" else "重读"}] text='$text' key=$key")
-        if (key != null) return key == expectKey
+        Log.i(TAG, "setFilter 顶页锚[${if (attempt == 0) "首读" else "重读"}] ph=${crop.phase} text='$text' key=$key expect=$expectKey")
+        if (key != null) return
         delay(250)
     }
-    return false
 }
 
+/**
+ * 一行筛选名的**读数结果**（#147）：页级自洽度要同时知道"读到字了吗 / 认出套装名了吗"，
+ * 只返回"是否命中待选目标"的话，**整页乱码**与"这页没有目标"两种情况同形 —— 而前者正是
+ * #147 的病灶（判稳信号看不见残余慢漂 ⇒ 行带被十几 px 位移切成跨行 ⇒ 每行都读成自信乱码）。
+ */
+internal class RowRead(
+    val blank: Boolean,
+    val resolved: Boolean,
+    val matched: Boolean,
+    /** 本行 OCR 原文（#147：判"还在漂"要比对**两次读数的文本**，像素差量化不出来，文本变没变变得出来）。 */
+    val text: String,
+)
+
+/**
+ * 一页筛选读数的**自洽度**（#147）：`认出套装名的行数 / 读到非空文本的行数`。
+ *
+ * 分母**只数非空行**是这条判据的要害：列表落到行尾时，末行带在文字之外（读成**空**），
+ * 把它们算进分母就会把"到底了"误判成"没读稳"，每页白等两次重读；而行位偏出余量时
+ * rec-only 给的是**非空乱码**（'禁时文歌' 这种，#169），只有它们会拉低比值 —— 这正是我们要抓的信号。
+ *
+ * 一行都没读到字（整页空）⇒ 返回 1f：没有证据就不许判"未稳"，交给上层继续翻页。
+ */
+internal fun filterPageConsistency(rowsRead: Int, rowsBlank: Int, rowsResolved: Int): Float {
+    val nonBlank = rowsRead - rowsBlank
+    if (nonBlank <= 0) return 1f
+    return rowsResolved.toFloat() / nonBlank
+}
+
+/**
+ * 同一页**两次读数是否逐字相同**（#147 的第二道信号）—— 判"还要不要重读"。
+ *
+ * 自洽度低有两种时间形态，光看比值分不开：
+ * · 列表还在慢漂 ⇒ **下一次读会给出另一串字**（00:33 轮实测同一行两遍读出 '双保限市的服务' /
+ *   '平自限事的路者'，第 3 页比值 0.55→0.36）；这种值得等一等再读。
+ * · 静止态 ⇒ **下一次读还是同一串字**。当初把它归因成"灰化低对比度 + 形近字"（#147⑥），
+ *   2026-10-02 #169 复查**推翻**：同一批"读不出的套"在邻页一字不差地读对过，且劣化总是
+ *   **整页**命中 —— 真因是行位落点偏出行带余量（见 [GridAlign.textLineCrop]）。静止的乱码重读也不会变，
+ *   所以本判据的**动作**不变（立刻收手），只是原因换成"再读也没用"，兜底对象剩词典缺口。
+ *
+ * `prev == null` ⇒ 还没有对比基准，返回 false（要再读一次才知道稳不稳）。
+ */
+internal fun filterPageStable(prev: List<String>?, now: List<String>): Boolean = prev != null && prev == now
+
+/**
+ * 落点越界判定（#169 §8-5，纯函数好测）。
+ *
+ * `clickY = rowCenterY + phase` 是 #169 的不变式（读数、checkbox 读数、点击共用一个相位），
+ * 但相位窗是 ±半行距，末行的最深落点会**越过列表视口下沿**：三档实测
+ * 2244 916+51=**967** vs bounds 底 965（越 2px，而"重置"钮上沿就在 974）、
+ * 2560 1222+68=**1290** vs 1272（越 18px）、3200 1290 vs 1292（不越）。
+ * 越界点到"重置"= 把刚勾上的筛选静默清掉 ⇒ 这一轮目标达不成，而日志看着一切正常。
+ *
+ * ⚠️ 修法必须是**整格不做**（返回 null ⇒ 调用方按"量不到"记账），
+ * **不许**把 clickY 钳到边界内继续点 —— 那等于回到"读 B 点 A"。
+ */
+internal fun filterClickYOrNull(rowCenterY: Int, phase: Int, panelTop: Int, panelBottom: Int): Int? {
+    val y = rowCenterY + phase
+    return if (y < panelTop || y > panelBottom) null else y
+}
+
+/**
+ * 要不要给本页一次"半行轻推"重读的机会（#169 §6-1 的收法，纯函数）。
+ *
+ * 病灶：翻页行程不是行距的整数倍 ⇒ 每页落点 δ 几乎任意；δ 落在 ±半行距 的**窗沿**时，
+ * 本行与邻行的字带离锚都 ≤`TEXT_AMBIG_MIN` 之差 ⇒ 歧义门成批拒判 ⇒ **整页大面积"量不到"**
+ * （2560 尾页实测 7/16，代价口径见审计 §10-附2：漏格＝这一轮目标达不成，不是"慢一点"）。
+ * 轻推半行就是去**改这个落点相位**：把 δ 从窗沿挪到窗中间，同一页再读一遍。
+ *
+ * 门槛取 **4/16 = 0.25**：这是照 2560/3200 两轮实测的空行分布定的（2560 尾页 3/16、3/16、5/16、
+ * 7/16；3200 尾页 4/16、5/16），第一版定的是 1/3 ⇒ 20:41（3200）与 21:0x（2560）两轮**一次都没触发**
+ * —— 门槛落在观测范围之上，等于写了条不响的判据。
+ * 样本太少的页不推（<8 行读数时"空 3"就有歧义）。
+ */
+internal fun shouldNudgeFilterPage(rowsRead: Int, rowsBlank: Int, nudgesUsed: Int, nudgeBudget: Int): Boolean {
+    if (nudgesUsed >= nudgeBudget) return false
+    if (rowsRead < 8) return false
+    return rowsBlank.toDouble() / rowsRead >= FILTER_PAGE_NUDGE_BLANK_RATIO
+}
+
+/** 每页允许的半行轻推次数（1 次就够：推完还读不到，说明不是窗沿问题，继续推只会白烧时间）。 */
+internal const val FILTER_PAGE_NUDGE_BUDGET = 1
+
+/** 触发轻推的"量不到"占比门槛。 */
+internal const val FILTER_PAGE_NUDGE_BLANK_RATIO = 0.25
+
+/**
+ * 筛选列表单行匹配：OCR 名称 → 词典反查 → 命中且 checkbox 未勾选则点选（§12.4-③ 防误取消）。
+ *
+ * ★ #169：读数、checkbox 读数、点击三者**共用同一个相位**（`clickY = rowCenterY + phase`）；
+ *   `textLineCrop` 量不到相位 ⇒ 不读也不点（详见该函数 KDoc：拿名义行带凑数＝"读 B 点 A"）。
+ * @param panelTop/panelBottom 列表视口（profile `grids.<key>.bounds` 的 y 向）；落点越出去**整格不做**
+ *   （见 [filterClickYOrNull]，越界点到"重置"是静默错动作）。
+ */
 internal suspend fun ScanEngine.matchFilterRow(
     gateway: OcrGateway,
     lookup: (String) -> String?,
     box: JSONArray,
     y: Int,
     rowHeight: Int,
+    rowPitch: Int,
+    labelAnchor: Int,
     checkboxX: Int,
     rowCenterY: Int,
+    panelTop: Int,
+    panelBottom: Int,
     pending: MutableSet<String>,
     side: String,
-): Boolean {
+): RowRead {
     // nameBox 两种写法：[x0,x1]（canonical 2 元 x 区间）或 [x0,y0,x1,y1]（4 元 rect，y 取 index 2）
-    val rect = if (box.length() >= 4) FrameRect(box.getInt(0), y, box.getInt(2), y + rowHeight)
-    else FrameRect(box.getInt(0), y, box.getInt(1), y + rowHeight)
+    val x0 = box.getInt(0)
+    val x1 = if (box.length() >= 4) box.getInt(2) else box.getInt(1)
     // 行 OCR 失败重试一次：翻页残差使文字在 ROI 内错位时首读常烂，缓 250ms 后重取帧显著提升命中
     var key: String? = null
-    var text: String
+    var text = ""
+    // ★ #169：名义行带（2244 实测 90px）远高于一行字（27px）且字**贴带顶** ⇒ 落点一偏出余量，
+    //   名义带里装的就是**相邻卡被裁掉的下半截字**。逐帧量出字带位置再紧裁剪送 rec，并把量到的
+    //   **行相位同时用于 checkbox 读数与点击**（三者同相位 ⇒ 即使量到的是相邻那张卡也自洽）。
+    var phase = 0
     for (attempt in 0 until 2) {
         val frame = freshFrame()
+        val crop = GridAlign.textLineCrop(frame, x0, x1 - x0, y, rowHeight, rowPitch, labelAnchor)
+        if (crop == null) {
+            // 没量到相位就**不读也不点**：读出来照样能"认成"一个套装名（下半截字也是字），点下去却是
+            // 本行中心 ⇒ 读 B 点 A＝静默选错套装，比整行空坏得多。这格按"空"记账（不进自洽度分母）。
+            // 真机 2244 尾页 δ=−53 实测：装机版 8 帧 × 16 格只认出 0 个，而名义带能"认出" 16 个——
+            // 那 16 个全是错行读数。
+            frame.release()
+            Log.d(TAG, "filterRow[$side] y=$y a$attempt 行位没量到 ⇒ 不读不点")
+            if (attempt == 0) delay(250)
+            continue
+        }
+        phase = crop.phase
+        val readRect = FrameRect(crop.crop.x, crop.crop.y, crop.crop.right, crop.crop.bottom)
         text = try {
-            gateway.readLines(frame, listOf(rect)).joinToString(" ")
+            gateway.readLines(frame, listOf(readRect)).joinToString(" ")
         } finally {
             frame.release()
         }
         key = lookup(StatParser.clean(text))
-        Log.d(TAG, "filterRow[$side] y=$y a$attempt text='$text' key=$key")
+        Log.d(TAG, "filterRow[$side] y=$y a$attempt ph=$phase text='$text' key=$key")
         if (key != null || text.isBlank()) break
         delay(250)
     }
-    if (key == null || key !in pending) return false
-    if (checkboxChecked(checkboxX, rowCenterY)) {
-        Log.i(TAG, "setFilter: $key ($side) 已勾选，跳过（防误取消）")
-        pending.remove(key)
-        return true
+    val blank = text.isBlank()
+    if (key == null || key !in pending) return RowRead(blank, key != null, false, text)
+    val clickY = filterClickYOrNull(rowCenterY, phase, panelTop, panelBottom)
+    if (clickY == null) {
+        // 落点越出列表视口 ⇒ **整格不做**（不钳到边界内继续点，那等于"读 B 点 A"）。
+        // 按"空"记账：不进自洽度分母，但目标仍留在 pending ⇒ 页级轻推/后续页还会再遇到它。
+        Log.w(
+            TAG,
+            "setFilter: $key ($side) 落点越出面板 ⇒ 不点（rowCenter=$rowCenterY ph=$phase " +
+                "y=${rowCenterY + phase} 视口=[$panelTop,$panelBottom]）",
+        )
+        return RowRead(true, false, false, text)
     }
-    clickAt(checkboxX, rowCenterY)
+    if (checkboxChecked(checkboxX, clickY)) {
+        Log.i(TAG, "setFilter: $key ($side) 已勾选，跳过（防误取消）ph=$phase")
+        pending.remove(key)
+        return RowRead(blank, true, true, text)
+    }
+    clickAt(checkboxX, clickY)
     pending.remove(key)
-    Log.i(TAG, "setFilter matched: $key ($side)")
-    return true
+    Log.i(TAG, "setFilter matched: $key ($side) ph=$phase click=($checkboxX,$clickY)")
+    return RowRead(blank, true, true, text)
 }
 
 /**

@@ -197,7 +197,7 @@ class ScriptRunner(
 
     /**
      * 启动扫描流程。flowName 决定 assets/dsl/flows/<flowName>.json（"artifact_scan" | "weapon_scan"）。
-     * 名称词典统一加载（dsl/tools/good_names.json → GoodNames），各原语经 NameMatcher 反查。
+     * 名称词典统一加载（dsl/tools/mappings.json → GoodNames），各原语经 NameMatcher 反查。
      */
     fun startScan(
         flowName: String = "artifact_scan",
@@ -228,6 +228,39 @@ class ScriptRunner(
         if (!captureController.isRunning()) {
             Log.w(TAG, "scan requires screen projection")
             listener.onFinished("no_projection")
+            return
+        }
+        // 起扫前台闸（2026-10-03 小米 15 实测）：游戏不在前台时，注入闸门会拒掉每一次点击，
+        // 整轮要烧 20 秒才以 `enterScreen anchor not reached` 收场，而面板当时已收起 ⇒
+        // 用户看到的只是"点了开始扫描没反应"。放在这里而不是各入口，是因为起跑入口有 5 处
+        // （悬浮窗 / 通知栏 / settingsListener / 授权回调 / adb DEBUG_SCAN_FLOW），
+        // 只堵一条等于没堵（adb 那条正是当初没被拦住的入口）。
+        // 判不了（无障碍未连 / 还没观察到窗口）时照旧放行，与下面 foregroundOk 的 `?: true` 同口径；
+        // 但恒打一行决策值 —— null / true / false 三种行为完全不同，不打印就只能靠猜。
+        // ★ #181（2026-10-03 15:05 实测）：`isGenshinInForeground` 单看包名，而
+        //   `onAccessibilityEvent` 刻意跳过自家包 ⇒ 管理器页盖满全屏时它仍报**上一个外来应用**（原神），
+        //   于是闸门读到过期的 true、整轮空跑 4 秒后 returnHomeStuck cells=0。
+        //   所以这里再读一笔"自家 Activity 是否盖在上面"（只按类名认，悬浮球那种
+        //   `android.widget.FrameLayout` 不算，否则「点面板 ▶ 起扫」会被自己拒掉）。
+        //   ⚠️ 只作用于**起跑**：注入闸门 `foregroundOk` 的语义一字未改（滑动测试就是从管理器页发的）。
+        // ★ #200（2026-10-03 17:00 小米 15 实测，用户报"点面板 ▶ 提示 not_in_genshin"）：事件缓存
+        //   在 HyperOS 上会被系统隐私角标改写 —— 焦点切进游戏后 0.3~0.5s，com.miui.securitycenter
+        //   追发一条 WINDOW_STATE_CHANGED，而那个角标 100ms 就自己消失、消失不再发事件 ⇒ 缓存恒停在
+        //   "不是原神"，起跑于是恒被拒（三连实测每次都以 securitycenter 结尾）。所以这里**先现问活动
+        //   窗口**，现问不出来才退回缓存；自家面板不会把现问骗走 —— 但理由不是"它不发
+        //   window-state"（它发，runlogs 里 27 条 com.bettergi.pocket/…FrameLayout），而是它是
+        //   NOT_FOCUSABLE 的 a11y 悬浮窗、成不了 rootInActiveWindow（见 activeWindowPackage 的注释）。
+        val selfUi = InputAccessibilityService.ourActivityOnTop()
+        val cached = InputAccessibilityService.isGenshinInForeground()
+        val live = InputAccessibilityService.genshinActiveNow()
+        val detected = live ?: cached
+        val foreground = if (selfUi == true) false else detected
+        Log.i(
+            TAG,
+            "起扫前台闸: isGenshinInForeground=$foreground flow=$flowName（现问=$live 缓存=$cached 自家界面=$selfUi）",
+        )
+        if (foreground == false) {
+            listener.onFinished("not_in_genshin")
             return
         }
         val size = captureController.capturedSize()
@@ -288,7 +321,7 @@ class ScriptRunner(
                 val names = try {
                     GoodNames.load(appContext.assets)
                 } catch (e: Exception) {
-                    Log.w(TAG, "good_names unavailable", e); null
+                    Log.w(TAG, "名称词典不可用（tools/mappings.json）", e); null
                 }
                 val engine = ScanEngine(
                     flowJson = flow,

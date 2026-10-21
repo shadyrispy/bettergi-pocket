@@ -180,12 +180,23 @@ internal fun OverlayWindowController.onFlowAction(kind: String, flowKey: String)
             } else {
                 onShareGoodRequested()
             }
-        // 选择输入文件必须由 Activity 发起（SAF）⇒ 拉起管理器
-        "import" -> openScriptManager(pickGood = true)
+        // 选择输入文件必须由 Activity 发起（SAF）⇒ 首选透明中转页，起不来才退回管理器（#205）
+        "import" -> openGoodPicker()
         "config" -> togglePagesRow()
         "open" -> openScriptManager()
         else -> Log.w(TAG_OVERLAY, "unknown action kind '$kind'")
     }
+}
+
+/**
+ * 「导入 JSON」：先拉透明中转页（弹选择器、存完自己关，不把用户顶到管理页，#205）；
+ * 真抛异常起不来时才退回老路（管理器页收到 `pick_good` 会自开选择器），
+ * 免得这条动作变成又一次"点了没反应"。
+ */
+internal fun OverlayWindowController.openGoodPicker() {
+    val relay = OverlayEntryContract.goodPickerIntent(context)
+    if (runCatching { context.startActivity(relay) }.isSuccess) return
+    openScriptManager(pickGood = true)
 }
 
 /**

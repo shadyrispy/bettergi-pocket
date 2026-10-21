@@ -31,8 +31,16 @@ object EpTierPicker {
      * - **QNN 只在库真能加载时进候选**：AAR 不含高通运行库，[DeviceCapabilities.qnnLibsLoadable]
      *   为假时 `addQnn` 的行为未测，不去试。
      *
-     * ⇒ 默认序就是 `[QNN?] + CPU`：**与升级前"直接选 CPU"的行为一致**，不新增任何启动风险。
-     *    想在某机型上试 XNNPACK/NNAPI，用 `ocrEp=risky` 显式打开并**当场实测**。
+     * ⇒ 默认序是 `[QNN?] + CPU`，**只有"高通 + 运行库真能加载"这一种机器上才会多出 QNN 一档**，
+     *    其余机器与升级前"直接选 CPU"完全一致：
+     *      · 华为 EML-AL00（2026-10-04 实测）`epProbe risky=false` → `soc=hisilicon/kirin970 … qnn=false`
+     *        → `tier=CPU`，生产侧同一条 `OCR engine → ONNX (CPU)` ⇒ 这台（我们跑扫描的机器）不受影响；
+     *      · 高通侧**没有实测**：`normalizeVendor` 收 `qti` 之后 QNN 是否真能建会话，要等小米 15
+     *        重新配对后跑一次 `epProbe risky=false` 才知道（#76/#77 那条链）。在那之前别把它写成"无风险"。
+     *    想在某机型上试 XNNPACK/NNAPI，发 adb `DEBUG_OCR_EP --ez risky true` —— 它走
+     *    [com.bettergi.pocket.recognition.ocr.OcrService.epProbe] **另建一份一次性引擎**当场实测，
+     *    生产那份的候选序不受影响（2026-10-03：此前这条注释写的入口 `ocrEp=risky` **根本不存在**，
+     *    而 `NN_API_FLAGS` 里的 USE_FP16 因此在任何机型上都从未被真正跑过）。
      */
     fun candidatesFor(
         caps: DeviceCapabilities,

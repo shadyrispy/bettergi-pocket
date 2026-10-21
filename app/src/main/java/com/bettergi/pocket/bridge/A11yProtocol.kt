@@ -9,7 +9,6 @@ object A11yProtocol {
     const val M_HIDE = "overlay_hide"
     const val M_COLLAPSE = "overlay_collapse"
     const val M_PROGRESS = "overlay_progress"
-    const val M_CAPTURE = "overlay_capture_status"
     const val M_PT_PREPARE = "overlay_pt_prepare"
     const val M_PT_RESTORE = "overlay_pt_restore"
     const val M_CLICK_THROUGH = "overlay_click_through"
@@ -48,6 +47,12 @@ object A11yProtocol {
 
     // status/snapshot 方向的 method 名（AccessibilityBridgeProvider 的方法表，值不变）：
     const val M_STATUS = "status"
+    /**
+     * 现问活动窗口包名。**单独一条 method，不并进 [M_STATUS]**：
+     * 状态读是高频的（管理器页显示、每次派发前的连接自检都读），而现问要在 :a11y 主线程上做
+     * 节点查询、binder 线程等它最多 1s —— 挂在 status 上等于让每次状态读都可能付这一秒。
+     */
+    const val M_ACTIVE_WINDOW = "active_window"
     const val M_CLICK = "click"
     const val M_SWIPE = "swipe"
     const val M_SCAN_PROGRESS = "scan_progress"

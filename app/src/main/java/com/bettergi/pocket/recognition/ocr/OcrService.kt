@@ -4,6 +4,8 @@ import android.content.Context
 import android.util.Log
 import com.bettergi.pocket.core.IntRect
 import com.bettergi.pocket.recognition.OcrText
+import com.bettergi.pocket.recognition.ocr.onnx.DeviceCapabilities
+import com.bettergi.pocket.recognition.ocr.onnx.EpTierPicker
 import com.bettergi.pocket.recognition.ocr.onnx.OnnxModelAssets
 import com.bettergi.pocket.recognition.ocr.onnx.OnnxOcrEngine
 import com.bettergi.pocket.recognition.ocr.onnx.OnnxPaddleOcrService
@@ -116,6 +118,37 @@ object OcrFactory {
     fun recProbe(widths: IntArray, runs: Int = 5): String {
         val s = onnxService
         return if (s != null) s.recProbe(widths, runs) else "engine=$engineLabel (onnx inactive)"
+    }
+
+    /**
+     * 只读 EP 探测（adb `DEBUG_OCR_EP --ez risky true|false`）：另建一个**一次性**引擎，
+     * 按候选序定档 + 跑 det/rec 基准，报完就 close —— **不动** [default]，扫描照跑。
+     *
+     * 为什么要单独一个入口而不改生产定档：NNAPI 与 XNNPACK 的失败方式是**原生 SIGSEGV / 建会话挂起**
+     * （[EpTierPicker.candidatesFor] 的三条硬约束），生产路径不能拿启动去赌；但"这台机器到底能不能
+     * 跑、跑起来快不快"只有真机建一次会话才知道 ⇒ 把它做成显式、一次性、可随时发的探测。
+     * 探测期间崩溃是可接受的代价（进程重启，不碰游戏、不改账号）。
+     */
+    fun epProbe(context: Context, allowRisky: Boolean, runs: Int = 5): String {
+        val app = context.applicationContext
+        val assets = OnnxModelAssets(app)
+        if (!assets.ensure()) return "epProbe: 模型资产不完整"
+        val caps = DeviceCapabilities.collect()
+        val engine = OnnxOcrEngine(assets.detModel(), assets.recModel())
+        val service = OnnxPaddleOcrService(engine, assets.loadDict())
+        return try {
+            val outcome = runCatching { service.prepare(caps, allowRisky) }
+            when {
+                outcome.isFailure ->
+                    "epProbe risky=$allowRisky ${caps.summary()} 候选=${EpTierPicker.candidatesFor(caps, allowRisky)}" +
+                        " ⇒ prepare 抛异常: ${outcome.exceptionOrNull()}"
+                !outcome.getOrThrow() ->
+                    "epProbe risky=$allowRisky ${caps.summary()} ⇒ 所有候选档都建不起会话"
+                else -> "epProbe risky=$allowRisky ${caps.summary()} | " + service.bench(runs)
+            }
+        } finally {
+            runCatching { engine.close() }
+        }
     }
 
     /**

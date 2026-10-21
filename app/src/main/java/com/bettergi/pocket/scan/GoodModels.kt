@@ -89,7 +89,7 @@ data class GoodCharacter(
 
 // ---------------------------------------------------------------------------
 // 名称词典（角色/武器/套装/圣遗物单件/词条/部位）已统一收敛到：
-//   recognition/name/GoodNames.kt  —— 单一文件 dsl/tools/good_names.json 装载
+//   recognition/name/GoodNames.kt  —— 单一文件 dsl/tools/mappings.json 装载
 //   recognition/name/NameMatcher.kt —— 唯一一处模糊匹配算法
 // 原 ArtifactSetDictionary / WeaponDictionary / CharacterDictionary 三套各写一份
 // 模糊逻辑（且 contains 走 HashMap.firstOrNull，结果依赖遍历顺序）已全部删除：

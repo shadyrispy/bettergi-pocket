@@ -32,6 +32,19 @@ object GoodRepository {
 
     fun file(context: Context): File = File(context.filesDir, "$DIR/$NAME")
 
+    /**
+     * 问出 SAF URI 的真实文件名（`content:` 与 `file:` 都走这一条），问不到返回 null 由调用方兜底。
+     *
+     * ⚠️ 不要用 `uri.lastPathSegment`：经 MediaStore 选中的文件，它末段是 `msf:1000000475`
+     * 这种内部 id（#194 实测「执行输入」就显示成它），用户看不出自己选了哪份。
+     */
+    fun displayName(context: Context, uri: android.net.Uri): String? = runCatching {
+        context.contentResolver.query(uri, null, null, null, null)?.use { c ->
+            val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
+        }
+    }.getOrNull()
+
     fun read(context: Context): JSONObject? =
         runCatching { JSONObject(file(context).readText()) }.getOrNull()
 

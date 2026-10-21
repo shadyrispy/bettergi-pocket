@@ -58,7 +58,7 @@
         "weaponSort",
         "weaponSort"
       ],
-      "note": "★2026-09-28 开局归零（对齐 artifact_scan 的 filterReset/dualStateButton）：武器背包没有筛选复位，但列表**排序方向是会话残留态**——上一跑或玩家手动留下的方向不确定。网格右下角「↑↓」排序钮点击=切换方向（实测 1 下 5★置顶、2 下 3★置顶，无弹窗），**点两下净零方向不变、但强制游戏重排并回到列表顶**⇒ 把列表归一到确定状态。动机：本轮 3200 首跑武器只出 131/165，RecurveBow(3★) 被星带投票误读成 2★ ⇒ `stopWhen rarity<=2` 尾部守卫**假触发**、整段 3★ 尾区（35 把）没扫；重排回顶后逐格读、守卫只在真正到底（无 ≤2★）才可能命中。⚠️ 链项**故意不带字面坐标**：2560/2244 档 `screens.weapon_backpack.sort` 尚未实测 ⇒ clickChainEntry 解析不到 profile 键又无字面 ⇒ 打「无坐标跳过」安全降级，绝不误点（要在这两档启用先各自量排序钮补进 profile）。"
+      "note": "★2026-09-28 开局归零（对齐 artifact_scan 的 filterReset/dualStateButton）：武器背包没有筛选复位，但列表**排序方向是会话残留态**——上一跑或玩家手动留下的方向不确定。网格右下角「↑↓」排序钮点击=切换方向（实测 1 下 5★置顶、2 下 3★置顶，无弹窗），**点两下净零方向不变、但强制游戏重排并回到列表顶**⇒ 把列表归一到确定状态。动机：本轮 3200 首跑武器只出 131/165，RecurveBow(3★) 被星带投票误读成 2★ ⇒ `stopWhen rarity<=2` 尾部守卫**假触发**、整段 3★ 尾区（35 把）没扫；重排回顶后逐格读、守卫只在真正到底（无 ≤2★）才可能命中。⚠️ 链项**故意不带字面坐标**，走 profile 键 `screens.weapon_backpack.sort`——三档都已补进 profile（#117：3200 (971,1336) / 2560 (847,1335) / 2244 (725,1001)），所以不再走「无坐标跳过」降级；但 **2244 那格是按 BlueStacks 帧量的，profile 自己的 note 写着华为实机启用前需复量**。★2026-10-03 #202：既然这一步已经保证到顶，下一步 pagedGrid 的 `scrollToTop` 就删掉了——实测那两次上拉打在**已经在顶**的列表上（`回顶#1 (已到顶) diff=0.000` + `回顶#2 (已到顶)`，见 dsl/verify/runlogs/20260929_0011_2560_weapon_sortfix.log:16,18）。"
     },
     {
       "do": "readCount",
@@ -69,7 +69,6 @@
     {
       "do": "pagedGrid",
       "grid": "weapon_backpack",
-      "scrollToTop": true,
       "fingerprintSkip": true,
       "visit": [
         {

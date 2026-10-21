@@ -212,6 +212,25 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                 break
             }
         }
+        // ★ 批2-B（D5/T1，2026-10-03）：投影只在**起跑时**查过一次，之后一路不查；
+        //   而它会在中途被收回（旋转、通知栏停止投屏、授权到期）。取帧侧此时退回最后一帧旧图
+        //   ⇒ "没有画面"被伪装成"画面没变"。每页复查一次，与上面的前台闸同口径。
+        if (!frameSource.isRunning()) {
+            vars.stopRequested = true
+            vars.stopReason = "投影已停止（共享屏幕被关闭或被系统收回）"
+            Log.w(TAG, "pagedGrid[$gridKey]: page=$pageNo 页首复查发现投影未在跑 ⇒ 停止本轮（已入库照常导出）")
+            break
+        }
+        // ★ 批0 后半（2026-10-03）：通知栏 / 权限页压在上方时，前台闸**按设计仍然放行**
+        //   （见 `InputAccessibilityService.overlayHeldBy` 的取舍：不让系统弹层误关闸门），
+        //   代价是手势被系统层吞掉而引擎毫不知情 —— 日志里只会看到一串 accepted=true。
+        //   这里不改判定，只让它**可见**：每页开头点名一次是谁压在上面。
+        com.bettergi.pocket.input.InputAccessibilityService.overlayHeldPkg()?.let { held ->
+            Log.w(
+                TAG,
+                "pagedGrid[$gridKey]: page=$pageNo 前台压着 $held（通知栏/权限页）⇒ 本局注入可能被吞，闸门按设计仍放行",
+            )
+        }
         val pageCellFrame = runCatchingCancellable { freshFrame() }.getOrNull()
         // ★ 页级看门狗起点（挂死时中止并保留已入库结果）
         val pageWall0 = clock()
@@ -237,6 +256,12 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
         //      卡面像素几乎全同 ⇒ 会并成 1 张）。圣遗物那侧的重叠由**内容**判据 [anchoredD] 负责。
         //   ⚠️ 必须"跳过的同时复制身份/键"而非留空：留空 ⇒ pageKeys 该格为空 ⇒ 页末「空读格回读」
         //      会把这些格重新点一遍，跳过等于白跳（同一坑此前只在锚定路径修过，见 [prevAllCellKeys]）。
+        //   ⚠️ #201 曾把角色侧栏接进来，2026-10-03 华为真机实测**判据不成立**后已回退：
+        //      char_strip 打 `跨页重叠: page=1 判定跳过 0/6 格 idx=[]`，而同一页确实又读到了
+        //      Alyosha/Iansan（`char 重复（连续 1/3）`）⇒ **重叠存在、指纹却说"不同"**。
+        //      最像的成因是 char_strip 没有 landingBand/clickBand ⇒ 相位 φ 量不到（#51 那条
+        //      "未标定网格不平移并显式告警"），指纹框按名义行位取，实机每次落点还带半行残差。
+        //      要接这条判据，先给 char_strip 标定 band；在那之前接进来只是每页白采 6 张图。
         if (gridKey == "weapon_backpack" && pageNo > 0 && prevAllCellFps != null && pageCellFrame != null) {
             val prev = prevAllCellFps!!
             for (r in 0 until traverseRows) {
@@ -1404,14 +1429,32 @@ internal suspend fun ScanEngine.awaitCrossPageSettle(gridKey: String) {
 internal suspend fun ScanEngine.freshFrame(timeoutMs: Long = 2500L): Mat {
     // 只读探针：freshFrame **包含「等一个新帧」的等待**（投影 ~30fps ⇒ 平均 ~33ms），
     // 这部分不计入 nav/panel/settle ⇒ 是「其它」里最易被忽略的大块（见 IMAGE-PATH-COST.md §8）。
-    lastProgressAtMs = android.os.SystemClock.elapsedRealtime()
+    //
+    // ★ 批2-B（2026-10-03）：看门狗心跳挪到**确实拿到动作后新帧之后**再打。
+    //   原来打在第一行 ⇒ 投影停摆、每轮都超时回退旧帧时它照样前进，120s 会话看门狗
+    //   永远不会因"取不到帧"触发（`ScanEngine.lastProgressAtMs` 的注释与此相反，已一并订正）。
+    //   基线（13:12 全量 945 格）实测这条回退**一次都没走到** ⇒ 健康轮不受影响；
+    //   只有真正拿不到帧的轮次会开始被看门狗收，而那正是以前被伪装成"画面没变"的那些。
     val t0 = System.nanoTime()
     try {
         return try {
-            frameSource.grabFresh(0L, timeoutMs)
+            val fresh = frameSource.grabFresh(0L, timeoutMs)
+            lastProgressAtMs = android.os.SystemClock.elapsedRealtime()
+            fresh
         } catch (e: FrameTimeoutException) {
-            Log.w(TAG, "grabFresh timeout, falling back to latest frame")
-            frameSource.acquireLatestBgr()?.bgr ?: throw e
+            freshFrameTimeouts += 1
+            val stale = frameSource.acquireLatestBgr()
+            if (stale == null) {
+                frameRefusedTotal += 1
+                Log.w(TAG, "grabFresh timeout 且无缓存帧可回退 ⇒ 抛给上层")
+                throw e
+            }
+            // ⚠️ 这条回退按构造拿到的就是被 isFresh 拒掉的那一帧（同一 publishedBgr 槽、
+            //   同一个 threshold），所以**不**打看门狗心跳。彻底删掉它要先审 ~20 个调用点
+            //   （settle 循环里把 null 当 break/continue 用，语义会变），列为后续单独一步。
+            staleFramesUsed += 1
+            Log.w(TAG, "grabFresh timeout, falling back to latest frame (staleFramesUsed=$staleFramesUsed)")
+            stale.bgr
         }
     } finally {
         PerfProbe.addFrame(System.nanoTime() - t0)

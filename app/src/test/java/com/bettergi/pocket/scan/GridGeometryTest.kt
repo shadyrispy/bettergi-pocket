@@ -27,19 +27,22 @@ import java.io.File
  */
 class GridGeometryTest {
 
-    private fun profile(): ScreenProfile {
+    private fun profileOf(file: String, w: Int, h: Int): ScreenProfile {
         var dir = File(System.getProperty("user.dir") ?: ".")
         repeat(4) {
             val candidate = File(dir, "src/main/assets/dsl")
             if (candidate.isDirectory) {
-                return ScreenProfile(JSONObject(File(candidate, "profiles.json").readText())).apply {
-                    calibrate(3200, 1440) // 1:1，base 坐标 = 帧坐标
+                return ScreenProfile(JSONObject(File(candidate, file).readText())).apply {
+                    calibrate(w, h) // 1:1，base 坐标 = 帧坐标
                 }
             }
             dir = dir.parentFile ?: return@repeat
         }
         error("src/main/assets/dsl not found")
     }
+
+    /** 基准档 = 3200 canonical（1:1）。 */
+    private fun profile(): ScreenProfile = profileOf("profiles.json", 3200, 1440)
 
     // ---------- §12.1 起点（方案给定期望值）----------
     @Test
@@ -131,12 +134,92 @@ class GridGeometryTest {
         assertEquals(427, p.cellCenter("artifact_backpack", 0).y)
     }
 
-    // ---------- 几何不足 → null（调用方回退写死坐标）----------
+    /**
+     * #174：2560 档也注册成 2 列卡片网格（四帧互证：入库旧帧 + 现采三帧，竖描边 85/804/851/1570 逐位相同）。
+     * ⚠️ 本档两列之间 x 809..845 那条亮带是「没有面板底衬」而不是卡缝阴影，见该键 geomNote。
+     */
     @Test
-    fun `non card grid yields no geometry`() {
+    fun `set filter popup is a registered two column grid on 2560`() {
+        val p = profileOf("profiles_2560x1440.json", 2560, 1440)
+        val g = p.gridGeometryFor("set_filter_popup")!!
+        assertEquals(2, g.cols)
+        assertEquals(721, g.cardW)
+        assertEquals(120, g.cardH)
+        assertEquals(47, g.labelAnchor)   // 46 是"改格点时漏算一步"留下的 stale 值，见该键 labelAnchorNote 与审计 §12-G-3
+        assertEquals(listOf(83, 849), g.colXs.toList())
+        assertEquals(210, g.rowYs.first())
+        assertEquals(1162, g.rowYs.last())
+        assertEquals(826, p.advanceStart("set_filter_popup")!!.x)
+        assertEquals(1167, p.advanceStart("set_filter_popup")!!.y)
+        assertNull(p.advanceDistance("set_filter_popup"))
+        assertEquals(60, p.clickBandHalfFor("set_filter_popup"))
+        assertEquals(0, p.clickShiftCapFor("set_filter_popup"))
+    }
+
+    /**
+     * 三档本键几何**齐了**之后新添一档的护栏：漏注册不会红任何运行日志（setFilter 不读这些键），
+     * 只会在这里红 —— 因为 `gridGeometryFor` 返回 null 时 `clickBandHalfFor` 静默回退历史值 126。
+     */
+    @Test
+    fun `every shipped profile registers the filter popup as a card grid`() {
+        for ((file, w, h) in listOf(
+            Triple("profiles.json", 3200, 1440),
+            Triple("profiles_2560x1440.json", 2560, 1440),
+            Triple("profiles_2244x1080.json", 2244, 1080),
+        )) {
+            val g = profileOf(file, w, h).gridGeometryFor("set_filter_popup")
+            assertNotNull("$file: set_filter_popup 未注册卡片几何", g)
+            assertEquals("$file: 本面板恒 2 列", 2, g!!.cols)
+            assertEquals("$file: 行数应与 rowYTop 条目数一致", 8, g.rowYs.size)
+        }
+    }
+    /**
+     * #174：3200 档（canonical）也按**实测描边线位**注册成 2 列卡片网格。
+     * 数值来源与口径见该键 `geomNote`（竖描边 204.5/1124.5/1171/2090，两帧互证）。
+     */
+    @Test
+    fun `set filter popup is a registered two column grid on 3200`() {
         val p = profile()
-        // set_filter_popup 无 cardSize、cols 是 {left,right} 对象 → 不适用卡片网格公式
-        assertNull(p.advanceStart("set_filter_popup"))
+        val g = p.gridGeometryFor("set_filter_popup")!!
+        assertEquals(2, g.cols)
+        assertEquals(921, g.cardW)
+        assertEquals(120, g.cardH)   // = rowHeight（可点行高，不是画高 109）
+        assertEquals(48, g.labelAnchor)
+        assertEquals(listOf(203, 1169), g.colXs.toList())
+        assertEquals(210, g.rowYs.first())
+        assertEquals(1162, g.rowYs.last())
+        // 起点 203+921+(966−921)/2 = 1146：落在两列之间的**缝**（实测描边 1126..1169）里
+        assertEquals(1146, p.advanceStart("set_filter_popup")!!.x)
+        assertEquals(1167, p.advanceStart("set_filter_popup")!!.y)
+        // 本网格无 traverseRows ⇒ 距离无几何来源，advance 仍走字面 from/to，行为不变
+        assertNull(p.advanceDistance("set_filter_popup"))
+        // ⚠️ 注册会让 clickBandHalfFor 从「未标定回退值 126」变成 cardH/2=60 —— 本面板没有
+        //   pagedGrid 调用点，所以今天无人读它；但这条**必须**钉住：将来谁把本面板接进平移逻辑，
+        //   得先量 clickBand（没量过 ⇒ shiftCap=0，一律不平移）。
+        assertEquals(60, p.clickBandHalfFor("set_filter_popup"))
+        assertEquals(0, p.clickShiftCapFor("set_filter_popup"))
+    }
+
+    /**
+     * #169：筛选面板 2244 档已按**实测**注册成 2 列卡片网格（不是把它硬塞进卡片公式，是它的格子
+     * 本来就均匀：列边界 152/764 与 800/1411、行距 102、格高 = rowHeight 90）。
+     * 注册后除了 `labelAnchor` 有地方放，`advanceStart` 也从 null 变有值 —— 期望值锁在下面。
+     */
+    @Test
+    fun `set filter popup is a registered two column grid on 2244`() {
+        val p = profileOf("profiles_2244x1080.json", 2244, 1080)
+        val g = p.gridGeometryFor("set_filter_popup")!!
+        assertEquals(2, g.cols)
+        assertEquals(612, g.cardW)
+        assertEquals(90, g.cardH)
+        assertEquals(36, g.labelAnchor)
+        assertEquals(listOf(152, 800), g.colXs.toList())
+        assertEquals(157, g.rowYs.first())
+        assertEquals(871, g.rowYs.last())
+        // 起点 152+612+(648−612)/2 = 782：落在两列之间的**缝**（实测列缝 764..800）里，
+        // 而不是字面 from.x=418（压在第一列卡上）—— 更合 advanceStart 的设计意图。
+        assertEquals(782, p.advanceStart("set_filter_popup")!!.x)
+        // 本网格无 traverseRows ⇒ 距离无几何来源，advance 仍走字面 from/to，行为不变
         assertNull(p.advanceDistance("set_filter_popup"))
     }
 

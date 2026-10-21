@@ -167,7 +167,7 @@ class ScanEngineDryRunTest {
          * 判稳信号/点击时序仍由引擎真实代码驱动。
          */
         val freezeCells: Int = 0,
-        /** A10 夹具：weapon_backpack 面板的名字 OCR 回放（须为 good_names 词典内的武器名）。 */
+        /** A10 夹具：weapon_backpack 面板的名字 OCR 回放（须为 mappings 词典内的武器名）。 */
         val weaponNames: List<String>? = null,
     ) {
         var pageIndex = 0
@@ -384,12 +384,12 @@ class ScanEngineDryRunTest {
         FrameRect(2603, 60, 2846, 98) to "武器 ${CELLS_PER_PAGE}/${CELLS_PER_PAGE}",
     )
 
-    /** ★ A10：从 good_names.json 取 CELLS_PER_PAGE 个真实武器名（词典必命中 ⇒ key != null）。 */
+    /** ★ A10：从 mappings.json 取 CELLS_PER_PAGE 个真实武器名（词典必命中 ⇒ key != null）。 */
     private fun weaponDictNames(): List<String> {
-        val arr = JSONObject(File(assetsDir(), "tools/good_names.json").readText())
+        val arr = JSONObject(File(assetsDir(), "tools/mappings.json").readText())
             .getJSONArray("weapons")
         val names = (0 until arr.length())
-            .map { arr.getJSONObject(it).getString("zh") }
+            .map { arr.getJSONObject(it).getJSONObject("n").getString("zh") }
             .distinct()
         check(names.size >= CELLS_PER_PAGE) { "词典武器名不足 $CELLS_PER_PAGE 个" }
         return names.take(CELLS_PER_PAGE)
@@ -416,7 +416,7 @@ class ScanEngineDryRunTest {
         flowTransformer: ((JSONObject) -> Unit)? = null,
         /** ★ A11：面板冻结注入格数（见 [Harness.freezeCells]）。 */
         freezeCells: Int = 0,
-        /** ★ A10：weapon 面板名字回放表（须为 good_names 词典内武器名）。 */
+        /** ★ A10：weapon 面板名字回放表（须为 mappings 词典内武器名）。 */
         weaponNames: List<String>? = null,
         /** ★ P3-8：外部注入 plan（foreach over $plan 用；配合 flowTransformer 包 foreach）。 */
         plan: List<JSONObject>? = null,
@@ -433,11 +433,9 @@ class ScanEngineDryRunTest {
         val flow = JSONObject(File(assetsDir(), flowFile).readText())
         flowTransformer?.invoke(flow)
         // 单一名称词典（角色/武器/套装/单件/词条/部位）——与生产同路径
-        val names = try {
-            GoodNames.fromJson(JSONObject(File(assetsDir(), "tools/good_names.json").readText()))
-        } catch (_: Exception) {
-            null
-        }
+        // 词典解析失败**不许吞成 null**：那会让整批干跑静默换一条代码路径
+        // （NameMatcher 全灭但断言照样绿），而随包词典就在那里、坏了一定是改坏了。
+        val names = GoodNames.fromJson(JSONObject(File(assetsDir(), "tools/mappings.json").readText()))
 
         val h = Harness(pages, firstCellNameStuck, ENTER_CHAIN_CLICKS, freezeCells, weaponNames)
         numberScript.forEach { h.numberScript.addLast(it) }

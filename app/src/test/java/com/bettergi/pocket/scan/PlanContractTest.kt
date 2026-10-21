@@ -225,7 +225,7 @@ class PlanContractTest {
         // 实跑所依赖的机制：plan 写中文名 → setFilter 归一成 GOOD key → 与 OCR 侧 key 空间一致。
         // 这里锁死「plan 中文名 ⇄ GOOD id」这条链路的词典事实（真机与词典同源）。
         val names = GoodNames.fromJson(
-            JSONObject(java.io.File(assetsDir(), "tools/good_names.json").readText()),
+            JSONObject(java.io.File(assetsDir(), "tools/mappings.json").readText()),
         )
         val r = NameMatcher.match("烬城勇者绘卷", names.table(GoodNames.Kind.SET))
         assertEquals("ScrollOfTheHeroOfCinderCity", r?.key)

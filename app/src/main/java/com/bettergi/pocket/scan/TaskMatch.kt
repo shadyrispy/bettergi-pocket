@@ -127,7 +127,7 @@ object TaskMatch {
      * 筛选目标集合：`currentTask.setName` → `currentTask.setKey` → `currentTask.targets[]` → `plan[].setName/setKey`。
      * 返回的是**原始名**（中文显示名或 GOOD id 皆可），调用方须经词典归一后再与 OCR 侧比对。
      *
-     * ⚠️ **必须同时读 `setKey`**：`setFilter` 比对的是词典 key（`good_names.json` 的 `artifactSets[].id`，
+     * ⚠️ **必须同时读 `setKey`**：`setFilter` 比对的是词典 key（`tools/mappings.json` 的 `artifactSets[].id`，
      * 如 `GladiatorsFinale`），而 GOOD 导出的圣遗物项只有 `setKey`（`{"setKey":"GladiatorsFinale",…}`）、
      * **没有** `setName`。2026-09-18 真机实测：只读 `setName` 时，从管理器导入的 GOOD 文件
      * （`artifact_lock` 的输入形态）恒得到空目标集 ⇒ `setFilter: 无筛选目标` ⇒ 流程空跑。

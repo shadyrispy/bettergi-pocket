@@ -117,6 +117,15 @@ class TriggerForegroundService : Service() {
             if (!scriptRunner.isRunning()) {
                 startFlowIfReady(settings.scanFlow, maxPagesOrDefault(settings.scanMaxPages))
             }
+        } else if (settings.scanEnabled && !settings.screenShareEnabled && scriptRunner.isRunning()) {
+            // ★ 批2-A（D3，2026-10-03）：原来只有下面那一条 `!scanEnabled && running` ⇒
+            //   用户**扫描途中关掉「共享屏幕」**时 scanEnabled 仍是 true，两条都不成立，
+            //   于是扫描在没有画面的状态下继续跑（取帧侧还会退回最后一帧旧图，看着像还在推进）。
+            //   关投影就是"别再动了"：这里只落开关 + 说明，**stop 交给下面那条 !scanEnabled 分支做**，
+            //   避免同一轮被停两次。
+            NoticeCenter.warn("已停止扫描：共享屏幕被关，没有画面可识别")
+            overlayController.updateScanProgress("共享屏幕已关")
+            settingsRepository.setScanEnabled(false)
         } else if (!settings.scanEnabled && scriptRunner.isRunning()) {
             scriptRunner.stop()
             overlayController.updateScanProgress("已手动停止")
@@ -145,16 +154,21 @@ class TriggerForegroundService : Service() {
         )
         val recognitionAssets = RecognitionAssets(applicationContext.assets)
         frameSource = ProjectionFrameSource(captureController)
+        // ★ 批0：自动对话/自动拾取与扫描**共用过同一本新鲜度账**（一个 thresholdFrameNs）。
+        //   engine 常驻（投影起来就 start，只有 shutdown 才 stop），所以开着「自动对话」跑扫描时，
+        //   自动跳过的那次点击会把扫描的阈值往后推 ⇒ 扫描 grabFresh 更容易超时、退回旧帧。
+        //   各拿一本：TriggerEngine 用视图，扫描仍用 frameSource 本体。
+        val triggerFrameSource = frameSource.newFreshnessScope()
         engine = TriggerEngine(
             settingsRepository = settingsRepository,
-            frameSource = frameSource,
+            frameSource = triggerFrameSource,
             features = listOf(
                 AutoPickFeature(),
                 AutoSkipFeature(recognitionAssets, overlayController),
             ),
             actionController = AccessibilityAutomationController(overlayController) {
-                // 动作受理后标记帧源时间戳：扫描链路 grabFresh 只取动作后新帧
-                frameSource.markActionAt(SystemClock.elapsedRealtime())
+                // 动作受理后标记帧源时间戳：**只推自己那本账**（批0），不再动扫描的阈值
+                triggerFrameSource.markActionAt(SystemClock.elapsedRealtime())
             },
         )
         scriptRunner = ScriptRunner(
@@ -175,13 +189,6 @@ class TriggerForegroundService : Service() {
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         genshinLaunchMonitor.start()
-        // 抓包会话状态 → 面板：会话在本进程、面板在 :a11y，所以变化要经桥推过去
-        //（面板**打开时**另拉一次快照，见 OverlayWindowController.bindCaptureState）。
-        scriptRunner.scope.launch {
-            com.bettergi.pocket.pcdata.CaptureSession.ui.collect { state ->
-                overlayController.updateCaptureStatus(state.brief(), state.running)
-            }
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -222,9 +229,9 @@ class TriggerForegroundService : Service() {
                 if (intent.getBooleanExtra(EXTRA_VPN_OK, false)) {
                     CaptureSession.start(applicationContext)?.let { NoticeCenter.error(it) }
                 } else {
-                    // 被拒：开关落回 + 一句话提醒（不跳系统设置页，用户拍板"落回就够"）。
+                    // 被拒：一句话提醒（不跳系统设置页，用户拍板"落回就够"）。
+                    // 抓包开关现在只在管理器页，它直接订阅 CaptureSession.ui ⇒ 无需推给面板。
                     NoticeCenter.warn("没同意 VPN 授权，抓包没启动")
-                    overlayController.updateCaptureStatus("没同意 VPN 授权", running = false)
                 }
             }
             ACTION_CAPTURE_STOP -> {
@@ -595,6 +602,20 @@ class TriggerForegroundService : Service() {
                     Log.i(TAG, "ocr bench: ${OcrFactory.bench()}")
                 }
             }
+            ACTION_DEBUG_OCR_EP -> {
+                // 「这台机器的风险档 EP（NNAPI 的 USE_FP16 / XNNPACK）到底能不能启用」——
+                // 一次性另建引擎实测，不碰生产档位。见 [OcrFactory.epProbe] 的动机说明。
+                // 与扫描互斥：探测会再起一份 det+rec 会话，而 NNAPI 那条路的失败方式是**原生崩溃**
+                // （抓不住，进程直接没了）⇒ 扫描在跑时不发。
+                val risky = intent.getBooleanExtra(EXTRA_RISKY_EP, false)
+                if (scriptRunner.isRunning()) {
+                    Log.w(TAG, "DEBUG_OCR_EP 忽略：扫描在跑，不做 EP 探测")
+                } else {
+                    scriptRunner.scope.launch(Dispatchers.IO) {
+                        Log.i(TAG, OcrFactory.epProbe(applicationContext, risky))
+                    }
+                }
+            }
             ACTION_DEBUG_OCR_DET -> {
                 // ONNX det 全管线真机探针（任意界面可跑，为移除 ML Kit 做验收）
                 scriptRunner.scope.launch(Dispatchers.IO) {
@@ -675,9 +696,22 @@ class TriggerForegroundService : Service() {
 
         override fun onFinished(reason: String) {
             mainHandler.post {
-                val doneText = if (reason.startsWith("error")) "失败：$reason" else "已结束（$reason）"
+                val failed = reason.startsWith("error")
+                val detail = reason.removePrefix("error:").removePrefix(" ").trim()
+                val doneText = if (failed) "失败：$detail" else "已结束（$reason）"
                 overlayController.updateScanProgress(doneText)
                 updateForegroundNotification("扫描$doneText")
+                // 进度文本落在**已收起**的面板上（自动化起跑前 collapse() 过）⇒ 凡是"本轮其实什么
+                // 都没发生"的收尾都必须同时走 NoticeCenter，否则用户只看得到"点了没反应"。
+                // returnHomeStuck 不在此列：#139 的刹车自己已经喊过一句，别重复。
+                if (failed) {
+                    NoticeCenter.error("扫描失败：$detail")
+                } else when (reason) {
+                    "already_running" -> NoticeCenter.warn("上一轮还在跑，本次起跑请求已忽略")
+                    "not_in_genshin" -> NoticeCenter.warn("原神不在前台，已取消起跑：请先切回游戏主界面")
+                    "no_projection" -> NoticeCenter.warn("屏幕共享没开，已取消起跑：请先在悬浮窗开启共享屏幕")
+                    "no_frame_size" -> NoticeCenter.warn("拿不到投影帧尺寸，已取消起跑")
+                }
                 if (settingsRepository.get().scanEnabled) {
                     settingsRepository.setScanEnabled(false)
                 }
@@ -750,6 +784,7 @@ class TriggerForegroundService : Service() {
     }
 
     private fun stopScreenShare() {
+        Log.i(TAG, "stopScreenShare：本进程主动收投影（开关落回 / 授权失败 / 退出）")
         requestingCapturePermission = false
         engine.stop()
         captureController.stop()
@@ -773,6 +808,7 @@ class TriggerForegroundService : Service() {
      */
     private fun startFlowIfReady(flowKey: String, maxPages: Int) {
         val ctx = applicationContext
+        // 起扫前台闸在 ScriptRunner.startScan（5 个起跑入口的共同汇聚点），这里不重复判。
         if (GoodRepository.needsInput(ctx, flowKey)) {
             val plan = GoodRepository.planFor(ctx, flowKey)
             if (plan == null) {
@@ -1063,6 +1099,13 @@ class TriggerForegroundService : Service() {
         const val ACTION_DEBUG_START_FLOW = "com.bettergi.pocket.action.DEBUG_START_FLOW"
         const val ACTION_DEBUG_CLICK = "com.bettergi.pocket.action.DEBUG_CLICK"
         const val ACTION_DEBUG_OCR_BENCH = "com.bettergi.pocket.action.DEBUG_OCR_BENCH"
+        /**
+         * 风险档 EP 探测（`--ez risky true|false`）：一次性另建引擎，按 `candidatesFor(caps, risky)`
+         * 定档并跑 det/rec 基准 ⇒ 用来回答"这台机器的 NNAPI/FP16 能不能启用、快不快"。
+         * 生产档位不受影响（探测完即 close），扫描在跑时直接忽略。
+         */
+        const val ACTION_DEBUG_OCR_EP = "com.bettergi.pocket.action.DEBUG_OCR_EP"
+        const val EXTRA_RISKY_EP = "risky"
         const val ACTION_DEBUG_OCR_DET = "com.bettergi.pocket.action.DEBUG_OCR_DET"
         /** 抓包数据源 C1：离线回放一个 pcap 到 GOOD（`EXTRA_PCAP_PATH` 指路径）。 */
         const val ACTION_DEBUG_REPLAY_PCAP = "com.bettergi.pocket.action.DEBUG_REPLAY_PCAP"

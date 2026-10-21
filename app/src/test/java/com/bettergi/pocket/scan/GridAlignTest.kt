@@ -144,7 +144,10 @@ class GridAlignTest {
     @Test
     fun `non card grid has no alignment`() {
         val p = profile()
-        // set_filter_popup 非卡片网格 → 无几何 → 不测
+        // 合成帧画的是 **artifact_backpack** 的 7 列卡（x 取 g.colXs、pitchY=292），对 set_filter_popup
+        //   而言只有 2 列、行距 136 ⇒ `detectRow` 的列共识门 + 周期自检都过不去 ⇒ null。
+        // ⚠️ 这条**不是**"该档没注册卡片几何"（那是 #174 之前的事实，3200/2244 现在都注册了）；
+        //   "未注册 ⇒ null"由 GridGeometryTest.`2560 filter grid is still unregistered` 钉着。
         val frame = syntheticGrid(297)
         assertNull(GridAlign.measureError(frame, p, "set_filter_popup"))
         frame.release()

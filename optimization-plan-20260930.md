@@ -48,6 +48,7 @@ Stage 0 基线（串行，半天）
 1. ~~处置 4 个未提交文件~~ **已完成**（09-30：`2c5b273` 天赋锚定解析+多数票、`f967600` 昵称表旅行者格）。新账：**本文档自身 untracked**，开 Stage 1 分支前先入库；工作区必须干净后才开 Stage 1 分支。
 2. 跑一遍基线并记录数字：`./gradlew :app:testDebugUnitTest`（默认闸门，09-30 实测 **55 类 / 394 条 / 3.2s / 0 fail**，干跑类按设计排除）+ `-Pdryrun`（**56 类 / 407 条**，约 189s）。⚠️ 初版审查写的 52/381 与 53/394 是 grep 静态推导的错数；数字随提交漂移，执行时以当轮 XML 解析为准，别照抄本文。
 3. 记录当前 APK 资产清单：`unzip -l <apk> | grep assets/dsl`（应 24 个文件），作为后续交付复验基准。
+   ⚠️ 10-01 #168 词典收口后此数变 **22**（见 §4-4 与 README）。
 
 ---
 
@@ -92,7 +93,7 @@ Stage 0 基线（串行，半天）
 | A13(P2提前) | `scan/ScriptRunner.kt:316-367` | 看门狗导出前对 results 做同步快照（锁内 copy）+ 整体 runCatching，杜绝抢救时刻 CME 杀进程 |
 | A14(P2提前) | `:129-146` | `dispatchOnMain` 超时分支移除 pending 消息（handler.removeCallbacks）或打弃用标记，杜绝恢复后的游离点击 |
 | A15(P2提前) | `:213-216,397-400` | stop→start 原子化（等取消完成或复用同一 job 语义）；已运行时 `startScan` 静默 return 补 `onFinished` 回执 |
-| A38(#155) | `scan/ScanEngine.kt:3736,4286` | TALENT_BONUS 查表成片少减 +3（命座加成表覆盖面不足，非 OCR）——按 GT 对账差异集逐角色补表。回归：dry-run 用例钉高命座角色的天赋值 |
+| A38(#155) | `scan/ScanEngine.kt`（TALENT_BONUS，已删）→ `scan/CharacterDomainPanels.kt::applyConstellationTalentBonus` | 天赋成片少减 +3（非 OCR）——原计划"按 GT 差异集逐角色补表"**作废**，改为查词典 `c3`/`c5` 的数据驱动扣减（见 §8 A38）。回归：`ConstellationTalentBonusTest` 逐位回放旧表 51 条 + 钉住反向角色/达达利亚/未读到行/可疑 |
 | A39(#156) | `scan/ArtifactDomain.kt:144,157` + `ScanEngine.kt:3916` | 未解析身份导出 `key=""` ⇒ 两条记录在下游按 key 并成一条。修法：导出侧 `key ?: ""` 改为 null 缺省（JSON 不写 key）或带 rawName 哨兵，禁止空串；resolveKey 未命中已有日志，补齐后照常。回归：dry-run 用例——未解析记录不与任何记录合并 |
 | A40(#147) | `scan/ScanEngine.kt:8494,1583` | 判稳信号（CROSS_PAGE_SETTLE 定时 250ms）看不见列表残余慢漂 ⇒ 整页 OCR 出"自信乱码"。修法：**换判稳信号**（相邻帧底栏锚位移 < 阈值），不是再调 settle（曾实测调 settle 无效）。回归：慢漂注入式 dry-run 用例 |
 
@@ -221,6 +222,7 @@ Stage 0 基线（串行，半天）
 
 1. **开启 R8/minify** ✅：`isMinifyEnabled + isShrinkResources = true`；`assembleRelease` 成功，
    R8 移除 41758 项（含 coroutine 调试类 / support.v4 stub），release APK dsl 资产 **24 个完整**。
+   ⚠️ 10-01 #168 起该数=**22**（`good_names.json`+`char_talent_bonus.json` 删、`primitives.schema.json` 移出 assets、`mappings.json` 升为运行时资产）。
    体积 86MB→80MB（降幅小因 83% 是 native so；dex 仅 2.8MB）。~~真机 e2e + GOOD 导出对拍未做~~
    → **10-01 已补**：R8 包真机全链通（但 R8 本身引入了一个启动即崩的坑——ML Kit 与 minify 组合，
    见 `b0d97ce`，离线闸门抓不到，正是这条"必须真机"的理由）；GOOD 导出对拍 63 件身份 63/63、
@@ -263,7 +265,7 @@ Stage 0 基线（串行，半天）
 | A10 武器扫描假"总数不符" | ScanEngine.kt:349 | 1D |
 | A11 闸门等新帧解析旧帧 | ScanEngine.kt:6883 | 1D |
 | A12 ".7"→7.0 十倍错 | StatParser.kt:131 | 1D |
-| A38(#155) TALENT_BONUS 成片少减 +3 | ScanEngine.kt:3736,4286 | 1D |
+| A38(#155) 天赋成片少减 +3 | 词典 c3/c5 + `applyConstellationTalentBonus`（原 TALENT_BONUS 手表已删） | 已修 10-01 |
 | A39(#156) 未解析身份 key="" 下游并条 | ArtifactDomain.kt:144,157 | 1D |
 | A40(#147) 判稳信号看不见慢漂 | ScanEngine.kt:8494,1583 | 1D |
 
@@ -333,7 +335,7 @@ Stage 0 基线（串行，半天）
 **Stage 3 每步闸门**
 - 机械移动 commit：全量测试绿 + 包依赖矩阵复查（无新环）；
 - ScanEngine 各步：`-Pdryrun` 绿，PageSession 步额外新增状态机测试绿；
-- 交付 APK 前复验：`unzip -l <apk> | grep assets/dsl` = 24 个文件。
+- 交付 APK 前复验：`unzip -l <apk> | grep assets/dsl` = **22** 个文件（#168 词典收口后）。
 
 **阶段末发布点**：Stage 1 末、Stage 2 末、Stage 3 每完成一个子步、Stage 4 末，各打一个 tag（如 `hotfix-stage1`、`refactor-3.3-pagesession`），保证任一步引入回归可按 tag 二分回滚。
 
@@ -351,7 +353,13 @@ Stage 0 基线（串行，半天）
 
 **本节裁决与结论**
 - **P3-8 已修复**（`c2165d4`）：`resetScanPerItem` 语义定为"results/seen 同进退——跨目标累加去重"，封死「清 results 留 seen」丢件组合；dry-run 双向用例改向并锁死新语义。
-- **A38 终局**：`char_talent_bonus.json` 是 GT 监督反推的稀疏表，缺条目=设计而非缺陷（fallback(2)+未命中 `Log.w` 已在位）。扩表需"角色 × 表中未录命座档"的面板导出数据，挂起待数据，不编造数值。
+- **A38 终局（10-01 已换修法）**：原判"补表"作废。真因是**双份真相 + 近似方向**：
+  `ScanEngine.TALENT_BONUS` 是一张 GT 监督反推的稀疏表（51 角色 ×「本账号当时那一档命座」），
+  换个命座档就查不到 ⇒ 退到「c≥3⇒E、c≥5⇒Q」；而词典 `c3`/`c5` 一直就有（120/123 角色，
+  此前被 `gen_good_names.py` 丢掉），且**绫华/莫娜/琴 是 c3=Q、c5=E**，近似规则两头都减错。
+  ⇒ 现改数据驱动（GOODScanner `adjust_talents` 同法）：手表 51 条已删，`ConstellationTalentBonusTest`
+  逐位回放那 51 条 + 钉住反向角色/达达利亚/未读到行/可疑四条。`char_talent_bonus.json` 随之**无人再读**
+  （它当初就是手表的另一份真相），是否从资产里摘掉另立一条，别混进本修复。
 - **A40 标定签核**：实机样本——weapon 翻页 settle stable diff=0.000 / δ=30px（列 7 票 21），artifact δ=59px（列 7 票 28）。3px×3 对阈值对稳定态余量充足；慢漂防护由注入式单测覆盖。持续标定归"真机验收"路线。
 - **Stage 4-2 完成**（`d38cc56`）：androidx 拉平（core-ktx 1.17.0 / appcompat 1.7.1 / material 1.14.0 / activity 1.11.0 / constraintlayout 2.2.1），零适配点，三链全绿。
 - **Stage 4-4 完成**（`abf115f`）：det/rec 预处理工作区池复用，每帧 ~17MB 短命分配消除、预处理省 28.3%，NCHW/probMap 逐位一致。建议真机复测 GC 压力（桌面 JVM 数字不代表 ARM 占比）。

@@ -20,7 +20,13 @@ import com.bettergi.pocket.input.SwipeMethod
 import com.bettergi.pocket.input.SwipeTestRunner
 import com.bettergi.pocket.scan.GoodRepository
 import com.bettergi.pocket.scan.NameOverrides
+import com.bettergi.pocket.settings.TriggerSettings
+import com.bettergi.pocket.settings.TriggerSettingsRepository
+import com.bettergi.pocket.pcdata.CaptureSession
 import com.bettergi.pocket.service.TriggerForegroundService
+import androidx.appcompat.widget.SwitchCompat
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import com.esc.irminsul.capture.CaptureResult
 import com.esc.irminsul.capture.IrminsulCapture
 import com.esc.irminsul.capture.PermissionKind
@@ -34,7 +40,17 @@ import com.bettergi.pocket.ui.MainActivity.Companion.SWIPE_TEST_BACK_DELAY_MS
 
 internal fun MainActivity.showScriptManager() {
     managerShown = true
+    // ⚠️ 两屏共用一个 Activity 实例，而 onResume 按 `onboardingShown` 优先重绘引导页。
+    //    不在这儿放下引导标志 ⇒ 进过管理器再回前台，renderOnboarding() 会在管理器布局里
+    //    找引导页的 id，findViewById 返回 null 直接 NPE（2026-10-03 _dev/ui_check_bs.sh 实测崩）。
+    onboardingShown = false
     setContentView(R.layout.activity_scripts)
+    // ★ 2026-10-03（D2）：进管理器页先把悬浮面板收起。展开态面板占屏右 ~408px
+    //   （3200 档实测帧 2792,441 起 396x909），而本页右列的控件正好铺到右缘 ——
+    //   「抓包采集（测试）」开关实测中心 (3113,1307) 落在面板帧内，点它会打到面板的「退出」行。
+    //   面板靠 ACTION_OUTSIDE 自动收起，但**落在面板内的第一下不会**（那不是 outside），
+    //   所以必须在这里主动收，不能等用户点第二下。
+    runCatching { com.bettergi.pocket.bridge.OverlayBridge(this).collapse() }
     findViewById<TextView>(R.id.btn_import).setOnClickListener {
         runCatching { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }
             .onFailure { NoticeCenter.error("无文件选择器：${it.message}") }
@@ -43,8 +59,11 @@ internal fun MainActivity.showScriptManager() {
     findViewById<android.view.View>(R.id.status_card).setOnClickListener { openA11yIfNeeded() }
     bindCalibrateRow()
     bindGoodSection()
+    watchScanState()
     bindSwipeRow()
     bindSwipeTest()
+    bindCaptureTest()
+    bindCapturePermRow()
     renderAll()
     renderCaptureSection()
     renderNameSection()
@@ -137,7 +156,7 @@ internal fun MainActivity.renderCaptureSection() {
         )
     }
     val tail = if (p.romHint.isBlank()) "" else "\n${p.romHint}"
-    hint?.text = "抓包开关在悬浮窗「抓包采集」：解齐四段数据后自动入库并收回隧道，" +
+    hint?.text = "抓包开关在本页下方「抓包采集（测试）」：解齐四段数据后自动入库并收回隧道，" +
         "不持久化、重启不会自己开$tail"
 }
 
@@ -253,6 +272,17 @@ internal fun MainActivity.bindSwipeRow() {
     }
 }
 
+/** #204：「抓包权限」收在页底「抓包采集（测试）」下面，点行开合（与 swipe_row 同一套做法）。 */
+internal fun MainActivity.bindCapturePermRow() {
+    val body = findViewById<android.view.View>(R.id.capture_section)
+    val chevron = findViewById<TextView>(R.id.capture_perm_chevron)
+    findViewById<android.view.View>(R.id.capture_perm_row).setOnClickListener {
+        val show = body.visibility != android.view.View.VISIBLE
+        body.visibility = if (show) android.view.View.VISIBLE else android.view.View.GONE
+        chevron.text = if (show) "▴" else "▾"
+    }
+}
+
 /**
  * 脚本行：`[图标] 名称 / 动作摘要 · 来源` + 开关。长按「已导入」的行恢复内置。
  * 图标与动作摘要都来自脚本自己的声明（`ui.icon` / `ui.actions`）。
@@ -339,14 +369,41 @@ internal fun MainActivity.bindGoodSection() {
     }
 }
 
+/**
+ * 订阅设置变化，让「导出 JSON」的可用性跟着扫描起止**当场**变（#203）。
+ *
+ * 只靠 onResume 重绘不够：用户停在管理器页等这一轮跑完时页面不会 resume，
+ * 按钮就一直停在"可点"的状态。仓库的监听器统一 post 到主线程，可直接碰 View。
+ */
+internal fun MainActivity.watchScanState() {
+    if (scanStateWatcher != null) return          // 本页可被反复打开，只订阅一次
+    val w: (TriggerSettings) -> Unit = { if (managerShown) renderGoodSection() }
+    scanStateWatcher = w
+    TriggerSettingsRepository.app(this).addListener(w)
+}
+
+internal fun MainActivity.unwatchScanState() {
+    scanStateWatcher?.let { TriggerSettingsRepository.app(this).removeListener(it) }
+    scanStateWatcher = null
+}
+
 internal fun MainActivity.renderGoodSection() {
     val state = GoodRepository.state(this)
     findViewById<TextView>(R.id.good_input_name).text = state?.sourceName ?: "未选择"
     findViewById<android.widget.ImageView>(R.id.btn_good_clear).visibility =
         if (state != null) android.view.View.VISIBLE else android.view.View.GONE
 
+    // ★ #203：扫描没跑完就导出 = 导出**半份数据**，所以这里事前禁用，不再等用户点下去才弹
+    //   一句"运行中，导出请等本轮结束"（那是悬浮窗那条事后拦，见 OverlayScriptRows 的 export 分支）。
+    //   判据与悬浮窗同源：`scanEnabled`（面板 ▶ 起跑即置真，收尾复位）。
+    val scanning = TriggerSettingsRepository.app(this).get().scanEnabled
+    findViewById<android.widget.ImageView>(R.id.btn_good_export).apply {
+        isEnabled = !scanning
+        alpha = if (scanning) 0.4f else 1f
+    }
     val export = GoodRepository.lastExport(this)
-    findViewById<TextView>(R.id.good_export_name).text = export ?: "还没有导出"
+    findViewById<TextView>(R.id.good_export_name).text =
+        (export ?: "还没有导出") + if (scanning) " · 扫描中，结束后可导出" else ""
 
     // 可用性逐条列出：需要输入的脚本能不能被这份文件驱动
     val parts = ArrayList<String>()
@@ -412,5 +469,42 @@ internal fun MainActivity.bindSwipeTest() {
             { SwipeTestRunner.run(this, params) },
             SWIPE_TEST_BACK_DELAY_MS,
         )
+    }
+}
+
+// ---- 抓包采集（2026-10-03 由悬浮窗迁入，与滑动测试同列**测试功能**）----
+
+/**
+ * 绑定「抓包采集（测试）」开关。
+ *
+ * 与旧悬浮窗版的根本差别：面板跑在 `:a11y`，而会话与隧道只能在主进程 ⇒ 那边要"过桥发指令 +
+ * 主进程把状态推回来"。管理器与 [CaptureSession] **同进程**，所以这里直接起服务、直接订阅
+ * `ui`，旧的三条桥 method 与整条推送通道一并删掉。
+ *
+ * 开关位置以**会话真实状态**为准，不以玩家点了什么为准：VPN 被拒时 `ui` 停在未抓包 ⇒ 开关自己落回。
+ */
+internal fun MainActivity.bindCaptureTest() {
+    val sw = findViewById<SwitchCompat?>(R.id.capture_test_switch) ?: return
+    val status = findViewById<TextView?>(R.id.capture_test_status)
+    var applyingState = false
+    sw.setOnCheckedChangeListener { _, checked ->
+        if (applyingState) return@setOnCheckedChangeListener
+        val intent = Intent(this, TriggerForegroundService::class.java).apply {
+            action = if (checked) {
+                TriggerForegroundService.ACTION_CAPTURE_START
+            } else {
+                TriggerForegroundService.ACTION_CAPTURE_STOP
+            }
+        }
+        ContextCompat.startForegroundService(this, intent)
+    }
+    captureTestJob?.cancel()
+    captureTestJob = pageScope.launch {
+        CaptureSession.ui.collect { state ->
+            applyingState = true
+            sw.isChecked = state.running
+            applyingState = false
+            status?.text = state.brief()
+        }
     }
 }

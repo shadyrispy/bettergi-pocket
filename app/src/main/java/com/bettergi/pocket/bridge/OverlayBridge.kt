@@ -57,14 +57,6 @@ class OverlayBridge(private val context: Context) : AutoSkipEvents {
         call(A11yProtocol.M_COLLAPSE, null)
     }
 
-    /** 抓包会话状态推到面板（会话在主进程、面板在 `:a11y`，两边不共享对象）。★ A26：异步 + 去重。 */
-    fun updateCaptureStatus(text: String, running: Boolean) {
-        asyncCall(A11yProtocol.M_CAPTURE, Bundle().apply {
-            putString(A11yProtocol.K_TEXT, text)
-            putBoolean(A11yProtocol.K_RUNNING, running)
-        })
-    }
-
     /** ★ A26：异步 + 去重（扫描期每秒多次，相同文本无需重复过桥）。 */
     fun updateScanProgress(text: String) {
         asyncCall(A11yProtocol.M_PROGRESS, Bundle().apply { putString(A11yProtocol.K_TEXT, text) })

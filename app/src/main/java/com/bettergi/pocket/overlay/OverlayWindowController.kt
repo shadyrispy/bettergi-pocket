@@ -51,15 +51,9 @@ import com.bettergi.pocket.genshin.GenshinLauncher
 import com.bettergi.pocket.genshin.GenshinPackages
 import com.bettergi.pocket.log.RecognitionLog
 import com.bettergi.pocket.settings.TriggerSettings
-import com.bettergi.pocket.bridge.SettingsBridgeClient
 import com.bettergi.pocket.settings.SettingsGateway
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -134,15 +128,7 @@ class OverlayWindowController(
     private var rowAutoSkip: View? = null
     private var rowQuickSkip: View? = null
     private var rowAutoPick: View? = null
-    private var switchCapture: SwitchCompat? = null
-    private var captureSubtitle: TextView? = null
 
-    /** 抓包状态订阅：会话状态是 flow，面板只是它的一个读者。 */
-    /**
-     * ★ 3.4（裁决 3 的 P3）：原为 `val` 且**从不 cancel** ⇒ 每次 show/hide 都留着旧 scope 与
-     * 其 IO 协程（桥调用悬挂时永不回收）。改为可重建：hide() cancel，show() 换新。
-     */
-    private var captureScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var rowLaunch: View? = null
     private var autoSkipExtras: View? = null
     private var autoSkipChevron: ImageView? = null
@@ -239,9 +225,6 @@ class OverlayWindowController(
     }
 
     fun show() {
-        if (!captureScope.isActive) {
-            captureScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-        }
         if (rootView != null) return
         // 2026-09-18：宿主迁到无障碍进程后不再需要「显示在上层」授权。
         // 服务未连接时 A11yOverlayRuntime 根本不会构造本对象，故此处无需再自检。
@@ -258,7 +241,6 @@ class OverlayWindowController(
         val quickSkipSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_quick_skip)
         val autoPickSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_auto_pick)
         val autoLaunchSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_auto_launch)
-        val captureSwitch = root.findViewById<SwitchCompat>(R.id.overlay_switch_capture)
         val logToggle = root.findViewById<ImageButton>(R.id.overlay_log_toggle)
 
         bubbleView = bubble
@@ -281,8 +263,6 @@ class OverlayWindowController(
         switchQuickSkip = quickSkipSwitch
         switchAutoPick = autoPickSwitch
         switchAutoLaunch = autoLaunchSwitch
-        switchCapture = captureSwitch
-        captureSubtitle = root.findViewById(R.id.overlay_capture_subtitle)
         scanProgress = root.findViewById(R.id.overlay_scan_progress)
         launchHint = root.findViewById(R.id.overlay_auto_launch_hint)
         launchSubtitle = root.findViewById(R.id.overlay_launch_subtitle)
@@ -395,11 +375,6 @@ class OverlayWindowController(
             if (updatingUi) return@setOnCheckedChangeListener
             settingsRepository.setAutoLaunchGenshinEnabled(isChecked)
         }
-        captureSwitch.setOnCheckedChangeListener { _, isChecked ->
-            if (updatingUi) return@setOnCheckedChangeListener
-            // 抓包是一次性会话，不进 settingsRepository（不持久化）：重启不该自动开隧道。
-            sendCaptureCommand(isChecked)
-        }
         rootView = root
         params = layoutParams
         windowManager.addView(root, layoutParams)
@@ -439,6 +414,14 @@ class OverlayWindowController(
         if (scanClickThrough) return false
         var needed = false
         if (windowContains(params, rootView, x, y)) {
+            // ★ 批4（D4，2026-10-03）：点击落点在**展开态面板**里 ⇒ 除了临时穿透，还要把面板收起来。
+            //   面板像素会进投影帧（MediaProjection 抓的是整屏），它停在背包详情区上时，
+            //   后续每一格都在识别被盖住的画面。`ACTION_OUTSIDE` 那条自动收起对这种点击**不生效**
+            //   （落点在窗口内就不算 outside）⇒ 只能在这里主动收。
+            if (expanded) {
+                Log.i(TAG_OVERLAY, "扫描点击 ($x,$y) 落在展开态面板内 ⇒ 收起面板（停止遮挡识别区）")
+                collapse()
+            }
             applyTouchPassthrough(params, rootView, passthrough = true)
             needed = true
         }
@@ -573,8 +556,6 @@ class OverlayWindowController(
     }
 
     fun hide() {
-        // ★ 3.4（裁决 3 的 P3）：面板与日志窗已拆，随之下线；挂着的桥调用协程一并取消。
-        captureScope.cancel()
         stopScreenWatch()
         unregisterA11yReceiver()
         unregisterScriptsReceiver()
@@ -622,8 +603,6 @@ class OverlayWindowController(
         launchChevron = null
         // ★ 3.4（裁决 3 的 P3）：以下 view 引用此前**漏清** ⇒ hide() 后仍持有已 removeView 的
         //   视图（阻止回收，且下次 show() 前若被误用会操作已脱离窗口树的 View）。
-        switchCapture = null
-        captureSubtitle = null
         scriptGroup = null
         scriptPagesBadge = null
         scriptPagesRow = null
@@ -834,47 +813,6 @@ class OverlayWindowController(
      * 旧实现有两大缺陷：①private，扫描/加锁/装备流程无法写入；②`if (!logWindowVisible) return`
      * 导致**关窗期间日志全丢**。现恒缓冲 + 开窗回放，任何流程皆可写。
      */
-    /** 抓包开关指令（工单 D：改走 bridge/SettingsBridgeClient 门面，不再直接 contentResolver.call）。 */
-    private fun sendCaptureCommand(start: Boolean) {
-        captureScope.launch(Dispatchers.IO) {
-            val ok = SettingsBridgeClient.captureCommand(themedContext, start)
-            if (!ok) {
-                // 桥不通（无障碍没连 / 主进程服务没起）⇒ 开关必须落回，
-                // 不能停在玩家刚点亮的位置上骗他"已经在抓了"。
-                mainHandler.post { applyCaptureStatus(running = false, text = "助手没在跑，抓包没启动") }
-            }
-        }
-    }
-
-    /**
-     * 面板**打开时**拉一次会话快照。
-     *
-     * ⚠️ 这里刻意不订阅 `CaptureSession.ui`：面板跑在 `:a11y`，那份单例是**本进程**的，
-     *    订阅它只会永远停在初值 —— 状态一律由主进程经 `M_CAPTURE` 推进来
-     *    （见 `TriggerForegroundService.onCreate` 与 [updateCaptureStatus]）。
-     */
-    internal fun bindCaptureState() {
-        captureScope.launch(Dispatchers.IO) {
-            val snapshot = SettingsBridgeClient.captureSnapshot(themedContext) ?: return@launch
-            val text = snapshot.text
-            val running = snapshot.running
-            mainHandler.post { applyCaptureStatus(running, text) }
-        }
-    }
-
-    /** 主进程推进来的会话状态（经 `A11yOverlayRuntime`，已在主线程）。 */
-    fun updateCaptureStatus(running: Boolean, text: String) {
-        applyCaptureStatus(running, text)
-    }
-
-    private fun applyCaptureStatus(running: Boolean, text: String) {
-        if (text.isEmpty()) return
-        updatingUi = true
-        switchCapture?.isChecked = running
-        updatingUi = false
-        captureSubtitle?.text = text
-    }
-
     /** §13：订阅全局日志（开窗即回放全部历史）。 */
     private fun setAutoSkipMenuExpanded(expanded: Boolean, persist: Boolean = true) {
         autoSkipMenuExpanded = expanded

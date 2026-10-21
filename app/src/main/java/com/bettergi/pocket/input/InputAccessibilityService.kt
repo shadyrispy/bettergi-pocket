@@ -54,8 +54,27 @@ class InputAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event?.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = event.packageName?.toString() ?: return
-        if (pkg == packageName || pkg in TRANSIENT_PACKAGES) return
+        // ★ #199 的常驻探针：前台闸要不要把"自家界面"也算成遮挡，取决于一件没量过的事 ——
+        //   **TYPE_ACCESSIBILITY_OVERLAY 的面板展开时到底发不发这条事件**（发了的话 pkg 就是我们自己）。
+        //   今天这个函数在 `pkg == packageName` 处直接 return，所以从日志里永远看不出"发没发"。
+        //   事件只在窗口切换时来（每分钟个位数），D 级常开不吵。
+        Log.d(TAG, "window-state ${pkg}/${event.className}")
+        if (pkg == packageName) {
+            // ★ #181/#199（2026-10-03 实测分出来的两种自家事件，形状完全不同）：
+            //   · 加悬浮球/面板时 → `com.bettergi.pocket/android.widget.FrameLayout`
+            //   · 管理器页盖住游戏时 → `com.bettergi.pocket/com.bettergi.pocket.ui.MainActivity`
+            //   只有**第二种**才意味着"识别区被自家界面挡住"。按包名一刀切会把
+            //   「点面板 ▶ 起扫」这条今天刚跑绿 945/204/93 的路当场拒掉，所以按类名分。
+            if (event.className?.startsWith("$packageName.") == true) selfUiCover = event.className.toString()
+            return
+        }
+        if (pkg in TRANSIENT_PACKAGES) {
+            overlayHeldBy = pkg          // 压在上面的弹层：改写它，但不动 lastAppPackage
+            return
+        }
         lastAppPackage = pkg
+        overlayHeldBy = null             // 真应用重新拿到前台 ⇒ 弹层已消失
+        selfUiCover = null               // 同上：外来应用盖上来，自家 Activity 就不算挡着了
     }
 
     override fun onInterrupt() = Unit
@@ -66,6 +85,8 @@ class InputAccessibilityService : AccessibilityService() {
         if (instance === this) {
             instance = null
             lastAppPackage = null
+            overlayHeldBy = null
+            selfUiCover = null
             notifyStateChanged()
         }
     }
@@ -85,6 +106,12 @@ class InputAccessibilityService : AccessibilityService() {
         private const val KEY_TEXT = "text"
         private const val KEY_CONNECTED = "connected"
         private const val KEY_LAST_PACKAGE = "last_package"
+        /** 压在上面的 transient 窗包名（只读观测用，不参与放行判定）。 */
+        private const val KEY_OVERLAY_PKG = "overlay_pkg"
+        /** 挡住游戏的自家 Activity 类名（只给起扫闸门读，见 [selfUiCover]）。 */
+        private const val KEY_SELF_UI = "self_ui_cover"
+        /** **现问**到的活动窗口包名（只给两道闸当第二意见，见 [activeWindowPackage]）。 */
+        private const val KEY_ACTIVE_PACKAGE = "active_package"
         private const val KEY_X = "x"
         private const val KEY_Y = "y"
         private const val KEY_FROM_X = "from_x"
@@ -125,6 +152,28 @@ class InputAccessibilityService : AccessibilityService() {
         @Volatile
         private var lastAppPackage: String? = null
 
+        /**
+         * ★ 批0 后半（2026-10-03）：现在**压在上面的 transient 窗**（通知栏 / 权限页 / 设置）。
+         *
+         * `TRANSIENT_PACKAGES` 刻意不让这些窗改写 [lastAppPackage]，理由是"系统弹层不该把闸门误关掉"
+         * —— 这个取舍保留。但它带来一个副作用：通知栏拉下来时闸门照放行，手势被系统层吞掉，
+         * 而引擎**完全无从得知**（日志里只有一串 accepted=true）。
+         * 所以这里单独记一笔：只用于**观测**（页首打一条警告 + 计数），不参与放行判定。
+         */
+        @Volatile
+        private var overlayHeldBy: String? = null
+
+        /**
+         * ★ #181：挡住游戏的**自家 Activity 类名**（管理器页/引导页），没有则 null。
+         *
+         * 为什么单开一笔而不动 [lastAppPackage]：`lastAppPackage` 是**注入闸门**的判据（09-26 小米
+         * 盲点短信页那次事故），而滑动测试就是**从管理器页里**发的 —— 把"自家界面"直接写进
+         * lastAppPackage 会让滑动测试被注入闸门拒掉。起跑闸要的是另一件事："这一局扫描根本
+         * 看不见游戏"。所以只给起跑闸用，注入侧语义一字不改（见 `ScriptRunner.startScan`）。
+         */
+        @Volatile
+        private var selfUiCover: String? = null
+
         @Volatile
         private var appContext: Context? = null
 
@@ -159,12 +208,107 @@ class InputAccessibilityService : AccessibilityService() {
             if (!requireGenshinForeground) return true
             val pkg = lastAppPackage
             if (pkg == null || GenshinPackages.isGenshinPackage(pkg)) return true
-            Log.w(TAG, "$op 被前台闸门拦下：前台=$pkg（不是原神 ⇒ 拒绝注入，避免误点其它 app）")
+            // 缓存说"不是原神"⇒ **现问一次活动窗口**再判（见 [activeWindowPackage] 的 HyperOS 实测）：
+            // 系统隐私角标会在焦点切进游戏后追发一条事件把缓存改写掉，那个窗 100ms 就自己消失、
+            // 消失不再发事件 ⇒ 缓存恒停在错误值，注入会被整轮拒掉。现问也读不到 ⇒ 按"未知"放行，
+            // 与上面 `pkg == null` 同口径（宁可不拦，也不要把一次误报变成整轮空跑）。
+            val live = activeWindowPackage()
+            if (live == null || GenshinPackages.isGenshinPackage(live)) {
+                Log.i(TAG, "$op 缓存前台=$pkg 但现问活动窗口=${live ?: "读不到"}⇒ 放行")
+                return true
+            }
+            Log.w(TAG, "$op 被前台闸门拦下：缓存=$pkg 现问=$live（不是原神 ⇒ 拒绝注入，避免误点其它 app）")
             return false
         }
 
         fun attach(context: Context) {
             appContext = context.applicationContext
+        }
+
+        /**
+         * 当前压在上面的 transient 窗（通知栏 / 权限页 / 设置），没有则 null。
+         * 主进程经桥读；**只用于日志与观测**，不改注入放行结论。
+         */
+        fun overlayHeldPkg(): String? {
+            if (instance != null) return overlayHeldBy
+            return remoteStatus()?.getString(KEY_OVERLAY_PKG)
+        }
+
+        /**
+         * 是否有**自家 Activity**（管理器页/引导页）盖在游戏上。`null` = 读不到（无障碍未连/桥不通）。
+         * 只给起扫闸门用，见 [selfUiCover] 的取舍说明。
+         */
+        fun ourActivityOnTop(): Boolean? {
+            if (instance != null) return selfUiCover != null
+            val b = remoteStatus() ?: return null
+            // 桥通了但没这个键（对面是旧版实现）⇒ 当作"没挡住"，不假装知道
+            if (!b.containsKey(KEY_SELF_UI)) return false
+            return b.getString(KEY_SELF_UI) != null
+        }
+
+        /**
+         * **现问**当前活动窗口的包名，不吃 [lastAppPackage] 的事件缓存。读不到 ⇒ `null`。
+         * 主进程这条路经 **M_ACTIVE_WINDOW** 单独要（:a11y 才有 AccessibilityService 实例）；
+         * 不走 M_STATUS —— 那条是高频状态读，见 [A11yProtocol.M_ACTIVE_WINDOW] 的说明。
+         *
+         * 为什么必须有这一条（2026-10-03 小米 15 / HyperOS，用户报"点面板 ▶ 提示 not_in_genshin"）：
+         * 投屏期间每次焦点切进游戏后 0.3~0.5s，`com.miui.securitycenter` 的隐私角标窗必追发一条
+         * WINDOW_STATE_CHANGED ⇒ 缓存被改写成一个非原神包名，而那个角标 100ms 就自己消失、
+         * **消失不再发事件**，缓存于是恒停在错误值。三连实测（拉通知栏 / 关通知栏 / 开合最近任务）
+         * 每一次都以 securitycenter 结尾，所以只看缓存的起跑闸与注入闸在这台机器上恒拒。
+         *
+         * 自家悬浮窗不会把现问骗成"不是原神"，但**理由不是"它不发这条事件"** —— 它确实发：
+         * runlogs 里 `window-state com.bettergi.pocket/android.widget.FrameLayout` 有 27 条。
+         * 真正的理由是现问读的是 `rootInActiveWindow`（**持输入焦点**的窗口根），而悬浮球/面板是
+         * NOT_FOCUSABLE 的 TYPE_ACCESSIBILITY_OVERLAY（见 [activePackageOnMain]），成不了活动窗口。
+         * "面板挡住识别区"是另一件事，归 [selfUiCover] 管。
+         */
+        fun activeWindowPackage(): String? {
+            if (instance != null) return liveActivePackage()
+            return remoteCall(A11yProtocol.M_ACTIVE_WINDOW)?.getString(KEY_ACTIVE_PACKAGE)
+        }
+
+        /** 起扫闸用：现问活动窗口是不是原神。`null` = 现问不出来（交给事件缓存的结论）。 */
+        fun genshinActiveNow(): Boolean? {
+            val live = activeWindowPackage() ?: return null
+            return GenshinPackages.isGenshinPackage(live)
+        }
+
+        /** 无障碍节点查询要在带 Looper 的线程上做（与探针窗口同理）；binder 线程就 post 过去等回执。 */
+        private fun liveActivePackage(): String? {
+            val service = instance ?: return null
+            if (Looper.myLooper() == Looper.getMainLooper()) return activePackageOnMain(service)
+            val latch = CountDownLatch(1)
+            val holder = arrayOf<String?>(null)
+            Handler(Looper.getMainLooper()).post {
+                holder[0] = activePackageOnMain(service)
+                latch.countDown()
+            }
+            return try {
+                if (!latch.await(1, TimeUnit.SECONDS)) {
+                    Log.w(TAG, "现问活动窗口超时（主线程 1s 没回话）")
+                    null
+                } else {
+                    holder[0]
+                }
+            } catch (_: InterruptedException) {
+                null
+            }
+        }
+
+        private fun activePackageOnMain(service: AccessibilityService): String? = try {
+            // 用 rootInActiveWindow 而不是 service.windows：后者在 Kotlin 里会解析到
+            // Context.getWindows()（返回 android.view.Window，没有包名），拿不到我们要的东西。
+            // rootInActiveWindow 语义就是"当前持输入焦点的窗口根节点"，自家悬浮球/面板是
+            // NOT_FOCUSABLE ⇒ 焦点始终留在游戏上，不会被自己骗到。
+            service.rootInActiveWindow?.packageName?.toString()?.takeIf { it.isNotEmpty() }
+                ?: run {
+                    Log.d(TAG, "现问活动窗口：rootInActiveWindow 为空（焦点切换中）")
+                    null
+                }
+        } catch (e: Exception) {
+            Log.w(TAG, "现问活动窗口失败：${e.message}")
+            null
         }
 
         fun isConnected(): Boolean {
@@ -381,6 +525,13 @@ class InputAccessibilityService : AccessibilityService() {
                 A11yProtocol.M_STATUS -> Bundle().apply {
                     putBoolean(KEY_CONNECTED, instance != null)
                     putString(KEY_LAST_PACKAGE, lastAppPackage)
+                    putString(KEY_OVERLAY_PKG, overlayHeldBy)
+                    putString(KEY_SELF_UI, selfUiCover)
+                    // ⚠️ 这里**不放** KEY_ACTIVE_PACKAGE：现问要在主线程查节点、binder 线程等它
+                    //    最多 1s（见 liveActivePackage），而 status 是高频读。要现问走 M_ACTIVE_WINDOW。
+                }
+                A11yProtocol.M_ACTIVE_WINDOW -> Bundle().apply {
+                    putString(KEY_ACTIVE_PACKAGE, liveActivePackage())
                 }
                 A11yProtocol.M_SCAN_PROGRESS -> Bundle().apply {
                     putBoolean(KEY_OK, pushScanProgressLocal(extras?.getString(KEY_TEXT) ?: ""))
@@ -424,8 +575,26 @@ class InputAccessibilityService : AccessibilityService() {
 
         private fun currentStatus(): Pair<Boolean, String?> {
             if (instance != null) return true to lastAppPackage
-            val status = remoteStatus() ?: return false to null
-            return status.getBoolean(KEY_CONNECTED, false) to status.getString(KEY_LAST_PACKAGE)
+            // ★ #181（2026-10-03）：主进程这条路有三种"拿不到"，成因完全不同但过去长得一样：
+            //   ① appContext 还没 attach（remoteCall 直接返回 null，**一条日志都不打**）；
+            //   ② contentResolver.call 抛异常（remoteCall 里已有 remoteCall failed 日志）；
+            //   ③ 桥通了但无障碍侧还没观察到任何窗口（connected=true / pkg=null，或 connected=false）。
+            //   adb 起扫时恒 null、悬浮窗起扫时恒 true，就是在这三种里没分清 ⇒ 这里逐因打一条。
+            val status = remoteStatus()
+                ?: run {
+                    Log.w(
+                        TAG,
+                        "currentStatus 取不到：appContext=${if (appContext == null) "null(未 attach)" else "有"}" +
+                            "（异常成因请看同时间的 remoteCall failed 行）",
+                    )
+                    return false to null
+                }
+            val connected = status.getBoolean(KEY_CONNECTED, false)
+            val pkg = status.getString(KEY_LAST_PACKAGE)
+            if (pkg == null) {
+                Log.w(TAG, "currentStatus 桥已通但无障碍尚未观察到窗口：connected=$connected")
+            }
+            return connected to pkg
         }
 
         private fun clickLocal(x: Int, y: Int, durationMs: Long): Boolean {

@@ -464,8 +464,11 @@ class ScreenProfile(
         // 底栏锚（行顶 → 卡内"等级标签亮带"中心 的固定偏移，基准 px）。-1 = 未标定 ⇒ 绝对行相位不启用。
         // 见 GridAlign.rowPhase：那是目前唯一能给出**绝对**行顶位置的判据。
         val labelAnchor = grid.optInt("labelAnchor", -1)
-        // set_filter_popup 的 cols 是 {left,right} 对象 → optInt 回退默认 → 拒绝（非卡片网格）
-        // 1 列网格（char_strip 左列头像条）合法 → 门限为 <1 而非 <2
+        // ★ 2026-10-02（#169）：`cols` 一律是**列数（int）**。set_filter_popup 原来把 `cols` 写成了
+        //   {left,right} 对象（每列的 checkboxX/nameBox/countRight）—— 形状冲突（同一键不能既是对象
+        //   又是 int）⇒ 那份按列的样式搬到了 **`columns`**，`cols: 2` 留给计数。2244 档同时补上了
+        //   cardSize/cardOrigin/pitch/visibleRows（**实测**，见该键 geomNote）⇒ 该档这个键是真网格；
+        //   2560/3200 两档只补了 cols/labelAnchor（整块欠重标）⇒ cardSize 缺 ⇒ 本函数仍返回 null。
         val cols = grid.optInt("cols", -1)
         if (cols < 1) return null
 
