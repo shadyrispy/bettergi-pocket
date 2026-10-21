@@ -28,13 +28,6 @@
          从上到下是用户动线本身 —— 选模式 → 引导卡（Shizuku 四态之一，恰好一个下一步）
          → 虚拟屏监视区（就绪后接管）→ 一句边界提示。结构（行/圆点/文案）照抄
          status_card 与 swipe_row 的既有写法，不引入新样式。 -->
-    <LinearLayout
-        android:id="@+id/bg_section"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:visibility="gone">
-
         <!-- 运行模式行：标签 + 横排 RadioGroup（结构与 swipe_card 的方法选择同款） -->
         <LinearLayout
             android:id="@+id/runmode_row"
@@ -84,6 +77,13 @@
                     android:textSize="13sp" />
             </RadioGroup>
         </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/bg_section"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:visibility="gone">
 
         <!-- Shizuku 引导卡：四态机渲染目标（phase != READY 时显示） -->
         <LinearLayout

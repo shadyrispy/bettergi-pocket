@@ -244,7 +244,12 @@ internal fun OverlayWindowController.startScan(flowKey: String? = null) {
     if (flowKey != null) settingsRepository.setScanFlow(flowKey)
     settingsRepository.setScanEnabled(true)
     inputGate.ensureEnabled(themedContext, "请开启无障碍权限，才能模拟扫描点击")
-    if (!settingsRepository.get().screenShareEnabled) {
+    // ★ #310（2026-10-17 BS 实测）：后台模式不需要投影（帧来自 VD 的 ImageReader）——
+    //   无条件设 screenShareEnabled=true 会触发 settingsListener 的 requestCapturePermission()，
+    //   弹前台投影授权弹窗（与后台模式意图相反）。BACKGROUND 不碰投影开关。
+    val background = settingsRepository.get().runMode ==
+        com.bettergi.pocket.settings.RunMode.BACKGROUND
+    if (!background && !settingsRepository.get().screenShareEnabled) {
         settingsRepository.setScreenShareEnabled(true)
     }
 }

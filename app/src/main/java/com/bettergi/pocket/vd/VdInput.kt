@@ -73,12 +73,18 @@ object VdInput {
         }
     }
 
-    /** 反射设置事件目标屏（displayId == 0 时跳过——主屏无需反射）。 */
+    /** 反射设置事件目标屏（displayId == 0 时跳过——主屏无需反射）。设完读回校验并打日志。 */
     fun setDisplayId(event: InputEvent, displayId: Int): Boolean {
         if (displayId == 0) return true
         return runCatching {
             setDisplayIdMethod?.invoke(event, displayId)
-            true
+            val readBack = runCatching {
+                event.javaClass.getMethod("getDisplayId").invoke(event) as Int
+            }.getOrDefault(-99)
+            // 读回校验：invoke 不抛 ≠ 生效（2026-10-18 BS：engine 模式 ok=true 但事件
+            // 去向不明 —— 把「写了什么」变成证据）
+            Log.d(TAG, "setDisplayId want=$displayId got=$readBack")
+            readBack == displayId
         }.getOrElse {
             Log.w(TAG, "setDisplayId failed: ${it.message}")
             false

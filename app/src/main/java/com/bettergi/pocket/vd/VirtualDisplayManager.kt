@@ -51,9 +51,15 @@ class VirtualDisplayManager(
      * 运行进程的 Context：UserService 进程里是 Shizuku v13 传入的 package context
      * （提权主路径），app 进程里是普通 app context（降级路径）。
      * 只用于 getSystemService / packageManager / resources，不 registerReceiver。
+     * ★ BS 实测修复：构造时统一过 [VdShellContext.wrap] —— shell uid 下 startActivity
+     * 同样校验 packageName vs calling uid（startApp 用的就是它），包装必须在构造时
+     * 一次到位，不能只在 create 里临时包（startApp/repin 会漏）。
      */
-    private val context: Context,
+    context0: Context,
 ) {
+
+    private val context: Context = VdShellContext.wrap(context0)
+
     companion object {
         private const val TAG = "BetterGI.VD"
 
@@ -141,6 +147,9 @@ class VirtualDisplayManager(
             Log.w(TAG, "create：已有虚拟显示器（displayId=$displayId），先 destroy 再建")
             return -1
         }
+        // ★ BS 实测修复（VdShellContext KDoc）：shell uid 下 createVirtualDisplay 校验
+        //   packageName vs calling uid —— 包装已在构造时统一做（VdShellContext.wrap），
+        //   这里直接取。
         val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
         if (dm == null) {
             Log.w(TAG, "create：拿不到 DisplayManager")
@@ -261,7 +270,44 @@ class VirtualDisplayManager(
             Log.i(TAG, "startApp：$packageName → display $onDisplayId 已投放")
             true
         }.getOrElse {
-            Log.w(TAG, "startApp 失败: ${it.message}")
+            Log.w(TAG, "startApp 失败: ${it.message}", it)
+            // ★ BS 实测修复（2026-10-17）：shell uid 服务进程里 context.startActivity 的
+            //   callingPackage 读的是 ContextImpl.mBasePackageName 字段（unwrap 后的
+            //   ContextImpl，ContextWrapper 包不住它）⇒ Permission Denial。
+            //   MAA 同款兜底：`am start --display N`（exec 天然以 shell 身份跑，
+            //   callingPackage=com.android.shell 匹配 uid 2000，校验放行）。
+            startViaAmCommand(intent, onDisplayId)
+        }
+    }
+
+    /**
+     * `am start` 兜底（MAA ActivityUtils.startViaAmCommand 同款）：intent 转 URI
+     * scheme 后走命令行。服务进程（shell uid）exec 的 am 天然放行 BAL + 包名校验。
+     * 输出量小（远小于管道缓冲），先 waitFor 再读不会死锁。
+     */
+    private fun startViaAmCommand(intent: Intent, onDisplayId: Int): Boolean {
+        return runCatching {
+            val intentUri = intent.toUri(Intent.URI_INTENT_SCHEME)
+            val args = if (onDisplayId == 0) {
+                arrayOf("am", "start", intentUri)
+            } else {
+                arrayOf("am", "start", "--display", onDisplayId.toString(), intentUri)
+            }
+            Log.i(TAG, "startViaAmCommand: exec ${args.joinToString(" ")}")
+            val process = Runtime.getRuntime().exec(args)
+            val exitCode = process.waitFor()
+            val stdout = process.inputStream.bufferedReader().use { it.readText() }.trim()
+            val stderr = process.errorStream.bufferedReader().use { it.readText() }.trim()
+            if (stdout.isNotEmpty()) Log.i(TAG, "am stdout: $stdout")
+            if (stderr.isNotEmpty()) Log.w(TAG, "am stderr: $stderr")
+            if (exitCode != 0) {
+                Log.w(TAG, "am exited with code $exitCode")
+                return false
+            }
+            Log.i(TAG, "startViaAmCommand: success（display $onDisplayId 已投放）")
+            true
+        }.getOrElse {
+            Log.w(TAG, "am command 兜底失败: ${it.message}", it)
             false
         }
     }
@@ -379,7 +425,9 @@ class VirtualDisplayManager(
             )
             m.isAccessible = true
             m.invoke(dm, name, width, height, dpi, surface, flags, null, null) as VirtualDisplay
-        }.onFailure { Log.d(TAG, "hidden 8 参 createVirtualDisplay 裸反射失败: ${it.message}") }
+        // 真因日志带全栈（it.message 是 null 的常见形态：InvocationTargetException 的
+        // message 恒 null，真因在 cause —— 2026-10-17 BS 建屏失败排查教训）
+        }.onFailure { Log.d(TAG, "hidden 8 参 createVirtualDisplay 裸反射失败", it) }
             .getOrNull()
         if (direct != null) return direct
         // HiddenApiBypass 兜底（P+ hidden API 元数据限制）
@@ -388,7 +436,7 @@ class VirtualDisplayManager(
                 DisplayManager::class.java, dm, "createVirtualDisplay",
                 name, width, height, dpi, surface, flags, null, null,
             ) as VirtualDisplay
-        }.onFailure { Log.w(TAG, "HiddenApiBypass createVirtualDisplay 也失败: ${it.message}") }
+        }.onFailure { Log.w(TAG, "HiddenApiBypass createVirtualDisplay 也失败", it) }
             .getOrNull()
     }
 
@@ -523,7 +571,7 @@ class VirtualDisplayManager(
                     Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
                 )
                 .invoke(service, taskId, displayId)
-        }.onFailure { Log.w(TAG, "$methodName 裸反射失败: ${it.message}") }
+        }.onFailure { Log.w(TAG, "$methodName 裸反射失败", it) }
             .isSuccess
         if (ok) return true
         // 裸反射被 hidden 拦 ⇒ HiddenApiBypass 再试一次

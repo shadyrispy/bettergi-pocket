@@ -267,6 +267,17 @@ class BgiRemoteStateTest {
         override fun swipeOnDisplay(displayId: Int, fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean =
             error("not used in tests")
 
+        // ★ #310/M6-audit AIDL v4 追加方法：测试不可达，恒 fail-fast
+        override fun createDisplayWithSurface(
+            surface: android.view.Surface?,
+            width: Int,
+            height: Int,
+            dpi: Int,
+        ): Int = error("not used in tests")
+        override fun destroyDisplay() = error("not used in tests")
+        override fun topActivityOnDisplay(displayId: Int): Array<String>? = error("not used in tests")
+        override fun backOnDisplay(displayId: Int): Boolean = error("not used in tests")
+
         // ★ #310/M5 AIDL v3 追加方法：同上，测试里不可达，恒 fail-fast
         override fun capturePreviewJpeg(): ByteArray? = error("not used in tests")
         override fun isGameAlive(): Boolean = error("not used in tests")

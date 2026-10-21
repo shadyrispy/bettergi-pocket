@@ -103,11 +103,11 @@ class BgiRemoteService : IBgiRemoteService.Stub {
 
     override fun createDisplay(): Int {
         val fs = com.bettergi.pocket.vd.VirtualDisplayFrameSource(
-            displayId = -1, width = 1280, height = 720,
+            displayId = -1, width = 2560, height = 1440,
         ).also { it.start() }
         vdFrameSource = fs
         // frameSourceGenerationProbe：fps 估计器经它读代数（KeepAlive 轮询 → estimator）
-        val id = vd().create(1280, 720, 160, fs.surface()) { fs.frameGeneration() }
+        val id = vd().create(2560, 1440, 240, fs.surface()) { fs.frameGeneration() }
         // M5：VD 建成后起黑帧 Guard（服务进程内自守——MAA StaleFrameGuard 机制）。
         // create 失败（id<0）也要起 Guard：它内部靠 isAppOnDisplay 判不出即保守不动作，
         // 等 repin/重建把显示救回来后自然恢复观测。
@@ -260,6 +260,59 @@ class BgiRemoteService : IBgiRemoteService.Stub {
      * FLAG_ONEWAY —— 本方法跑在服务进程的 binder 线程，exit 后不再返回。
      * 清理逻辑随里程碑追加（M2 显示器、M3 注入器），**exit 必须是最后一行**。
      */
+    // ── ★ #310/M6-audit：装配接线补口（version 4）──
+
+    override fun createDisplayWithSurface(
+        surface: android.view.Surface,
+        width: Int,
+        height: Int,
+        dpi: Int,
+    ): Int {
+        return runCatching {
+            vd().create(width, height, dpi, surface) { vdFrameSourceOrNull()?.frameGeneration() ?: 0L }
+        }.onFailure { Log.w(TAG, "createDisplayWithSurface failed: ${it.message}") }
+            .getOrDefault(-1)
+    }
+
+    override fun destroyDisplay() {
+        runCatching {
+            frameGuard?.stop()
+            frameGuard = null
+            vd().destroy()
+        }.onFailure { Log.w(TAG, "destroyDisplay failed: ${it.message}") }
+    }
+
+    override fun topActivityOnDisplay(displayId: Int): Array<String>? {
+        // 服务进程（shell uid）的 getRunningTasks 返回全量 task；反射 displayId 字段
+        // （hidden，shell 可读）。VD 空返回空数组、判不出返回 null——调用方（VdStateProbe
+        // 远端版）按"空=false / null=未知"折叠。
+        return runCatching {
+            val am = requireContext().getSystemService(android.content.Context.ACTIVITY_SERVICE)
+                as? android.app.ActivityManager ?: return null
+            val tasks = am.getRunningTasks(100)
+            val f = android.app.ActivityManager.RunningTaskInfo::class.java.getField("displayId")
+            val onVd = tasks.firstOrNull { runCatching { f.getInt(it) }.getOrDefault(-1) == displayId }
+                ?: return emptyArray()
+            val top = onVd.topActivity
+            if (top == null) emptyArray()
+            else arrayOf(top.packageName ?: "", top.className ?: "")
+        }.getOrElse {
+            Log.w(TAG, "topActivityOnDisplay failed: ${it.message}")
+            null
+        }
+    }
+
+    override fun backOnDisplay(displayId: Int): Boolean {
+        return runCatching {
+            com.bettergi.pocket.vd.VdInput.init()
+            val gw = com.bettergi.pocket.vd.VdInjectActionGateway(displayId)
+            gw.back()
+        }.onFailure { Log.w(TAG, "backOnDisplay failed: ${it.message}") }
+            .getOrDefault(false)
+    }
+
+    private fun vdFrameSourceOrNull(): com.bettergi.pocket.vd.VirtualDisplayFrameSource? = vdFrameSource
+
     override fun destroy() {
         Log.i(TAG, "destroy()：server 触发销毁（version 更新或 unbind remove），exit")
         runCatching { frameGuard?.stop() }
@@ -297,6 +350,6 @@ class BgiRemoteService : IBgiRemoteService.Stub {
          * server 发现 version 不匹配会自动拉新进程、调旧进程的 destroy()。
          * M1b 骨架首版 = 1；M3（VD/注入）= 2；M5（帧流/监视）= 3。
          */
-        const val SERVICE_VERSION: Int = 3
+        const val SERVICE_VERSION: Int = 4
     }
 }

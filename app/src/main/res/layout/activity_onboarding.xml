@@ -43,6 +43,78 @@
             android:layout_height="wrap_content"
             android:orientation="vertical">
 
+            <!-- ★ #311 运行模式（第 0 步）：决定后续引导走哪条链——
+                 前台 = 无障碍+投影+悬浮窗；后台 = 无障碍+Shizuku，无悬浮窗。
+                 两模式共用脚本管理页，模式可在管理页顶部随时切换。 -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/bg_pocket_card_outline"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/step0_mark"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="✓"
+                        android:textColor="@color/pocket_ok"
+                        android:textSize="16sp" />
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_marginStart="10dp"
+                        android:layout_weight="1"
+                        android:text="运行模式"
+                        android:textColor="@color/pocket_text"
+                        android:textSize="17sp" />
+                </LinearLayout>
+
+                <RadioGroup
+                    android:id="@+id/onboard_runmode_group"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="horizontal">
+
+                    <RadioButton
+                        android:id="@+id/onboard_mode_foreground"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:checked="true"
+                        android:text="前台（悬浮窗）"
+                        android:textColor="@color/pocket_text"
+                        android:textSize="14sp" />
+
+                    <RadioButton
+                        android:id="@+id/onboard_mode_background"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="后台（虚拟屏）"
+                        android:textColor="@color/pocket_text"
+                        android:textSize="14sp" />
+                </RadioGroup>
+
+                <TextView
+                    android:id="@+id/onboard_mode_hint"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:lineSpacingExtra="4dp"
+                    android:text="前台：游戏在前台跑，悬浮窗操作，需要屏幕共享授权。\n后台：游戏跑在虚拟屏上，本页操作，需要 Shizuku（下方引导），不开悬浮窗。"
+                    android:textColor="@color/pocket_text_muted"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
             <!-- ① 无障碍 -->
             <LinearLayout
                 android:layout_width="match_parent"
@@ -113,7 +185,7 @@
                     android:textSize="13sp" />
             </LinearLayout>
 
-            <!-- ② 屏幕共享 -->
+            <!-- ② 屏幕共享（前台模式）/ Shizuku（后台模式）—— 标题与说明由 renderOnboarding 按 runMode 切 -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -137,6 +209,7 @@
                         android:textSize="16sp" />
 
                     <TextView
+                        android:id="@+id/step2_title"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_marginStart="10dp"
@@ -160,6 +233,7 @@
                 </LinearLayout>
 
                 <TextView
+                    android:id="@+id/step2_body"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
@@ -169,7 +243,7 @@
                     android:textSize="13sp" />
             </LinearLayout>
 
-            <!-- ③ 回到悬浮窗 -->
+            <!-- ③ 回到管理页（前台=悬浮窗；后台=球在但不操作，从通知/图标进） -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -193,6 +267,7 @@
                         android:textSize="16sp" />
 
                     <TextView
+                        android:id="@+id/step3_title"
                         android:layout_width="0dp"
                         android:layout_height="wrap_content"
                         android:layout_marginStart="10dp"
@@ -203,6 +278,7 @@
                 </LinearLayout>
 
                 <TextView
+                    android:id="@+id/step3_body"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="10dp"
@@ -216,7 +292,7 @@
 
     <TextView
         android:id="@+id/onboarding_next"
-        android:contentDescription="完成引导并进入悬浮窗"
+        android:contentDescription="完成引导"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="12dp"

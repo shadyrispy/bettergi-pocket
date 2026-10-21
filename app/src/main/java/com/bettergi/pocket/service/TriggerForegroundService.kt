@@ -101,25 +101,58 @@ class TriggerForegroundService : Service() {
     @Volatile
     private var shutDown = false
 
-    /** 无障碍状态变化 ⇒ 重连后把悬浮窗请求回来（见 onCreate 注释）。 */
+    /** 无障碍状态变化 ⇒ 重连后把悬浮窗请求回来（见 onCreate 注释）。★ #311：后台模式不开悬浮窗。 */
     private val a11yStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (shutDown) return
-            mainHandler.post { overlayController.show() }
+            mainHandler.post { showOverlayIfForeground() }
         }
     }
 
+    /**
+     * ★ #311：悬浮窗按 runMode 守卫——BACKGROUND 不 show（后台模式无悬浮窗，控制面 =
+     * 脚本管理页）。所有 show 调用点统一走这里，模式切换（管理页 runmode_row）落盘后
+     * 下一次重连自然跟随。
+     */
+    private fun showOverlayIfForeground() {
+        if (settingsRepository.get().runMode == com.bettergi.pocket.settings.RunMode.BACKGROUND) {
+            Log.i(TAG, "后台模式：跳过悬浮窗显示（控制面 = 脚本管理页）")
+            return
+        }
+        overlayController.show()
+    }
+
     private val settingsListener: (TriggerSettings) -> Unit = { settings ->
+        // ★ #310（2026-10-17 BS 实测）：后台模式不需要投影（帧来自 VD 的 ImageReader）。
+        //   起跑闸门按 runMode 分流：前台 = scanEnabled + 投影在跑（既有语义逐位不变）；
+        //   后台 = 只要求 scanEnabled（投影开关在后台被 startScan 跳过，若也卡投影
+        //   扫描永远起不来）。stop 路径两条共用，行为不变。
+        val background = settings.runMode == com.bettergi.pocket.settings.RunMode.BACKGROUND
+        if (settings.screenShareEnabled && !captureController.isRunning() && !background) {
+            requestCapturePermission()
+        }
         if (settings.screenShareEnabled) {
-            if (!captureController.isRunning()) {
-                requestCapturePermission()
-            }
             engine.start()
         } else {
             stopScreenShare()
         }
-        // 自动扫描：投影就绪即开跑；关闭即停（P1-c 悬浮窗入口）
-        if (settings.scanEnabled && settings.screenShareEnabled && captureController.isRunning()) {
+        // 自动扫描：前台=投影就绪即开跑；后台=VD 会话健康即开跑；关闭即停（P1-c 悬浮窗入口）
+        val scanGate = if (background) {
+            settings.scanEnabled &&
+                com.bettergi.pocket.vd.BackgroundSession.current?.isHealthy() == true
+        } else {
+            settings.scanEnabled && settings.screenShareEnabled && captureController.isRunning()
+        }
+        if (background && settings.scanEnabled) {
+            // 诊断日志：后台起跑闸的三个条件逐项可见（BS 实测排查教训——静默不跑没法查）
+            val s = com.bettergi.pocket.vd.BackgroundSession.current
+            Log.i(
+                TAG,
+                "后台起跑闸：scanEnabled=${settings.scanEnabled} " +
+                    "session=${if (s == null) "null" else "id=${s.displayId} healthy=${s.isHealthy()}"}",
+            )
+        }
+        if (scanGate) {
             if (!scriptRunner.isRunning()) {
                 startFlowIfReady(settings.scanFlow, maxPagesOrDefault(settings.scanMaxPages))
             }
@@ -187,6 +220,42 @@ class TriggerForegroundService : Service() {
             captureController = captureController,
             overlayController = overlayController,
             listener = scanListener,
+            // ★ #310/M6-audit：按 runMode 解析本轮装配（RunMode 的最终消费方）。
+            //   前台 ⇒ null 语义（Foreground object）⇒ ScriptRunner 内置链，行为逐位不变；
+            //   后台 ⇒ BackgroundSession 三件套；会话缺失/断线 ⇒ BackgroundNotReady 拒绝
+            //   （绝不静默退化成前台——那会把游戏按到主屏上点，与用户意图相反）。
+            assemblyResolver = {
+                when (settingsRepository.get().runMode) {
+                    com.bettergi.pocket.settings.RunMode.FOREGROUND ->
+                        com.bettergi.pocket.scan.AssemblyResolution.Foreground
+                    com.bettergi.pocket.settings.RunMode.BACKGROUND -> {
+                        val session = com.bettergi.pocket.vd.BackgroundSession.current
+                        when {
+                            session == null -> com.bettergi.pocket.scan.AssemblyResolution.BackgroundNotReady(
+                                "后台模式已选但虚拟屏未启动（先在页顶点「启动虚拟屏」）",
+                            )
+                            !session.isHealthy() ->
+                                com.bettergi.pocket.scan.AssemblyResolution.BackgroundNotReady(
+                                    "后台会话不健康（Shizuku 断线或帧源停止）⇒ 点「关闭虚拟屏」后重新启动",
+                                )
+                            else -> com.bettergi.pocket.scan.AssemblyResolution.Background(
+                                frameSource = session.frameSource!!,
+                                probe = session.probe,
+                                actions = session.actions,
+                                readiness = {
+                                    // VD 就绪校验：帧源活 + 游戏在 VD 上（probe 三态折叠——
+                                    // 判不出(null)按放行，与前台 fail-open 同口径）。不查
+                                    // "游戏在物理屏前台"——后台模式它就是不该在前台。
+                                    when (val fg = session.probe.isGameInForeground()) {
+                                        false -> "虚拟屏上没看到原神（先点「启动虚拟屏」或用「游戏调回前台」）"
+                                        else -> null
+                                    }
+                                },
+                            )
+                        }
+                    }
+                }
+            },
         )
         settingsRepository.addListener(settingsListener)
         // ⚠️ 2026-09-18 上机实测：无障碍重连后**悬浮窗不会自己回来**（旧窗口随服务销毁，
@@ -226,7 +295,7 @@ class TriggerForegroundService : Service() {
             }
             ACTION_START -> {
                 startInForeground(sharing = captureController.isRunning())
-                overlayController.show()
+                showOverlayIfForeground()
                 InputAccessibilityService.promptIfDisconnected(applicationContext)
             }
             ACTION_CAPTURE_START -> {
@@ -326,6 +395,39 @@ class TriggerForegroundService : Service() {
                 val mode = intent.getStringExtra(EXTRA_MODE) ?: "swipe"
                 ClickModeOverrides.cellTap = mode.equals("tap", ignoreCase = true)
                 Log.i(TAG, "debug set cell click: mode=$mode ⇒ ${ClickModeOverrides.summary()}")
+            }
+            ACTION_DEBUG_VD_TAP -> {
+                // ★ 诊断通路：与引擎完全同一注入链（BackgroundSession.actions.tap）点 VD。
+                //   用于分辨「引擎事件参数问题」vs「VD 窗口焦点问题」——adb input -d 生效
+                //   而引擎点击不动画面时（2026-10-18 BS），点一下立刻见分晓。
+                //   mode="async" = 绕过 planner 全 ASYNC 注入（adb input 同款），对照
+                //   WAIT_FOR_FINISH 是否是引擎点击不落地的死因。
+                val x = intent.getIntExtra(EXTRA_X, -1)
+                val y = intent.getIntExtra(EXTRA_Y, -1)
+                val mode = intent.getStringExtra("mode") ?: "engine"
+                val session = com.bettergi.pocket.vd.BackgroundSession.current
+                if (session == null || x < 0) {
+                    Log.w(TAG, "debug vd tap: session=${session != null} x=$x y=$y ⇒ 无法执行")
+                } else if (mode == "async") {
+                    // 全 ASYNC 对照（adb input 同款）：绕过 planner 槽位，直接 Planned 工厂
+                    // 构造 DOWN(ASYNC)+UP，经 VdInput.injectPlanned（内含 setDisplayId + recycle）。
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val down = com.bettergi.pocket.vd.InjectPlanner.Planned
+                        .down(0, 0, x.toFloat(), y.toFloat(), now, async = true)
+                    var ok = com.bettergi.pocket.vd.VdInput.injectPlanned(
+                        down, session.displayId, com.bettergi.pocket.vd.InjectPlanner(),
+                    )
+                    Thread.sleep(100)
+                    val up = com.bettergi.pocket.vd.InjectPlanner.Planned
+                        .up(0, 0, x.toFloat(), y.toFloat(), now, now + 100)
+                    ok = com.bettergi.pocket.vd.VdInput.injectPlanned(
+                        up, session.displayId, com.bettergi.pocket.vd.InjectPlanner(),
+                    ) && ok
+                    Log.i(TAG, "debug vd tap(async): ($x,$y) display ${session.displayId} ⇒ ok=$ok")
+                } else {
+                    val ok = session.actions.tap(x, y)
+                    Log.i(TAG, "debug vd tap: ($x,$y) on display ${session.displayId} ⇒ ok=$ok")
+                }
             }
             ACTION_DEBUG_SET_MAX_PAGES -> {
                 val pages = intent.getIntExtra(EXTRA_PAGES, 0)
@@ -642,7 +744,17 @@ class TriggerForegroundService : Service() {
                     Log.i(TAG, "debug scan flow: plan 取自已导入输入（${it.size} 项，flow=$flow）")
                 }
                 Log.i(TAG, "debug scan flow: flow=$flow maxPages=$maxPages timing='${timingSpec ?: ""}' sets=$sets")
-                if (captureController.isRunning()) {
+                // ★ #310（2026-10-18）：后台模式帧来自 VD（无投影）——起跑闸按 runMode 分流
+                //   （与 settingsListener 的 scanGate 同口径）。原先只查 captureController，
+                //   后台模式被 "projection not running" 静默拒绝。
+                val isBackground = settingsRepository.get().runMode ==
+                    com.bettergi.pocket.settings.RunMode.BACKGROUND
+                val scanReady = if (isBackground) {
+                    com.bettergi.pocket.vd.BackgroundSession.current?.isHealthy() == true
+                } else {
+                    captureController.isRunning()
+                }
+                if (scanReady) {
                     scriptRunner.startScan(
                         flow, maxPages,
                         useGeometryAdvance = geoAdvance,
@@ -650,7 +762,11 @@ class TriggerForegroundService : Service() {
                         timingSpec = timingSpec,
                     )
                 } else {
-                    Log.w(TAG, "scan flow request ignored: projection not running")
+                    Log.w(
+                        TAG,
+                        if (isBackground) "scan flow request ignored: background session not healthy"
+                        else "scan flow request ignored: projection not running",
+                    )
                 }
             }
             ACTION_DEBUG_OCR_BENCH -> {
@@ -1224,9 +1340,16 @@ class TriggerForegroundService : Service() {
         const val ACTION_DEBUG_SET_SCAN = "com.bettergi.pocket.action.DEBUG_SET_SCAN"
         /** A/B：格点击形态（tap = 零位移；swipe = 2px 微滑）。 */
         const val ACTION_DEBUG_SET_CELL_CLICK = "com.bettergi.pocket.action.DEBUG_SET_CELL_CLICK"
+
+        /** 诊断通路：与引擎同一注入链点 VD（见 onStartCommand 分支注释）。 */
+        const val ACTION_DEBUG_VD_TAP = "com.bettergi.pocket.action.DEBUG_VD_TAP"
         /** A/B：限制扫描页数（小样本用）。 */
         const val ACTION_DEBUG_SET_MAX_PAGES = "com.bettergi.pocket.action.DEBUG_SET_MAX_PAGES"
         const val EXTRA_MODE = "mode"
+
+        /** DEBUG_VD_TAP 的坐标 extras。 */
+        const val EXTRA_X = "x"
+        const val EXTRA_Y = "y"
         const val EXTRA_PAGES = "pages"
         const val ACTION_DEBUG_STATUS = "com.bettergi.pocket.action.DEBUG_STATUS"
 

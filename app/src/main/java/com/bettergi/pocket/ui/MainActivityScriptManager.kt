@@ -1,5 +1,6 @@
 package com.bettergi.pocket.ui
 
+import com.bettergi.pocket.vd.BackgroundSession
 import android.content.Intent
 import android.os.Handler
 import android.os.Looper
@@ -289,6 +290,18 @@ private class BgUiState {
     /** 四态机最后一次评估结果（按钮分派与监视区可见性的依据）。 */
     var shizukuPhase: ShizukuPhase? = null
 
+    /**
+     * Shizuku 卡片的渲染回调（bindShizukuCard 里捕获视图后存入）。
+     * 轮询 tick 统一走「assess → 写 state → 调它」；生命周期 ON_RESUME 重启轮询
+     * 时也复用同一份回调 —— 2026-10-17 BS 实测教训：ON_RESUME 的 startShizukuPoll
+     * 会 remove 掉绑定时 post 的带渲染任务，若渲染只挂在那个任务上，卡片永远
+     * 停在 XML 原始态（文字空 / 按钮 GONE）。
+     */
+    var shizukuRender: ((ShizukuPhase) -> Unit)? = null
+
+    /** 生命周期钩子已挂标记（每实例一份：Activity 重建后 lifecycle 是新实例，必须重挂）。 */
+    var lifecycleHooked = false
+
     /** 监视区渲染态。 */
     var vdState: VdUiState = VdUiState.STANDBY
 
@@ -303,6 +316,9 @@ private class BgUiState {
 
     /** 预览刷新轮询任务（M4 占位骨架，随绑定起）。 */
     var previewPoll: Runnable? = null
+
+    /** ★ #310/M6-audit：当前后台会话（帧源在 app 进程；起扫装配与预览都取它）。 */
+    var bgSession: com.bettergi.pocket.vd.BackgroundSession? = null
 }
 
 private val bgUiStates = java.util.WeakHashMap<MainActivity, BgUiState>()
@@ -344,10 +360,22 @@ internal fun MainActivity.bindRunModeSection() {
         val mode = if (checkedId == R.id.rb_mode_background) RunMode.BACKGROUND else RunMode.FOREGROUND
         repo.setRunMode(mode)
         applyVisibility(mode)
+        // ★ #311：切后台 = 收悬浮窗（后台模式无悬浮窗）；切前台 = 显示回来。
+        if (mode == RunMode.BACKGROUND) {
+            com.bettergi.pocket.bridge.OverlayBridge(this).collapse()
+        } else {
+            showOverlayIfForeground()
+        }
         NoticeCenter.info(
             if (mode == RunMode.BACKGROUND) "已切换到后台模式（虚拟显示器 + Shizuku 提权）" else "已切换到前台模式",
         )
     }
+}
+
+/** 悬浮窗显示（前台模式专用路径；★ #311 runMode 守卫在 service 侧 showOverlayIfForeground）。 */
+internal fun MainActivity.showOverlayIfForeground() {
+    if (TriggerSettingsRepository.app(this).get().runMode == RunMode.BACKGROUND) return
+    runCatching { com.bettergi.pocket.bridge.OverlayBridge(this).show() }
 }
 
 /**
@@ -402,6 +430,14 @@ internal fun MainActivity.bindShizukuCard() {
         }
     }
 
+    // 渲染回调存进 [bgState]（startShizukuPoll 统一调它；生命周期 ON_RESUME 重启
+    // 轮询时复用同一份 —— 见 BgUiState.shizukuRender 的教训注释），这里只负责
+    // 捕获视图 + 分派点击。READY 时顺带显出 vd_monitor（可见性与卡片同拍刷新）。
+    bgState().shizukuRender = { phase ->
+        render(phase)
+        refreshMonitorVisibility()
+    }
+
     btn.setOnClickListener {
         // 按钮语义由"最近一次轮询到的 phase"决定（渲染与点击之间状态可能再变，
         // 以轮询快照为准比以按钮文案为准更不撒谎 —— 文案就是那轮快照渲染的）。
@@ -412,25 +448,23 @@ internal fun MainActivity.bindShizukuCard() {
             else -> Unit // READY 时按钮已 GONE，防御性 no-op
         }
     }
-
-    startShizukuPoll { phase ->
-        bgState().shizukuPhase = phase
-        render(phase)
-    }
 }
 
 /**
  * 四态轮询的启动/停止：onResume 起、onPause 停（本页前台才轮询）。挂在 lifecycle
  * 事件上（[attachBgSectionLifecycle] 注册一次），重复调用先摘旧任务防双跑。
- * M4 简化：onResume 不主动补拍 —— 绑定时的首拍已经覆盖"进页面"场景。
+ * 渲染回调取自 [bgState]（bindShizukuCard 存入）—— 生命周期重启轮询不会丢渲染
+ * （2026-10-17 BS 实测：绑定时 post 的带渲染任务会被 ON_RESUME 的重启顶掉）。
  */
-private fun MainActivity.startShizukuPoll(onPhase: (ShizukuPhase) -> Unit) {
+private fun MainActivity.startShizukuPoll() {
     val state = bgState()
     state.shizukuPoll?.let { mainPollHandler.removeCallbacks(it) }
     val task = object : Runnable {
         override fun run() {
             val phase = ShizukuState.assess(this@startShizukuPoll).phase
-            onPhase(phase)
+            state.shizukuPhase = phase
+            // 渲染回调存在才画（bindShizukuCard 未跑过的极端态下不画，卡片留原始态）
+            state.shizukuRender?.invoke(phase)
             mainPollHandler.postDelayed(this, SHIZUKU_POLL_INTERVAL_MS)
         }
     }
@@ -468,16 +502,13 @@ private fun MainActivity.stopPreviewPoll() {
  * 覆写 MainActivity.onResume/onPause —— 本文件是扩展函数集合，宿主文件不动（M4 纪律）。
  */
 private fun MainActivity.attachBgSectionLifecycle() {
-    if (bgLifecycleHooked) return
-    bgLifecycleHooked = true
+    val state = bgState()
+    if (state.lifecycleHooked) return
+    state.lifecycleHooked = true
     lifecycle.addObserver(LifecycleEventObserver { _, event ->
         when (event) {
             Lifecycle.Event.ON_RESUME -> {
-                startShizukuPoll { phase ->
-                    bgState().shizukuPhase = phase
-                    // phase 变化时若监视区已渲染，顺带刷新其可见性（READY ⇒ 显出 vd_monitor）
-                    refreshMonitorVisibility()
-                }
+                startShizukuPoll()
                 startPreviewPoll()
             }
             Lifecycle.Event.ON_PAUSE -> {
@@ -488,9 +519,6 @@ private fun MainActivity.attachBgSectionLifecycle() {
         }
     })
 }
-
-/** lifecycle 挂钩的幂等标记（进程级，Activity 重建后 lifecycle 是新实例，重挂无害）。 */
-private var bgLifecycleHooked = false
 
 /** 四态最新值驱动 vd_monitor 的显隐（READY 才显；与 bindVdMonitor 首绑共用一份逻辑）。 */
 private fun MainActivity.refreshMonitorVisibility() {
@@ -622,12 +650,15 @@ internal fun MainActivity.bindVdMonitor() {
         startVdChain(::render)
     }
     btnStop.setOnClickListener {
-        // M4：不做会话收尾（M5）。service() 在或不在都只是"不盯了"。
-        val svc = BgiRemoteManager.service()
-        android.util.Log.i(
-            "BetterGI.VD",
-            "关闭虚拟屏（M4 不 destroy）：remote=${svc != null}，状态回待机",
-        )
+        // ★ #310/M6-audit：真正收尾——停帧源 + 服务端 destroyDisplay + 清进程级会话。
+        //   （M4 的"只落日志不 destroy"语义作废：装配接线后会话被起扫消费，必须真收。）
+        runCatching {
+            bgState().bgSession?.stop()
+            BackgroundSession.current?.stop()
+        }.onFailure { android.util.Log.w("BetterGI.VD", "stop session failed", it) }
+        BackgroundSession.clear()
+        bgState().bgSession = null
+        bgState().vdDisplayId = -1
         bgState().vdState = VdUiState.STANDBY
         render()
     }
@@ -679,27 +710,27 @@ private fun MainActivity.startVdChain(render: () -> Unit) {
                 if (svc == null) {
                     failure = "远程服务握手未完成（binder 为空），请重试"
                 } else {
-                    // ④ createDisplay → displayId
-                    val id = runCatching { withContext(Dispatchers.IO) { svc.createDisplay() } }
-                        .onFailure { android.util.Log.w("BetterGI.VD", "createDisplay failed", it) }
-                        .getOrDefault(-1)
-                    if (id < 0) {
-                        failure = "虚拟屏创建失败（displayId=-1）"
+                    // ★ #310/M6-audit：改用 BackgroundSession——app 进程建 ImageReader（帧源），
+                    //   Surface 经 AIDL 给服务进程建 VD ⇒ 扫描引擎直接吃 VD 帧（零跨进程传输）。
+                    //   旧路径 svc.createDisplay()（服务端自建 Surface）保留给纯预览场景。
+                    //   ★ BS 实测修复（2026-10-17）：install() 必须调 —— companion.current 是
+                    //   起扫装配（TriggerForegroundService.assemblyResolver）的取用面，只存
+                    //   bgState()（本页 WeakHashMap）的话 current 永远 null ⇒ 后台起跑闸
+                    //   「session=null」静默拒绝起扫（实测日志：后台起跑闸：scanEnabled=true session=null）。
+                    val s = BackgroundSession().also {
+                        bgState().bgSession = it
+                        BackgroundSession.install(it)
+                    }
+                    val fail = withContext(Dispatchers.IO) { s.start() }
+                    if (fail == null) {
+                        state.vdDisplayId = s.displayId
+                        state.vdState = VdUiState.RUNNING
+                        NoticeCenter.info("虚拟屏已启动（displayId=${s.displayId}），原神已发上屏")
                     } else {
-                        state.vdDisplayId = id
-                        android.util.Log.i("BetterGI.VD", "虚拟屏已建 displayId=$id")
-                        // ⑤ startAppOnDisplay(原神)
-                        val launched = runCatching {
-                            withContext(Dispatchers.IO) { svc.startAppOnDisplay(BG_GAME_PACKAGE, id) }
-                        }.onFailure { android.util.Log.w("BetterGI.VD", "startAppOnDisplay failed", it) }
-                            .getOrDefault(false)
-                        if (launched) {
-                            state.vdState = VdUiState.RUNNING
-                            NoticeCenter.info("虚拟屏已启动（displayId=$id），原神已发上屏")
-                        } else {
-                            state.vdState = VdUiState.PENDING
-                            failure = "虚拟屏已建（displayId=$id）但原神启动未受理"
-                        }
+                        state.vdState = VdUiState.PENDING
+                        failure = fail
+                        s.stop()
+                        state.bgSession = null
                     }
                 }
             } else {
@@ -746,16 +777,13 @@ private suspend fun MainActivity.awaitRemoteConnected(timeoutMs: Long): Boolean 
  * - fps 同拍顺带：`getGameFps()` → "N fps"（-1 = 尚无样本，显示 "-- fps"）。
  */
 private fun MainActivity.refreshPreview() {
-    val svc = BgiRemoteManager.service() ?: return // 未连接：保持占位，不动 UI
+    // ★ #310/M6-audit：预览改从**扫描实际使用的 app 进程帧源**取（BackgroundSession），
+    //   不再走服务端自建 Surface 的 AIDL JPEG——两者是不同的 VD（服务端那个只服务纯预览，
+    //   装配接线后扫描用的是 app Surface 那条）。预览与扫描画面必须是同一块屏。
+    val session = bgState().bgSession ?: BackgroundSession.current ?: return
     pageScope.launch(Dispatchers.IO) {
-        val jpeg = runCatching { svc.capturePreviewJpeg() }
-            .onFailure { android.util.Log.w("BetterGI.VD", "capturePreviewJpeg failed", it) }
-            .getOrNull()
-        val bmp = jpeg?.takeIf { it.isNotEmpty() }?.let { bytes ->
-            runCatching { android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
-                .getOrNull()
-        }
-        val fps = runCatching { svc.getGameFps() }.getOrDefault(-1)
+        val bmp = session.previewBitmap()
+        val fps = session.fpsEstimate()
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
             val preview = findViewById<android.widget.ImageView?>(R.id.vd_preview)
             val hint = findViewById<TextView?>(R.id.vd_preview_hint)
@@ -763,9 +791,8 @@ private fun MainActivity.refreshPreview() {
                 preview?.setImageBitmap(bmp)
                 hint?.text = "预览"
             } else {
-                // 预览不可用：清掉旧帧（防止显示陈旧画面假装活着）+ 文案明示
                 preview?.setImageBitmap(null)
-                hint?.text = "预览不可用（虚拟屏未出帧或服务未建显示器）"
+                hint?.text = "预览不可用（虚拟屏未出帧）"
             }
             findViewById<TextView?>(R.id.vd_fps_text)?.text =
                 if (fps >= 0) "$fps fps" else "-- fps"
@@ -868,6 +895,26 @@ internal fun MainActivity.scriptRow(e: ScriptStore.Entry): android.view.View {
             )
         })
     })
+    // ★ #311（2026-10-18）：行内「开始/停止」——后台模式的**页面发射口**（后台不开悬浮窗，
+    //   悬浮面板的 ▶ 不可达）。前台模式同样可用（点页面开始 = 设 scanFlow+scanEnabled）。
+    //   按钮态由 renderAll → renderScriptRows 重绘（scanStateWatcher 在扫描起止时触发 renderGoodSection，
+    //   这里额外把行也刷了——见 watchScanState 的回调）。
+    val running = e.key == TriggerSettingsRepository.app(this).get().scanFlow &&
+        TriggerSettingsRepository.app(this).get().scanEnabled
+    row.addView(android.widget.TextView(this).apply {
+        text = if (running) "停止" else "开始"
+        textSize = 14f
+        setTextColor(
+            ContextCompat.getColor(
+                activity(),
+                if (running) R.color.overlay_notice_bar_error else R.color.overlay_gold,
+            ),
+        )
+        setPadding(dp(10), dp(6), dp(10), dp(6))
+        background = ContextCompat.getDrawable(activity(), R.drawable.bg_pocket_card_outline)
+        setOnClickListener { scriptRowAction(e, running) }
+        layoutParams = android.widget.LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) }
+    })
     row.addView(android.widget.Switch(this).apply {
         isChecked = e.enabled
         setOnCheckedChangeListener { _, checked ->
@@ -876,6 +923,36 @@ internal fun MainActivity.scriptRow(e: ScriptStore.Entry): android.view.View {
         }
     })
     return row
+}
+
+/**
+ * 行内动作分派（★ #311）：running = 停（`setScanEnabled(false)`，ScriptRunner 收 stopName
+ * 收尾+导出，前台后台通用）；else = 发射。
+ *
+ * 发射 = `OverlayScriptRows.startScan`（悬浮面板版）的**页面版**：同样的三步
+ * （flow + scanEnabled + 前台才设投影），同样的后台不碰投影守卫 —— 两处语义必须保持
+ * 一致（KDoc 互指）。发射前无障碍自检（DefaultAccessibilityInputGate，与悬浮面板同款）。
+ * 起跑由 settingsListener 的 scanGate 接管（前台=投影就绪 / 后台=VD 会话健康）；
+ * 输入缺失等阻塞由 startFlowIfReady 里 NoticeCenter 提示。
+ */
+internal fun MainActivity.scriptRowAction(e: ScriptStore.Entry, running: Boolean) {
+    val repo = TriggerSettingsRepository.app(this)
+    if (running) {
+        repo.setScanEnabled(false)
+        return
+    }
+    repo.setScanFlow(e.key)
+    repo.setScanEnabled(true)
+    if (repo.get().runMode == com.bettergi.pocket.settings.RunMode.FOREGROUND &&
+        !repo.get().screenShareEnabled
+    ) {
+        repo.setScreenShareEnabled(true)
+    }
+    // 无障碍自检（后台模式同样依赖引擎的非 UI 依赖链，与悬浮面板同口径）
+    com.bettergi.pocket.input.DefaultAccessibilityInputGate.ensureEnabled(
+        this,
+        "请开启无障碍权限，才能模拟扫描点击",
+    )
 }
 
 /** 副标题 = 该脚本声明的动作 + 来源 + 校验问题（问题必须显示出来，不能静默丢）。 */
@@ -906,7 +983,9 @@ internal fun MainActivity.bindGoodSection() {
  */
 internal fun MainActivity.watchScanState() {
     if (scanStateWatcher != null) return          // 本页可被反复打开，只订阅一次
-    val w: (TriggerSettings) -> Unit = { if (managerShown) renderGoodSection() }
+    // ★ #311：行内「开始/停止」按钮态跟扫描起止当场变（renderAll 重建行）——
+    //   与 renderGoodSection（导出可用性）同拍刷新。
+    val w: (TriggerSettings) -> Unit = { if (managerShown) { renderGoodSection(); renderAll() } }
     scanStateWatcher = w
     TriggerSettingsRepository.app(this).addListener(w)
 }
