@@ -174,7 +174,11 @@ internal suspend fun ScanEngine.runArtifactSteps(
         //   格循环里就被读，而流程体内的那次登记要到第 0 格 visit 才生效 ⇒ 从页 0 起算的值
         //   才是流程真正声明的那个（流程体内保留同值登记，由守卫静默跳过）。
         stopWhenRegisterDuplicateStreak(3, 1)
-        pagedGridNative(ArtifactFlow.GRID, pageSkipExpr = pageSkipExpr) { col, row, idx, prof ->
+        // ★ #312（2026-10-18 BS 全量实测）：**必须 scrollToTop** —— 背包列表跨会话保留滚动
+        //   位置，而 artifact_scan 又没有武器/锁定流程那种「排序钮两次点击回顶」。实测：上轮
+        //   停在 page43 后重跑，本次从**第 43 页位置**起扫 → 撞到「祝圣油膏」素材止扫，
+        //   扫 727/1002 漏 280（漏的正是排在前面的高等级件）。character_scan 早就传了 true。
+        pagedGridNative(ArtifactFlow.GRID, scrollToTop = true, pageSkipExpr = pageSkipExpr) { col, row, idx, prof ->
             runVisitBody(ArtifactFlow.GRID, col, row, idx, prof, ArtifactFlow.EMIT, ArtifactFlow.STOP_DUP) { ctx ->
                 // ① 止扫登记（留在生产者；§12.1）
                 stopWhenRegisterDuplicateStreak(3, 1)

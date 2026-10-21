@@ -32,6 +32,16 @@ class VdInjectActionGateway(
         private const val TAG = "BetterGI.VD"
         /** 点击按压时长 ms（对齐 a11y 版 tap 的 100ms 语义）。 */
         private const val TAP_DOWN_MS = 100L
+        /** 分步滑动的 MOVE 步长 px（每步一次注入事件，60fps 合成节奏的位移量）。 */
+        private const val MOVE_STEP_PX = 24
+        /** 分步滑动步数上限。 */
+        private const val MOVE_STEPS_MAX = 60
+        /** 分步滑动的步间停留 ms（16ms ≈ 60fps 一拍）。 */
+        private const val MOVE_STEP_MS = 16L
+        /** 格点击的最小按压时长 ms（对齐前台的 `durationMs.coerceAtLeast(120L)`）。 */
+        private const val MIN_CLICK_MS = 120L
+        /** 格点击的微滑位移 px（对齐前台 clickLocal 的 2px 微滑）。 */
+        private const val CLICK_MICRO_PX = 2
     }
 
     init {
@@ -73,21 +83,102 @@ class VdInjectActionGateway(
         // 后台模式无悬浮窗穿透概念——空操作（KDoc 见 ScanEngine.ActionGateway）。
     }
 
-    /** 单指 tap：`input -d N tap x y`（系统原生 100ms 节奏）。 */
+    /**
+     * 单指 tap：**进程内优先**，失败回退 exec。
+     *
+     * ★ 2026-10-18 根因研究定稿（BS 实测完整证据链）：
+     * - 长期误判「进程内注入不落地」的**真因是多指 obtain 重载坐标被清零**
+     *   （dumpsys input RecentQueue 里 `pointers=[0: (0.0, 0.0)]`，而 exec 的是真实坐标）。
+     *   InjectPlanner 改走**单点标量 14 参 obtain**（反射选中）后，进程内注入立即在 VD 上
+     *   落地（BS 实测：点「点击进入」成功把游戏从标题屏送进世界）。
+     * - 另一条独立教训（主屏自点场景）：WAIT_FOR_FINISH 若从**被点的那个 UI 进程**发起，
+     *   会自己等自己 → 5s ANR → 系统 CANCEL。生产路径（服务进程点另一个进程的游戏）
+     *   不受影响；跨进程注入必须保持在下游进程里发起，别在主线程调。
+     */
     override fun tap(x: Int, y: Int): Boolean =
-        execInput("tap", x.toString(), y.toString()) || execFallbackTap(x, y)
+        inProcTap(x, y) || execInput("tap", x.toString(), y.toString()) || execFallbackTap(x, y)
 
-    override fun click(x: Int, y: Int, durationMs: Long): Boolean =
-        execInput("swipe", x.toString(), y.toString(), x.toString(), y.toString(),
-            durationMs.coerceIn(80, 2000).toString()) ||
-            execFallbackTap(x, y)
+    /** 进程内 tap：DOWN（同步）→ 100ms → UP。坐标由 InjectPlanner 单点重载保留。 */
+    private fun inProcTap(x: Int, y: Int): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val planner = InjectPlanner()
+        val down = planner.planDown(0, 0, x.toFloat(), y.toFloat(), now)
+        var ok = true
+        for (p in down) ok = VdInput.injectPlanned(p, displayId, planner) && ok
+        if (!ok) return false
+        Thread.sleep(TAP_DOWN_MS)
+        val up = planner.planUp(0, x.toFloat(), y.toFloat(), now + TAP_DOWN_MS)
+        for (p in up) ok = VdInput.injectPlanned(p, displayId, planner) && ok
+        if (!ok) planner.onInjectFailed(down.first())
+        return ok
+    }
 
-    /** 整段滑动：`input -d N swipe x1 y1 x2 y2 duration`（系统合成轨迹）。 */
-    override fun swipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean {
-        // 引擎默认滑动 ~780ms（swipeTotal）；input 原生 duration 参数直接对齐
+    /**
+     * 格点击（`ScanEngine.visitClick` 走这条；`tap()` 只给显式 tap 模式用）。
+     *
+     * ★ 2026-10-19 对齐前台（**第二个独立缺陷的修法**）：前台的 `clickLocal` 早就把点击
+     *   实现成「**2px 微滑 + ≥120ms 按压**」的 StrokeDescription，KDoc 写明理由（纯零位移
+     *   tap 在真机 + 原神背包详情面板切换上不可靠；adb tap 可切而 a11y 手势不行）。
+     *   而后台此前是「零位移 + 100ms」——**正是前台已判死的那种形态**。
+     *   实测对照：前台全量 1002/1002 零漏、后台漏 12，点击形态差异是主要嫌疑。
+     *   ⇒ 后台 click 改用同样的 2px 微滑 + ≥120ms，与前台形态对齐。
+     */
+    override fun click(x: Int, y: Int, durationMs: Long): Boolean {
+        val dur = durationMs.coerceAtLeast(MIN_CLICK_MS)
+        if (inProcClick(x, y, dur)) return true
+        // 回退：exec input swipe（带 2px 微滑；起终点不同 x，避免被合成成纯 tap）
         return execInput(
             "swipe",
-            fromX.toString(), fromY.toString(), toX.toString(), toY.toString(), "780",
+            x.toString(), y.toString(), (x + CLICK_MICRO_PX).toString(), y.toString(), dur.toString(),
+        ) || execFallbackTap(x, y)
+    }
+
+    /** 进程内格点击：DOWN → 2px 微滑 MOVE → 驻留至 duration → UP（对齐前台 clickLocal）。 */
+    private fun inProcClick(x: Int, y: Int, durationMs: Long): Boolean {
+        if (!VdInput.init()) return false
+        val planner = InjectPlanner()
+        val t0 = SystemClock.uptimeMillis()
+        val down = planner.planDown(0, 0, x.toFloat(), y.toFloat(), t0)
+        for (p in down) if (!VdInput.injectPlanned(p, displayId, planner)) {
+            planner.onInjectFailed(p)
+            return false
+        }
+        // 2px 微滑（前台同款）：让系统/游戏都识别为一次稳定触摸，而非可被判成拖拽的纯 tap
+        val moves = planner.planMove(
+            0, (x + CLICK_MICRO_PX).toFloat(), y.toFloat(), SystemClock.uptimeMillis(),
+        )
+        for (p in moves) VdInput.injectPlanned(p, displayId, planner)
+        val elapsed = SystemClock.uptimeMillis() - t0
+        val rest = (durationMs - elapsed).coerceAtLeast(0L)
+        if (rest > 0) Thread.sleep(rest)
+        val up = planner.planUp(
+            0, (x + CLICK_MICRO_PX).toFloat(), y.toFloat(), SystemClock.uptimeMillis(),
+        )
+        for (p in up) if (!VdInput.injectPlanned(p, displayId, planner)) return false
+        return true
+    }
+
+    /**
+     * 整段滑动：**exec `input swipe` + fling 距离压缩**（2026-10-18 全量对账定稿）。
+     *
+     * ★ 为什么不用进程内分步 MOVE（同日实测结论，别再走回头路）：
+     *   - exec `input swipe` 单段合成带 fling：名义 834px（3 行）实际滚 3.95 行 ⇒ 全量漏 27%。
+     *     用**距离压缩 0.7625**（834→636px）后实测 3.04 行/次、56 次到底，
+     *     圣遗物覆盖率 **94.8%（950/1002）**——这是目前最优基线。
+     *   - 进程内分步 MOVE（16ms/24px 步进 + 终点驻留）**理论上无抬手 fling**（前台
+     *     swipeThreeSegment 的等价物），且坐标清零 bug 修好后确实能在 VD 落地（本轮实测
+     *     「点标题屏进世界」成功）。但全量实测只到 **757 件**：分步的总时长更短
+     *     （560ms vs exec 780ms）⇒ 平均速度更高 ⇒ **游戏列表内建惯性反而更大**
+     *     （单次相位 φ=+129px vs exec 版 13~53px）。要用它必须重新标定步距/时长，
+     *     不是"无 fling 就一定准"。
+     *   - ⇒ 维持 exec+压缩为主通路；进程内 tap 仍是主通路（无 fork、坐标已修正）。
+     */
+    override fun swipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean {
+        val dy = toY - fromY
+        val compressedToY = fromY + (dy * 762L / 1000L).toInt()
+        return execInput(
+            "swipe",
+            fromX.toString(), fromY.toString(), toX.toString(), compressedToY.toString(), "780",
         )
     }
 

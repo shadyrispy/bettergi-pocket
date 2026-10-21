@@ -70,6 +70,12 @@ class VirtualDisplayFrameSource(
     @Volatile
     private var running = false
 
+    /** 动作新鲜度阈值的专属锁（与前台 FrameFreshnessBook 同语义，见 [markActionAt]）。 */
+    private val bookLock = Any()
+
+    /** 最近一次 [markActionAt] 时刻的代数快照（"动作前最后一帧"）。 */
+    private var actionThresholdNs = Long.MIN_VALUE
+
     private val listener = ImageReader.OnImageAvailableListener { r ->
         var img: Image? = null
         try {
@@ -188,8 +194,18 @@ class VirtualDisplayFrameSource(
     // ── FrameSource ──
 
     override suspend fun grabFresh(afterTimestampMs: Long, timeoutMs: Long): Mat {
-        // afterTimestampMs 是 SystemClock 基准 ms；本源 generation 也是 SystemClock 同源（×1_000）
-        val thresholdNs = afterTimestampMs * 1_000L
+        // ★ 2026-10-19 修（**后台漏件的真正根因**）：引擎调用恒为 `grabFresh(0L, …)`
+        //   （见 ScanGridDomain.grabFrameOrNull），阈值完全靠 [markActionAt] 记录。
+        //   本类此前 [markActionAt] 是空实现、且这里用 `afterTimestampMs * 1000 = 0` 判
+        //   `g > 0` ⇒ **恒真**：点击后立刻返回缓存帧，而那一瞬缓存常仍是**上一张卡的面板**
+        //   ⇒ 读到旧件 ⇒ contentKey 重复 ⇒ 被去重误杀 ⇒ 全量漏件（前台靠 FrameFreshnessBook
+        //   记阈值，无此问题）。此处改为与前台同语义：阈值 = markActionAt 时刻的代数快照，
+        //   取到"严格晚于该快照"的帧才算动作后新帧。
+        val thresholdNs = if (afterTimestampMs > 0L) {
+            afterTimestampMs * 1_000L
+        } else {
+            synchronized(bookLock) { actionThresholdNs }
+        }
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         while (SystemClock.uptimeMillis() < deadline) {
             val s = cached
@@ -202,8 +218,12 @@ class VirtualDisplayFrameSource(
         throw com.bettergi.pocket.capture.FrameTimeoutException(afterTimestampMs, timeoutMs)
     }
 
+    /**
+     * 动作时刻登记：阈值快照 = 当前代数（动作前最后一帧）→ 后续 [grabFresh] 取严格更新的帧。
+     * 与前台 `ProjectionFrameSource.markActionAt` 的 `FrameFreshnessBook.markAction()` 同语义。
+     */
     override fun markActionAt(timestampMs: Long) {
-        // 墙钟同源 ⇒ 无需簿记（见类 KDoc）。保留钩子：与前台版调用时序一致。
+        synchronized(bookLock) { actionThresholdNs = generation }
     }
 
     override fun newFreshnessScope(): FrameSource = this // 单消费者模式，无需隔离账本

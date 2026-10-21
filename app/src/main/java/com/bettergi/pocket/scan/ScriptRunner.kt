@@ -157,12 +157,14 @@ class ScriptRunner(
             return onActionDispatched(result != null && result.first)
         }
 
-        private fun onActionDispatched(ok: Boolean): Boolean {
-            // ★ #310/M6-audit：打点必须落在**本轮生效的帧源**上（后台=VD 源）——
-            //   写错源 ⇒ 该源的动作阈值不更新 ⇒ 引擎把动作前的旧帧当新帧。
-            if (ok) activeFrameSource.markActionAt(SystemClock.elapsedRealtime())
-            return ok
-        }
+        /**
+         * 动作派发结果回执。
+         *
+         * ★ 2026-10-19：**帧新鲜度打点已上移到 [timedActions]**（前台/后台共用层）——
+         *   此前只有这里（前台 a11y 链）打点，后台走 `activeActions` 永远不打
+         *   ⇒ VD 帧源阈值失效 ⇒ 点击后读到旧面板 ⇒ 全量漏件。本函数只剩返回回执。
+         */
+        private fun onActionDispatched(ok: Boolean): Boolean = ok
 
         private fun scheduleRestorePassthrough(needed: Boolean, gestureMs: Long) {
             if (!needed) return
@@ -209,6 +211,12 @@ class ScriptRunner(
                 ok = actions.click(x, y, durationMs)
                 return ok
             } finally {
+                // ★ 2026-10-19：动作新鲜度登记必须在**前台/后台共用**的这一层做。
+                //   原先只有前台 `a11yActions` 内部会调 `frameSource.markActionAt`，
+                //   后台（VD）装配走 `activeActions`，那条链**从来不打点** ⇒ VD 帧源的
+                //   动作阈值永远是初始值 ⇒ 点击后立刻返回缓存帧（常是上一张卡的面板）
+                //   ⇒ 读到旧件 ⇒ 被去重误杀 ⇒ 全量漏件。提到本层后两模式语义一致。
+                if (ok) activeFrameSource.markActionAt(SystemClock.elapsedRealtime())
                 PerfProbe.addClick(System.nanoTime() - t0, ok)
             }
         }
@@ -220,15 +228,19 @@ class ScriptRunner(
                 ok = actions.tap(x, y)
                 return ok
             } finally {
+                if (ok) activeFrameSource.markActionAt(SystemClock.elapsedRealtime())
                 PerfProbe.addClick(System.nanoTime() - t0, ok)
             }
         }
 
         override fun swipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean {
             val t0 = System.nanoTime()
+            var ok = false
             try {
-                return actions.swipe(fromX, fromY, toX, toY)
+                ok = actions.swipe(fromX, fromY, toX, toY)
+                return ok
             } finally {
+                if (ok) activeFrameSource.markActionAt(SystemClock.elapsedRealtime())
                 PerfProbe.addSwipe(System.nanoTime() - t0)
             }
         }

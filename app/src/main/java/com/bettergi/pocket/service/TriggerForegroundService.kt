@@ -397,33 +397,17 @@ class TriggerForegroundService : Service() {
                 Log.i(TAG, "debug set cell click: mode=$mode ⇒ ${ClickModeOverrides.summary()}")
             }
             ACTION_DEBUG_VD_TAP -> {
-                // ★ 诊断通路：与引擎完全同一注入链（BackgroundSession.actions.tap）点 VD。
-                //   用于分辨「引擎事件参数问题」vs「VD 窗口焦点问题」——adb input -d 生效
-                //   而引擎点击不动画面时（2026-10-18 BS），点一下立刻见分晓。
-                //   mode="async" = 绕过 planner 全 ASYNC 注入（adb input 同款），对照
-                //   WAIT_FOR_FINISH 是否是引擎点击不落地的死因。
+                // 诊断通路：与引擎**完全同一注入链**（BackgroundSession.actions.tap）点 VD。
+                // 用途：分辨「注入参数问题」vs「窗口/时序问题」——点一下立刻见分晓。
+                // ⚠️ 2026-10-18 根因研究后**刻意精简**：曾短暂存在 tap0/mainproc/async/inproc
+                //    四个二分实验分支，用于定位"进程内注入不落地"。结论已定（真因是多指
+                //    MotionEvent.obtain 重载坐标被清零，见 InjectPlanner KDoc），分支全部删除
+                //    ——留着只会让后来人以为这些模式还有语义。要复现实验读 git 历史。
                 val x = intent.getIntExtra(EXTRA_X, -1)
                 val y = intent.getIntExtra(EXTRA_Y, -1)
-                val mode = intent.getStringExtra("mode") ?: "engine"
                 val session = com.bettergi.pocket.vd.BackgroundSession.current
                 if (session == null || x < 0) {
                     Log.w(TAG, "debug vd tap: session=${session != null} x=$x y=$y ⇒ 无法执行")
-                } else if (mode == "async") {
-                    // 全 ASYNC 对照（adb input 同款）：绕过 planner 槽位，直接 Planned 工厂
-                    // 构造 DOWN(ASYNC)+UP，经 VdInput.injectPlanned（内含 setDisplayId + recycle）。
-                    val now = android.os.SystemClock.elapsedRealtime()
-                    val down = com.bettergi.pocket.vd.InjectPlanner.Planned
-                        .down(0, 0, x.toFloat(), y.toFloat(), now, async = true)
-                    var ok = com.bettergi.pocket.vd.VdInput.injectPlanned(
-                        down, session.displayId, com.bettergi.pocket.vd.InjectPlanner(),
-                    )
-                    Thread.sleep(100)
-                    val up = com.bettergi.pocket.vd.InjectPlanner.Planned
-                        .up(0, 0, x.toFloat(), y.toFloat(), now, now + 100)
-                    ok = com.bettergi.pocket.vd.VdInput.injectPlanned(
-                        up, session.displayId, com.bettergi.pocket.vd.InjectPlanner(),
-                    ) && ok
-                    Log.i(TAG, "debug vd tap(async): ($x,$y) display ${session.displayId} ⇒ ok=$ok")
                 } else {
                     val ok = session.actions.tap(x, y)
                     Log.i(TAG, "debug vd tap: ($x,$y) on display ${session.displayId} ⇒ ok=$ok")

@@ -137,11 +137,39 @@ class InjectPlanner {
                     size = 1f
                 },
             )
-            val ev = MotionEvent.obtain(
-                downTime, eventTime, mask, 1, props, coords,
-                0, 0, 1f, 1f, /*deviceId*/ 0, 0,
-                InputDevice.SOURCE_TOUCHSCREEN, 0,
-            )
+            // ★ 2026-10-18 根因修复（BS 实测，dumpsys input RecentQueue 抓到的证据）：
+            //   多指重载 obtain(..., pointerCount, props, coords, ...) 在 BS 上**坐标被清零**
+            //   （事件确实进 RecentQueue、policyFlags/时间戳都正常，但 `pointers=[0: (0.0, 0.0)]`）
+            //   ⇒ 点击/滑动全部落在屏幕左上角，表现为"注入受理（ret=true）但毫无效果"。
+            //   而 adb `input` 命令的事件坐标正常 —— 长期被误判成"进程内注入不落地/被丢弃"。
+            //   改用**单点标量 14 参 obtain**（Kotlin 重载解析会绑到多指版，故用反射显式选取）
+            //   后，进程内注入在 VD 上立即落地（实测：点「点击进入」把游戏从标题屏送进世界）。
+            val pressure = if (mask == MotionEvent.ACTION_UP || mask == MotionEvent.ACTION_CANCEL) 0f else 1f
+            val ev: MotionEvent = runCatching {
+                val m = MotionEvent::class.java.getMethod(
+                    "obtain",
+                    java.lang.Long.TYPE, java.lang.Long.TYPE, java.lang.Integer.TYPE,
+                    java.lang.Float.TYPE, java.lang.Float.TYPE,
+                    java.lang.Float.TYPE, java.lang.Float.TYPE,
+                    java.lang.Integer.TYPE, java.lang.Float.TYPE, java.lang.Float.TYPE,
+                    java.lang.Integer.TYPE, java.lang.Integer.TYPE,
+                    java.lang.Integer.TYPE, java.lang.Integer.TYPE,
+                )
+                m.invoke(
+                    null,
+                    downTime, eventTime, mask,
+                    x, y, pressure, 1f,
+                    0, 1f, 1f,
+                    0, 0,
+                    InputDevice.SOURCE_TOUCHSCREEN, 0,
+                ) as MotionEvent
+            }.getOrElse {
+                // 兜底：多指重载（坐标在部分 ROM 上会清零，但至少不崩）
+                MotionEvent.obtain(
+                    downTime, eventTime, mask, 1, props, coords,
+                    0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0,
+                )
+            }
             // 反射 setDisplayId 在调用方（InputManager wrapper）做——保持本类零反射可单测
             return ev
         }

@@ -36,6 +36,10 @@ object VdInput {
     @Volatile
     private var setDisplayIdMethod: java.lang.reflect.Method? = null
 
+    /** `injectInputEventToTarget(event, mode, targetUid)`（@hide，shell 命令同款）。 */
+    @Volatile
+    private var injectToTargetMethod: java.lang.reflect.Method? = null
+
     /** 初始化反射（提权进程启动后调一次；失败打日志，后续 inject 返回 false）。 */
     fun init(): Boolean {
         try {
@@ -48,6 +52,15 @@ object VdInput {
             setDisplayIdMethod = InputEvent::class.java.getDeclaredMethod(
                 "setDisplayId", Int::class.javaPrimitiveType,
             )
+            // ★ 2026-10-18 根因研究：`input` shell 命令走的是 injectInputEventToTarget
+            //   （带 targetUid），两参 injectInputEvent 在 A13 上对**非自身 uid 的窗口**
+            //   只投不达（ret=true 立即返回）。优先用它。
+            injectToTargetMethod = runCatching {
+                imClass.getDeclaredMethod(
+                    "injectInputEventToTarget",
+                    InputEvent::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+                )
+            }.getOrNull()
             Log.i(TAG, "vd input reflection ok (api=${Build.VERSION.SDK_INT})")
             return true
         } catch (e: Throwable) {
@@ -95,10 +108,29 @@ object VdInput {
     fun inject(event: InputEvent, async: Boolean): Boolean {
         val im = inputManagerInstance ?: return false
         val m = injectMethod ?: return false
+        val t0 = android.os.SystemClock.uptimeMillis()
         return runCatching {
-            m.invoke(im, event, if (async) MODE_ASYNC else MODE_WAIT_FOR_FINISH) == true
+            val mode = if (async) MODE_ASYNC else MODE_WAIT_FOR_FINISH
+            // ★ 优先 injectInputEventToTarget（input 命令同款，带 targetUid=-1=不限）：
+            //   A13 上两参 injectInputEvent 对非自身 uid 的窗口只投不达。
+            val tt = injectToTargetMethod
+            val r = if (tt != null) {
+                tt.invoke(im, event, mode, -1)
+            } else {
+                m.invoke(im, event, mode)
+            }
+            val elapsed = android.os.SystemClock.uptimeMillis() - t0
+            // ★ 2026-10-18 根因研究：把受理码与耗时都变成证据。injectInputEvent 返回 true 只
+            //   表示"系统受理"，WAIT_FOR_FINISH 模式下耗时应 >0（等 InputDispatcher 落完）；
+            //   若耗时≈0ms 且画面不动 ⇒ 事件被静默丢弃在更早的一层（权限/display 校验）。
+            Log.d(
+                TAG,
+                "injectInputEvent ret=$r mode=${if (async) "ASYNC" else "WAIT"} elapsed=${elapsed}ms " +
+                    "eventDisplay=${runCatching { event.javaClass.getMethod("getDisplayId").invoke(event) }.getOrDefault("?")}",
+            )
+            r == true
         }.getOrElse {
-            Log.w(TAG, "injectInputEvent failed: ${it.message}")
+            Log.w(TAG, "injectInputEvent failed: ${it.message}", it)
             false
         }
     }
