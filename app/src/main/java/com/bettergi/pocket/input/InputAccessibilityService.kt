@@ -5,8 +5,9 @@ import android.accessibilityservice.GestureDescription
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
 import android.graphics.Path
-import android.net.Uri
+import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -14,15 +15,26 @@ import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
-import android.widget.Toast
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.bettergi.pocket.bridge.A11yProtocol
 import com.bettergi.pocket.genshin.GenshinPackages
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class InputAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         instance = this
         Log.i(TAG, "accessibility service connected")
         notifyStateChanged()
+        // 2026-09-18 宿主迁移：登记悬浮窗运行时的宿主服务。**此处不上窗** ——
+        // 「什么时候显示」仍由主进程前台服务决定（收到 overlay_show 才构建控制器）。
+        com.bettergi.pocket.overlay.A11yOverlayRuntime.attachService(this, DefaultAccessibilityInputGate)
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -31,6 +43,10 @@ class InputAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        // ★ P3：BAL 探针是静态 View 持服务上下文 —— 服务销毁时把窗口摘下来并清引用，
+        //   否则窗口随 WindowManager 泄漏一个已销毁的 service 实例（探针本是一次性诊断设施）。
+        //   ⚠️ 必须在 clearInstance 之前：unmount 要用 instance 取 WindowManager。
+        unmountBalProbeOverlay()
         clearInstance()
         super.onDestroy()
     }
@@ -45,6 +61,8 @@ class InputAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     private fun clearInstance() {
+        // 无障碍断开 ⇒ 悬浮窗随之销毁（TYPE_ACCESSIBILITY_OVERLAY 的窗口活不过服务）
+        com.bettergi.pocket.overlay.A11yOverlayRuntime.detachService()
         if (instance === this) {
             instance = null
             lastAppPackage = null
@@ -61,15 +79,43 @@ class InputAccessibilityService : AccessibilityService() {
         const val DEFAULT_PROMPT = "请开启无障碍权限，才能模拟点击"
         const val CRASHED_PROMPT = "无障碍服务已异常，请先关闭再重新打开"
         const val ACTION_STATE_CHANGED = "com.bettergi.pocket.action.ACCESSIBILITY_CHANGED"
-        private const val AUTHORITY_SUFFIX = ".a11y"
-        private const val METHOD_STATUS = "status"
-        private const val METHOD_CLICK = "click"
+        // 工单 D：authority 后缀 / method 名收口到 bridge/A11yProtocol（值逐字不变），
+        // 本类只 import；Bundle 键仍留此处（与 handleBridgeCall 同文件成对维护）。
+        private const val KEY_MOUNT_OVERLAY = "mount_overlay"
+        private const val KEY_TEXT = "text"
         private const val KEY_CONNECTED = "connected"
         private const val KEY_LAST_PACKAGE = "last_package"
         private const val KEY_X = "x"
         private const val KEY_Y = "y"
+        private const val KEY_FROM_X = "from_x"
+        private const val KEY_FROM_Y = "from_y"
+        private const val KEY_TO_X = "to_x"
+        private const val KEY_TO_Y = "to_y"
+        private const val KEY_SEGMENTS = "segments"
+        private const val KEY_METHOD = "method"
         private const val KEY_DURATION = "duration"
         private const val KEY_OK = "ok"
+        // 三段无惯性滑动（scanner-app 真机验证值）→ §12.2 路标点链改造（2026-09-05）：
+        // 快滑 90% 拆 4 路×80ms → 缓速 10% 拆 3 路×120ms → 回退 1px×100ms（末速≈0），
+        // 事件密度与 uiauto 标定手势一致（行为确定 std≤4px，见 dsl/verify/emulator_validation/ 附2）。
+        private const val SWIPE_FAST_RATIO = 0.9f
+        private const val WP_FAST_STEPS = 2
+        private const val WP_FAST_MS = 160L
+        private const val WP_SLOW_STEPS = 2
+        private const val WP_SLOW_MS = 180L
+        private const val WP_BACK_MS = 100L
+
+        /** 三段式滑动（对齐 irminsul/genshin-scanner-app 已验证）：段1 快滑 90%/400ms
+         *  → 段2 缓速 10%/300ms（到终点+1px）→ 段3 回退 1px/100ms（末速≈0 无 fling）。 */
+        private const val THREE_SEG_MAIN_MS = 400L
+        private const val THREE_SEG_CRAWL_MS = 300L
+        private const val THREE_SEG_DWELL_MS = 100L
+
+        /** 三段总时长（passthrough 恢复延时等外部引用；唯一事实源防漂移）。 */
+        // ⚠️ 2026-09-11：改为跟随 TimingOverrides（三段时长可 adb 覆盖）；
+        //    passthrough 恢复延时引用了它 ⇒ 覆盖时两者自动保持同步（原为编译期常量）。
+        val SWIPE_TOTAL_MS: Long
+            get() = com.bettergi.pocket.scan.TimingOverrides.swipeTotalMs
         private const val BIND_GRACE_MS = 2000L
         private const val BIND_POLL_MS = 250L
 
@@ -92,6 +138,30 @@ class InputAccessibilityService : AccessibilityService() {
             "com.android.permissioncontroller",
             "com.google.android.permissioncontroller",
         )
+
+        /**
+         * ★ 2026-09-26：**前台包名闸门** —— 只有前台是原神时才允许注入点击/滑动/返回。
+         *
+         * 动机是一次真实事故：小米 15 上扫描起跑前游戏并不在前台，一次盲点 (1600,720) 直接打开了
+         * **短信会话页**（`com.android.mms`）⇒ 在用户的私人 app 上乱点是绝对不可接受的副作用。
+         *
+         * 判据取 [lastAppPackage]（由 [onAccessibilityEvent] 跟 `TYPE_WINDOW_STATE_CHANGED` 维护），
+         * 它刻意跳过自身与 [TRANSIENT_PACKAGES]（系统弹窗/权限页/设置）⇒ 弹层不会把闸门误关掉。
+         * `lastAppPackage == null`（服务刚起来、还没收到任何窗口切换事件）⇒ **放行**：这种"未知"只可能
+         * 出现在扫描刚开始、游戏已在前台的场景，拦它会把整条流程变成全 `ok=false`。
+         *
+         * 调试/A-B 想绕过：把本开关置 false（产线默认开）。
+         */
+        @Volatile
+        var requireGenshinForeground = true
+
+        private fun allowInject(op: String): Boolean {
+            if (!requireGenshinForeground) return true
+            val pkg = lastAppPackage
+            if (pkg == null || GenshinPackages.isGenshinPackage(pkg)) return true
+            Log.w(TAG, "$op 被前台闸门拦下：前台=$pkg（不是原神 ⇒ 拒绝注入，避免误点其它 app）")
+            return false
+        }
 
         fun attach(context: Context) {
             appContext = context.applicationContext
@@ -157,7 +227,12 @@ class InputAccessibilityService : AccessibilityService() {
         fun ensureEnabled(context: Context, message: String = DEFAULT_PROMPT): Boolean {
             if (isConnected()) return true
             val prompt = if (isEnabledInSettings(context)) CRASHED_PROMPT else message
-            Toast.makeText(context, prompt, Toast.LENGTH_LONG).show()
+            // 提醒走唯一通路；无障碍未配好时什么都用不了，但也不该反复弹 ⇒ 用 onceKey 只提示一次
+            com.bettergi.pocket.notice.NoticeCenter.post(
+                com.bettergi.pocket.notice.NoticeCenter.Level.WARN,
+                prompt,
+                onceKey = "a11y_enable_hint",
+            )
             openSettings(context)
             return false
         }
@@ -187,6 +262,20 @@ class InputAccessibilityService : AccessibilityService() {
             recoverCheck = null
         }
 
+        /**
+         * 派发一次点击。
+         *
+         * ⚠️ 返回 `false` 有**两种完全不同的含义**（2026-09-12 实测定性，勿混淆）：
+         *  ① 无障碍未启用 / 未连接 —— 正常的拒绝；
+         *  ② **僵尸实例**：APK `install -r` 覆盖安装后 `:a11y` 进程**没有换代**，静态 `instance`
+         *     仍然非空（`isConnected()` 返回 true，**假阳性**），但框架侧的
+         *     AccessibilityServiceConnection 仍指向**已被替换掉的旧 APK 路径**
+         *     （旁证：`logcat | grep "Failed to open APK"` 有 I/O error）⇒ `dispatchGesture` 恒 false。
+         *     症状极易误判：所有 click `ok=false`，流程表现为「returnToHome 8 次未达主界面」
+         *     +「anchor mismatch: ''」（OCR 读到空）+「chainEntry click ok=false」。
+         *     解药 = **让进程换代**：`am force-stop` 后重启（⚠️ **toggle a11y 开关无效**，
+         *     实测进程 PID 不变）。一键脚本：`dsl/scripts/bs_reauth.sh`。
+         */
         fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean {
             if (instance != null) return clickLocal(x, y, durationMs)
             val extras = Bundle().apply {
@@ -194,16 +283,115 @@ class InputAccessibilityService : AccessibilityService() {
                 putInt(KEY_Y, y)
                 putLong(KEY_DURATION, durationMs)
             }
-            return remoteCall(METHOD_CLICK, extras)?.getBoolean(KEY_OK, false) == true
+            return remoteCall(A11yProtocol.M_CLICK, extras)?.getBoolean(KEY_OK, false) == true
+        }
+
+        /**
+         * 纯 tap（零位移 stroke ~180ms）。char_popup 弹窗卡片把 2px 微滑识别为拖拽不切卡
+         * （equip18/19 实证 9 格全停首格；adb input tap 同坐标 9/9 切换）——零位移时游戏
+         * down/up 间距 0 → 识别为标准 click。
+         */
+        fun tap(x: Int, y: Int): Boolean {
+            if (instance != null) return tapLocal(x, y)
+            return click(x, y, 180L)
+        }
+
+        private fun tapLocal(x: Int, y: Int): Boolean {
+            if (!allowInject("tap")) return false
+            val service = instance ?: return false
+            val path = Path().apply {
+                moveTo(x.toFloat(), y.toFloat())
+                lineTo(x.toFloat(), y.toFloat())
+            }
+            val stroke = GestureDescription.StrokeDescription(path, 0, 180L)
+            val accepted = service.dispatchGesture(
+                GestureDescription.Builder().addStroke(stroke).build(), null, null,
+            )
+            Log.d(TAG, "tapLocal at ($x,$y) accepted=$accepted")
+            return accepted
+        }
+
+        /**
+         * 系统返回键（GLOBAL_ACTION_BACK）——扫描前清游戏每日弹窗（签到/物品过期等）。
+         * 游戏内返回键只关界面不退游戏，安全。
+         */
+        fun back(): Boolean {
+            if (instance != null) return backLocal()
+            return remoteCall(A11yProtocol.M_BACK, null)?.getBoolean(KEY_OK, false) == true
+        }
+
+        private fun backLocal(): Boolean {
+            if (!allowInject("back")) return false
+            return instance?.performGlobalAction(
+                android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK,
+            ) == true
+        }
+
+        /**
+         * 滑动。[segments] = 1 单段惯性放行；3 = 三段消惯性（对齐 scanner-app 已验证实现）：
+         * **逐段 dispatchGesture + callback 链**——continueStroke 的设计语义是分段派发，
+         * 三段塞同一 GestureDescription 一次 dispatch 会导致后续段不执行（真机"滑动不准"根因）。
+         * 段1 快滑 90%/400ms → 段2 缓速 10%/300ms 到终点+1px → 段3 回退 1px/100ms（末速≈0 无 fling）。
+         * 返回**是否受理**：只有 `segments<=1` 的单段分支给真值；多段分支（THREE_SEGMENT /
+         * waypoint）链是异步的，本函数**恒返回 true**（任务 #45）⇒ 真结果只在 [onDone] 回调里。
+         */
+        fun swipe(
+            fromX: Int,
+            fromY: Int,
+            toX: Int,
+            toY: Int,
+            durationMs: Long = 400L,
+            segments: Int = 3,
+            // 2026-09-14 改默认：WAYPOINT_CHAIN（5 段 continueStroke 链）实测不稳 ——
+            //   同设备同坐标连测：segments=1 帧差 27.99%、THREE_SEGMENT 28.03%，
+            //   而 WAYPOINT_CHAIN 仅 0.27%（5 段回调均 done ok=true 却完全不滚，间歇性，
+            //   疑与回调内 continueStroke 的续段时限/模拟器时序有关）⇒ 翻页间歇性 落地=0px。
+            //   三段式为同仓「对齐 irminsul/genshin-scanner-app 已验证实现」，末速≈0 精度更好。
+            method: SwipeMethod = SwipeMethod.THREE_SEGMENT,
+            onDone: ((Boolean) -> Unit)? = null,
+        ): Boolean {
+            if (instance != null) return swipeLocal(fromX, fromY, toX, toY, durationMs, segments, method, onDone)
+            val extras = Bundle().apply {
+                putInt(KEY_FROM_X, fromX)
+                putInt(KEY_FROM_Y, fromY)
+                putInt(KEY_TO_X, toX)
+                putInt(KEY_TO_Y, toY)
+                putLong(KEY_DURATION, durationMs)
+                putInt(KEY_SEGMENTS, segments)
+                // ★ #44：这条 extra 原来**没放** ⇒ 接收端 `parseMethod(null)` 落到 else 分支，
+                //   恒用 waypoint_chain —— 而本文件上面 `method` 形参的注释写着 waypoint_chain
+                //   "实测不稳（帧差仅 0.27%）、翻页间歇性落地=0px"、已在 2026-09-14 换成三段式。
+                // ⚠️ 这**不是**冷启动边角：清单里本服务声明了 `android:process=":a11y"`
+                //   （AndroidManifest.xml:98），扫描跑主进程 ⇒ `instance` 在主进程恒 null ⇒
+                //   **Bundle 这条路就是唯一的生产路径**。所以 09-14 那次"改默认"在真机上
+                //   从未生效过，历次扫描一直在用被换掉的那一种。
+                //   设备实证（2026-09-27 修后 3 页扫描）：`swipe3 段1 dispatch accepted=true`
+                //   出自 pid 11141（:a11y），而扫描在 pid 11166（主进程）—— 三段式只有
+                //   靠这条 extra 才能跨过进程桥，修前这条日志根本不会出现。
+                putString(KEY_METHOD, methodKey(method))
+            }
+            return remoteCall(A11yProtocol.M_SWIPE, extras)?.getBoolean(KEY_OK, false) == true
         }
 
         fun handleBridgeCall(method: String, extras: Bundle?): Bundle {
             return when (method) {
-                METHOD_STATUS -> Bundle().apply {
+                A11yProtocol.M_BACK -> Bundle().apply {
+                    putBoolean(KEY_OK, backLocal())
+                }
+                A11yProtocol.M_STATUS -> Bundle().apply {
                     putBoolean(KEY_CONNECTED, instance != null)
                     putString(KEY_LAST_PACKAGE, lastAppPackage)
                 }
-                METHOD_CLICK -> Bundle().apply {
+                A11yProtocol.M_SCAN_PROGRESS -> Bundle().apply {
+                    putBoolean(KEY_OK, pushScanProgressLocal(extras?.getString(KEY_TEXT) ?: ""))
+                }
+                A11yProtocol.M_PROBE -> Bundle().apply {
+                    putBoolean(KEY_OK, toggleProbeOverlay())
+                }
+                A11yProtocol.M_PROBE_BAL -> Bundle().apply {
+                    putBoolean(KEY_OK, probeBalLocal(extras?.getBoolean(KEY_MOUNT_OVERLAY, true) ?: true))
+                }
+                A11yProtocol.M_CLICK -> Bundle().apply {
                     putBoolean(
                         KEY_OK,
                         clickLocal(
@@ -213,7 +401,24 @@ class InputAccessibilityService : AccessibilityService() {
                         ),
                     )
                 }
-                else -> Bundle()
+                A11yProtocol.M_SWIPE -> Bundle().apply {
+                    putBoolean(
+                        KEY_OK,
+                        swipeLocal(
+                            extras?.getInt(KEY_FROM_X) ?: 0,
+                            extras?.getInt(KEY_FROM_Y) ?: 0,
+                            extras?.getInt(KEY_TO_X) ?: 0,
+                            extras?.getInt(KEY_TO_Y) ?: 0,
+                            extras?.getLong(KEY_DURATION, 400L) ?: 400L,
+                            extras?.getInt(KEY_SEGMENTS, 3) ?: 3,
+                            parseMethod(extras?.getString(KEY_METHOD)),
+                            null,
+                        ),
+                    )
+                }
+                // 悬浮窗相关指令全部转交运行时（2026-09-18 宿主迁移）：
+                // 主进程的 OverlayBridge 只发这一组方法名，方法表在 A11yOverlayRuntime 里维护。
+                else -> com.bettergi.pocket.overlay.A11yOverlayRuntime.handle(method, extras)
             }
         }
 
@@ -224,26 +429,657 @@ class InputAccessibilityService : AccessibilityService() {
         }
 
         private fun clickLocal(x: Int, y: Int, durationMs: Long): Boolean {
+            if (!allowInject("click")) return false
             val service = instance ?: return false
-            val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-            val stroke = GestureDescription.StrokeDescription(path, 0, durationMs.coerceAtLeast(1L))
+            // §真机标定：纯 tap（零位移 50ms）在华为 EMUI + 原神背包详情面板切换上不可靠
+            //（adb input tap 可切换，accessibility gesture 不切换）。改用 2px 微滑 + 120ms
+            // 按压，让系统与游戏都识别为一次稳定的触摸事件。
+            val path = Path().apply {
+                moveTo(x.toFloat(), y.toFloat())
+                lineTo((x + 2).toFloat(), y.toFloat())
+            }
+            val stroke = GestureDescription.StrokeDescription(
+                path,
+                0,
+                durationMs.coerceAtLeast(120L),
+            )
             val gesture = GestureDescription.Builder().addStroke(stroke).build()
-            return service.dispatchGesture(gesture, null, null)
+            // 负对照（run5）：点击**被取消**是有信号的（另一条手势/窗口抢占）。若停滞期间
+            // 点击既不取消、面板又不变 ⇒ 故障在"游戏收了事件但不处理"，不在派发层。
+            val accepted = service.dispatchGesture(
+                gesture,
+                callback { ok -> if (!ok) Log.w(TAG, "clickLocal **cancelled** at ($x,$y)") },
+                null,
+            )
+            Log.d(TAG, "clickLocal at ($x,$y) accepted=$accepted")
+            return accepted
         }
 
-        private fun remoteStatus(): Bundle? = remoteCall(METHOD_STATUS)
+        /**
+         * 三段消惯性滑动（对齐 scanner-app IrminsulAccessibilityService 已验证实现）：
+         * **逐段 dispatchGesture + GestureResultCallback 链**。段1 快滑 90% → 段2 缓速 10% 到
+         * 终点+1px → 段3 回退 1px 到终点（末速≈0，抬手无 fling，净位移精确）。
+         * 全程整像素，避免亚像素段间漂移。segments == 1 时退化为单段 stroke（惯性放行）。
+         */
+        private fun swipeLocal(
+            fromX: Int,
+            fromY: Int,
+            toX: Int,
+            toY: Int,
+            durationMs: Long,
+            segments: Int,
+            method: SwipeMethod,
+            onDone: ((Boolean) -> Unit)?,
+        ): Boolean {
+            if (!allowInject("swipe")) return false
+            val service = instance ?: return false
+            if (segments <= 1) {
+                val path = Path().apply {
+                    moveTo(fromX.toFloat(), fromY.toFloat())
+                    lineTo(toX.toFloat(), toY.toFloat())
+                }
+                val gesture = GestureDescription.Builder()
+                    .addStroke(
+                        GestureDescription.StrokeDescription(path, 0, durationMs.coerceAtLeast(1L)),
+                    )
+                    .build()
+                return service.dispatchGesture(gesture, callback(onDone), null)
+            }
+            // ★ #45：原来这里**无条件 `return true`**，把两条多段路径的真实受理结果丢掉 ⇒
+            //   日志里的 `accepted=true` / `visit cell(...) ok=true` 对三段式与路标链一律无意义
+            //   （只有 `segments <= 1` 那条返回了真的 dispatch 结果）。现在返回首段受理值：
+            //   整链是否闭合仍由 onDone 报，但至少"手势根本没被系统接走"这一步不再被伪装成成功。
+            return if (method == SwipeMethod.THREE_SEGMENT) {
+                swipeThreeSegment(service, fromX, fromY, toX, toY, onDone)
+            } else {
+                swipeWaypointChain(service, fromX, fromY, toX, toY, onDone)
+            }
+        }
+
+        /**
+         * 三段式滑动（对齐 irminsul/genshin-scanner-app 已验证实现）：3 路 continueStroke 链。
+         * 段1 快滑 90% → 段2 缓速 10%（越过终点 1px）→ 段3 回退 1px 精确落在终点（末速≈0 无 fling）。
+         *
+         * ★ #83（2026-09-27）：前台闸门**逐段重判**。原来只在 [swipeLocal] 入口判一次，而整链
+         *   ~800ms 是异步的 —— 中途用户切走原神（或弹窗盖住），段2/段3 照样打到新前台，
+         *   等于在别人的 app 上继续拖拽（正是闸门要防的那件事）。
+         *   ⚠️ 被拒时**只停止派发、不补收尾段**：那时前台已经不是原神，补发的任何 gesture 都会
+         *   落进那个陌生 app（1px 拖拽在按钮上照样能激活）⇒ 补发等于自己破功。
+         *   "手指留在按下态"的代价可接受：下一次这类滑动的 ACTION_DOWN 会重置它，且用户实测口径
+         *   是**游戏切后台本来就会断线重登**，那条手势的归宿无关紧要。
+         *   代价必须说清楚：本次滑动**位移不足、页面没翻** ⇒ 如实回报 false，调用方不得重发（#75）。
+         */
+        private fun swipeThreeSegment(
+            service: AccessibilityService,
+            fromX: Int,
+            fromY: Int,
+            toX: Int,
+            toY: Int,
+            onDone: ((Boolean) -> Unit)?,
+        ): Boolean {
+            val dx = toX - fromX
+            val dy = toY - fromY
+            if (dx == 0 && dy == 0) {
+                onDone?.invoke(false)
+                return false
+            }
+            val midX = fromX + Math.round(dx * SWIPE_FAST_RATIO)
+            val midY = fromY + Math.round(dy * SWIPE_FAST_RATIO)
+            // 段2 末越过终点 1px（沿运动方向），段3 回退 1px = 精确落在 toX/toY 且末速≈0
+            val unitX = if (dx >= 0) 1 else -1
+            val unitY = if (dy >= 0) 1 else -1
+            val preX = toX + unitX
+            val preY = toY + unitY
+
+            // ★ 2026-09-24 停滞归因观测（run5）：三段是 `continueStroke` 串起来的**异步**链，
+            //   任一段被拒/被取消就整条断在此处 ⇒ 手指**不再抬起**（没有 ACTION_UP）。
+            //   若游戏因此认为指针仍按下，则之后整页 tap 一律不理、等多久都没用，
+            //   直到下一次滑动的 ACTION_DOWN 把它顶掉才恢复 —— 与实测症状逐条吻合
+            //   （重发 0/45、等 24s 0/4、微滑立即痊愈、下一页翻页自动痊愈）。
+            //   此前**完全无痕**：扫描侧 `swipeLogged` 拿到的是**硬编码的 true** —— 本函数在
+            //   THREE_SEGMENT / waypoint 两条分支末尾都是 `return true`（只有 `segments<=1` 的
+            //   单段分支才回真值），所以它连"段 1 受理"都不代表 ⇒ 日志里的 `accepted=true` 零信息量。
+            //   而 [callback] 又把 onCancelled 静默折成 false。（恒 true 本身 = 任务 #45，待修；
+            //   这里只把症状说清楚，别把它读成"段1 已受理"。）
+            //   这里逐段留痕（受理/完成/取消 + 相对时刻），用于与"冻结页"做时间轴相关性判定。
+            val t0 = SystemClock.elapsedRealtime()
+            fun mark(seg: Int, state: String) {
+                val line = "swipe3 段$seg $state +${SystemClock.elapsedRealtime() - t0}ms " +
+                    "($fromX,$fromY)→($toX,$toY)"
+                if (state.startsWith("断")) Log.w(TAG, line) else Log.i(TAG, line)
+            }
+
+            /**
+             * #83：链中途闸门关闭时的收尾 —— **不再派发任何段**，只如实回报 false。
+             *
+             * 为什么不补一段"零位移收尾"把手指抬起来（我一度这么写过，已否掉）：
+             * 那时**前台已经不是原神**了，补发的任何 gesture 都会落进那个陌生 app
+             * （1px 拖拽在按钮上照样能激活）—— 闸门要防的正是这件事，补发等于自己破功。
+             * 而"手指留在按下态"只需等下一次这类滑动/点击的 ACTION_DOWN 就会重置；
+             * 且用户实测口径：**游戏切后台本来就会断线重登**，那条手势的归宿无关紧要。
+             * 代价是说清楚：本次滑动**位移不足、页面没翻**，调用方不得重发（#75）。
+             */
+            fun abortNoDispatch(seg: Int) {
+                mark(seg, "断：前台已不是原神（闸门关闭）⇒ 停止派发后续段，本次滑动作废")
+                onDone?.invoke(false)
+            }
+
+            val s1 = GestureDescription.StrokeDescription(
+                Path().apply {
+                    moveTo(fromX.toFloat(), fromY.toFloat())
+                    lineTo(midX.toFloat(), midY.toFloat())
+                },
+                0L,
+                THREE_SEG_MAIN_MS,
+                /* willContinue = */ true,
+            )
+            val accepted = service.dispatchGesture(
+                GestureDescription.Builder().addStroke(s1).build(),
+                callback { ok1 ->
+                    if (!ok1) {
+                        mark(1, "断：段1 被取消 ⇒ 后续段不再派发，**手指未抬起**")
+                        onDone?.invoke(false)
+                        return@callback
+                    }
+                    mark(1, "完成")
+                    // ★ #83：段1 用了 ~400ms，闸门可能已经变了 ⇒ 段2 派发前重判
+                    if (!allowInject("swipe 段2")) {
+                        abortNoDispatch(2)
+                        return@callback
+                    }
+                    val s2 = s1.continueStroke(
+                        Path().apply {
+                            moveTo(midX.toFloat(), midY.toFloat())
+                            lineTo(preX.toFloat(), preY.toFloat())
+                        },
+                        0L,
+                        THREE_SEG_CRAWL_MS,
+                        /* willContinue = */ true,
+                    )
+                    val accepted2 = service.dispatchGesture(
+                        GestureDescription.Builder().addStroke(s2).build(),
+                        callback { ok2 ->
+                            if (!ok2) {
+                                mark(2, "断：段2 被取消 ⇒ 段3 不再派发，**手指未抬起**")
+                                onDone?.invoke(false)
+                                return@callback
+                            }
+                            mark(2, "完成")
+                            // ★ #83：段2 又用了 ~300ms ⇒ 段3 派发前再重判一次
+                            if (!allowInject("swipe 段3")) {
+                                abortNoDispatch(3)
+                                return@callback
+                            }
+                            val s3 = s2.continueStroke(
+                                Path().apply {
+                                    moveTo(preX.toFloat(), preY.toFloat())
+                                    lineTo(toX.toFloat(), toY.toFloat())
+                                },
+                                0L,
+                                THREE_SEG_DWELL_MS,
+                                /* willContinue = */ false,
+                            )
+                            val accepted3 = service.dispatchGesture(
+                                GestureDescription.Builder().addStroke(s3).build(),
+                                callback { ok3 ->
+                                    mark(3, if (ok3) "完成 ⇒ 整链闭合（已抬手）" else "断：段3 被取消，**手指未抬起**")
+                                    onDone?.invoke(ok3)
+                                },
+                                null,
+                            )
+                            if (!accepted3) mark(3, "断：dispatch 被拒 ⇒ **手指未抬起**")
+                            if (!accepted3) onDone?.invoke(false)
+                        },
+                        null,
+                    )
+                    if (!accepted2) mark(2, "断：dispatch 被拒 ⇒ 段3 不再派发，**手指未抬起**")
+                    if (!accepted2) onDone?.invoke(false)
+                },
+                null,
+            )
+            mark(1, "dispatch accepted=$accepted")
+            if (!accepted) {
+                mark(1, "断：dispatch 被拒 ⇒ **手指未抬起**")
+                onDone?.invoke(false)
+            }
+            return accepted
+        }
+
+        /**
+         * 路标链滑动（§12.2 改造，2026-09-05）：把三段长笔画降为「快滑 90%（4×80ms）→
+         * 缓速 10%（3×120ms）→ 越过终点 1px → 回退 1px（100ms）」的 9 路标点短笔画链，
+         * 每路 willContinue 串联，事件密度与 uiauto 标定手势一致（行为确定 std≤4px）。
+         *
+         * 返回值 = **首路** dispatch 是否被受理。后续路点在回调里异步派发，它们的受理结果
+         * 无法在本次调用返回时已知；整链是否闭合由 [onDone] 报（断链同样在那里报 false）。
+         *
+         * ★ #83（2026-09-27）：与 [swipeThreeSegment] 同款 —— **每路派发前重判前台闸门**。
+         *   本链共 9 路、整链 ~800ms 全在异步回调里，只在入口判一次的话，用户中途切走原神后
+         *   剩下的路点照样打在那个陌生 app 上。被拒时只停止派发、不补收尾路（理由见
+         *   `abortNoDispatchWp`）。
+         */
+        private fun swipeWaypointChain(
+            service: AccessibilityService,
+            fromX: Int,
+            fromY: Int,
+            toX: Int,
+            toY: Int,
+            onDone: ((Boolean) -> Unit)?,
+        ): Boolean {
+            val dx = toX - fromX
+            val dy = toY - fromY
+            if (dx == 0 && dy == 0) {
+                onDone?.invoke(false)
+                return false
+            }
+            val fSteps = com.bettergi.pocket.scan.TimingOverrides.swipeFastSteps
+            val fMs = com.bettergi.pocket.scan.TimingOverrides.swipeFastMs
+            val sSteps = com.bettergi.pocket.scan.TimingOverrides.swipeSlowSteps
+            val sMs = com.bettergi.pocket.scan.TimingOverrides.swipeSlowMs
+            val bMs = com.bettergi.pocket.scan.TimingOverrides.swipeBackMs
+            val midX = fromX + Math.round(dx * SWIPE_FAST_RATIO)
+            val midY = fromY + Math.round(dy * SWIPE_FAST_RATIO)
+            // 缓速段末越过终点 1px（沿运动方向），末路回退 1px = 精确落在 toX/toY 且末速≈0
+            val unitX = if (dx >= 0) 1 else -1
+            val unitY = if (dy >= 0) 1 else -1
+            val preX = toX + unitX
+            val preY = toY + unitY
+
+            val waypoints = ArrayList<IntArray>() // [x, y, ms]
+            for (i in 1..fSteps) {
+                waypoints.add(
+                    intArrayOf(
+                        fromX + Math.round((midX - fromX).toFloat() * i / fSteps),
+                        fromY + Math.round((midY - fromY).toFloat() * i / fSteps),
+                        fMs.toInt(),
+                    )
+                )
+            }
+            for (i in 1..sSteps) {
+                waypoints.add(
+                    intArrayOf(
+                        midX + Math.round((preX - midX).toFloat() * i / sSteps),
+                        midY + Math.round((preY - midY).toFloat() * i / sSteps),
+                        sMs.toInt(),
+                    )
+                )
+            }
+            waypoints.add(intArrayOf(toX, toY, bMs.toInt()))
+
+            /**
+             * #83：链中途闸门关闭 ⇒ **不再派发后续路点**，只如实回报 false。
+             * 与三段式的 abortNoDispatch 同一条理由：那时前台已不是原神，
+             * 补发的任何 gesture 都会落进那个陌生 app（1px 拖拽在按钮上照样能激活）。
+             * 代价同样说清楚：本次滑动**位移不足、页面没翻**（`willContinue=true` 的那只手势
+             * 还停在按下态），调用方不得重发（#75）。
+             */
+            fun abortNoDispatchWp(index: Int) {
+                Log.w(
+                    TAG,
+                    "wp[$index/${waypoints.lastIndex}] 断：前台已不是原神（闸门关闭）⇒ 停止派发后续路点，本次滑动作废",
+                )
+                onDone?.invoke(false)
+            }
+
+            fun dispatchWaypoint(index: Int, stroke: GestureDescription.StrokeDescription): Boolean {
+                val isLast = index == waypoints.lastIndex
+                val accepted = service.dispatchGesture(
+                    GestureDescription.Builder().addStroke(stroke).build(),
+                    callback { ok ->
+                        // 2026-09-14 诊断：逐段可见性（此前"派发被拒/中途断链"完全不可见）
+                        Log.i(TAG, "wp[$index/${waypoints.lastIndex}] done ok=$ok")
+                        if (!ok) {
+                            onDone?.invoke(false)
+                            return@callback
+                        }
+                        if (isLast) {
+                            onDone?.invoke(true)
+                        } else {
+                            val nextIndex = index + 1
+                            // ★ #83：本链共 9 路、整链 ~800ms 且全在异步回调里 ⇒ 与三段式一样，
+                            //   每路派发前必须重判一次闸门，否则用户中途切走原神后剩下的路点
+                            //   会继续打在那个陌生 app 上（闸门要防的正是这件事）。
+                            if (!allowInject("swipe wp[$nextIndex]")) {
+                                abortNoDispatchWp(nextIndex)
+                                return@callback
+                            }
+                            val wp = waypoints[nextIndex]
+                            val nextStroke = stroke.continueStroke(
+                                Path().apply {
+                                    moveTo(waypoints[index][0].toFloat(), waypoints[index][1].toFloat())
+                                    lineTo(wp[0].toFloat(), wp[1].toFloat())
+                                },
+                                0L,
+                                wp[2].toLong(),
+                                /* willContinue = */ nextIndex != waypoints.lastIndex,
+                            )
+                            dispatchWaypoint(nextIndex, nextStroke)
+                        }
+                    },
+                    null,
+                )
+                if (!accepted) {
+                    Log.w(TAG, "wp[$index/${waypoints.lastIndex}] dispatch REJECTED")
+                    onDone?.invoke(false)
+                }
+                return accepted
+            }
+
+            val first = waypoints[0]
+            val stroke = GestureDescription.StrokeDescription(
+                Path().apply {
+                    moveTo(fromX.toFloat(), fromY.toFloat())
+                    lineTo(first[0].toFloat(), first[1].toFloat())
+                },
+                0L,
+                first[2].toLong(),
+                /* willContinue = */ true,
+            )
+            return dispatchWaypoint(0, stroke)
+        }
+
+        /** SwipeMethod → 跨进程 extra 的线格式；必须与 [parseMethod] 成对改。 */
+        private fun methodKey(method: SwipeMethod): String =
+            if (method == SwipeMethod.THREE_SEGMENT) "three_segment" else "waypoint_chain"
+
+        /**
+         * 线格式 → SwipeMethod。⚠️ else 分支兜到 waypoint_chain，而本服务跑在独立的 `:a11y`
+         * 进程 ⇒ 扫描侧的每次调用**都要**过这条线，所以"extra 没放"等于"生产默认被换掉"，
+         * 不是冷启动才有的小概率兜底。生产默认实际由 `swipe()` 的形参默认值决定，
+         * 但它只有配上 [methodKey] 把值送过来才算数。
+         */
+        private fun parseMethod(value: String?): SwipeMethod =
+            when (value) {
+                "three_segment" -> SwipeMethod.THREE_SEGMENT
+                else -> SwipeMethod.WAYPOINT_CHAIN
+            }
+
+        /** GestureResultCallback → Boolean 回调适配（回调在主线程）。 */
+        private fun callback(onDone: ((Boolean) -> Unit)?) =
+            object : AccessibilityService.GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    onDone?.invoke(true)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    onDone?.invoke(false)
+                }
+            }
+
+        // ---- P2 前置探针：TYPE_ACCESSIBILITY_OVERLAY 在 :a11y 进程的挂载/z 序验证 ----
+        private var probeView: View? = null
+        private var probeProgressView: TextView? = null
+
+        /**
+         * 挂/卸探针（主进程入口）。
+         * ⚠️ View 不能跨进程——:a11y 小窗必须在 :a11y 进程内构建。
+         * 主进程仅发 A11yProtocol.M_PROBE 指令，:a11y 进程桥内构建并挂载视图（P2 跨进程视图模式验证）。
+         */
+        fun toggleProbe(context: Context): Boolean {
+            if (instance != null) return toggleProbeOverlay()
+            return remoteCall(A11yProtocol.M_PROBE, Bundle())?.getBoolean(KEY_OK, false) == true
+        }
+
+        /**
+         * 挂/卸 A11y Overlay 探针（:a11y 进程内执行）：色块 + 扫描进度行。
+         * 真机在原神上方能看到 = P2「零权限悬浮窗」核心假设成立；
+         * 进度行经 A11yProtocol.M_SCAN_PROGRESS 桥从主进程实时更新 = 跨进程状态桥机制验证。
+         */
+        private fun toggleProbeOverlay(): Boolean {
+            val service = instance ?: return false
+            // ViewRootImpl 必须在带 Looper 的线程创建；binder 线程调用 ContentProvider.call 时无 Looper。
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                return toggleProbeOverlayOnMain(service)
+            }
+            val latch = CountDownLatch(1)
+            val holder = booleanArrayOf(false)
+            Handler(Looper.getMainLooper()).post {
+                holder[0] = toggleProbeOverlayOnMain(service)
+                latch.countDown()
+            }
+            return try {
+                latch.await(3, TimeUnit.SECONDS)
+                holder[0]
+            } catch (_: InterruptedException) {
+                false
+            }
+        }
+
+        private fun toggleProbeOverlayOnMain(service: AccessibilityService): Boolean {
+            val wm = service.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val existing = probeView
+            if (existing != null) {
+                try {
+                    wm.removeView(existing)
+                } catch (_: Throwable) {
+                }
+                probeView = null
+                probeProgressView = null
+                return false
+            }
+            val container = LinearLayout(service).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(Color.argb(210, 120, 30, 30))
+                setPadding(20, 12, 20, 12)
+            }
+            val title = TextView(service).apply {
+                text = "A11y Overlay ✓（仅视觉验证·不可点击）"
+                setTextColor(Color.WHITE)
+                textSize = 15f
+            }
+            val progress = TextView(service).apply {
+                text = "扫描进度：待机"
+                setTextColor(Color.rgb(255, 220, 150))
+                textSize = 12f
+            }
+            container.addView(title)
+            container.addView(progress)
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                PixelFormat.TRANSLUCENT,
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = 160
+            }
+            return try {
+                wm.addView(container, lp)
+                probeView = container
+                probeProgressView = progress
+                Log.i(TAG, "probe overlay mounted")
+                true
+            } catch (e: Throwable) {
+                Log.e(TAG, "probe overlay mount failed", e)
+                probeView = null
+                probeProgressView = null
+                false
+            }
+        }
+
+        // ---- ★ 2026-09-18 探针：a11y overlay 可见时能否从后台启动 Activity（BAL 豁免核实）----
+        private var balProbeView: View? = null
+
+        /**
+         * 供真机核实「长按/点击 a11y 悬浮窗 → 启动 MainActivity」是否被系统 BAL 拦截。
+         *
+         * 依据（官方文档「允许后台启动 Activity 的情形」第一条 = *应用拥有可见窗口*；
+         * AOSP 判定式 `((appSwitchAllowedOrFg || hasNonAppVisibleWindow(uid)) && callingUidHasAnyVisibleWindow)`）：
+         * a11y overlay 属**非应用可见窗口** ⇒ 理论可行，且**不需要 SYSTEM_ALERT_WINDOW**。
+         *
+         * ⚠️ startActivity 被拦截时**不抛异常**（静默失败）⇒ 本探针只负责「触发 + 打点」，
+         * 结论必须由外部证据判定：
+         *   ① `adb logcat -s ActivityTaskManager` 出现 `Background activity start … not allowed` ⇒ 被拦
+         *   ② `adb shell dumpsys activity activities | grep bettergi` 出现 MainActivity ⇒ 成功
+         * 诊断探针，结论落地后按需删除。
+         */
+        fun probeBal(context: Context, mount: Boolean): Boolean {
+            if (instance != null) return probeBalLocal(mount)
+            val extras = Bundle().apply { putBoolean(KEY_MOUNT_OVERLAY, mount) }
+            return remoteCall(A11yProtocol.M_PROBE_BAL, extras)?.getBoolean(KEY_OK, false) == true
+        }
+
+        private fun probeBalLocal(mount: Boolean): Boolean {
+            val service = instance ?: return false
+            Handler(Looper.getMainLooper()).post {
+                if (mount) mountBalProbeOverlay(service)
+                // ⚠️ 关键时序：BAL 判定看 `callingUidHasAnyVisibleWindow`，窗口需**已成可见**才有豁免
+                //   ⇒ 延后 600ms 再试，否则会得到假阴性（窗口刚 addView 还没上屏）
+                Handler(Looper.getMainLooper()).postDelayed(
+                    { balTryStart(service, "immediate(mountOverlay=$mount, +600ms)") },
+                    600L,
+                )
+            }
+            return true
+        }
+
+        private fun mountBalProbeOverlay(service: AccessibilityService): Boolean {
+            val container = LinearLayout(service).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(Color.argb(230, 20, 90, 40))
+                setPadding(24, 16, 24, 16)
+            }
+            container.addView(
+                TextView(service).apply {
+                    text = "BAL 探针（a11y overlay）"
+                    setTextColor(Color.WHITE)
+                    textSize = 14f
+                },
+            )
+            container.addView(
+                Button(service).apply {
+                    text = "点我开 MainActivity"
+                    setOnClickListener { balTryStart(service, "byTap") }
+                },
+            )
+            val lp = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                // ⚠️ 不可加 FLAG_NOT_TOUCHABLE（要能点）；NOT_FOCUSABLE 保证不抢输入焦点
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT,
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = 40
+                y = 300
+            }
+            val ok = attachA11yView(container, lp)
+            // ★ P3：只在挂载**成功**时赋值 —— 原先无条件赋值，attachA11yView 失败（窗口令牌异常等）
+            //   也会把失败的花壳存进静态字段，泄漏服务上下文且 unmount 会去 removeView 一个没挂的 view。
+            if (ok) balProbeView = container
+            Log.i(TAG, "bal-probe: overlay mounted=$ok（type=TYPE_ACCESSIBILITY_OVERLAY, 可点击）")
+            return ok
+        }
+
+        /**
+         * ★ P3：BAL 探针的卸载路径。摘掉窗口并把静态引用清空（此前全文件没有任何卸载，
+         *   静态 View 一直持着服务上下文）。服务 onDestroy 时调用；重复调用幂等。
+         */
+        private fun unmountBalProbeOverlay() {
+            val service = instance ?: return
+            val view = balProbeView ?: return
+            balProbeView = null
+            runCatching {
+                (service.getSystemService(Context.WINDOW_SERVICE) as WindowManager).removeView(view)
+            }.onFailure { Log.w(TAG, "bal-probe unmount failed", it) }
+        }
+
+        private fun balTryStart(service: AccessibilityService, why: String) {
+            try {
+                service.startActivity(
+                    Intent(service, com.bettergi.pocket.debug.BalProbeActivity::class.java)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+                Log.i(TAG, "bal-probe: startActivity 已发出（$why）—— 结果查 ActivityTaskManager 日志 / dumpsys")
+            } catch (t: Throwable) {
+                Log.e(TAG, "bal-probe: startActivity 抛异常（$why）", t)
+            }
+        }
+
+        /**
+         * 主进程 → :a11y 推送扫描进度文本（probe 挂载时更新进度行；本地直调/远程桥双路径）。
+         * ★ A26：远程路径改异步 fire-and-forget —— 本函数在扫描期的主线程（scanListener 的
+         * mainHandler）被逐 tick 调用，同步 binder 会在 :a11y 忙时拖住主进程主线程。探针进度行
+         * 只显示"最新一条"，无需确认；改在单线程执行器上发（保序、后到覆盖先到）。
+         * 返回值由"对端是否受理"变为"是否已入队"（唯一调用方 TriggerForegroundService 忽略返回值）。
+         * 本地路径（:a11y 进程内直调）保持同步——没有 IPC，直接 view.post 即可。
+         */
+        fun pushScanProgress(text: String): Boolean {
+            if (instance != null) {
+                probeProgressView?.post { probeProgressView?.text = text }
+                return probeProgressView != null
+            }
+            val extras = Bundle().apply { putString(KEY_TEXT, text) }
+            progressPushExecutor.execute {
+                remoteCall(A11yProtocol.M_SCAN_PROGRESS, extras)
+            }
+            return true
+        }
+
+        /** 扫描进度推送的执行器：单线程（保序）+ daemon（不拦进程退出）。 */
+        private val progressPushExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "a11y-progress-push").apply { isDaemon = true }
+        }
+
+        private fun pushScanProgressLocal(text: String): Boolean {
+            val view = probeProgressView ?: return false
+            view.post { view.text = text }
+            return true
+        }
+
+        // ---- P2-b 地基：:a11y 进程 A11y Overlay 视图挂载通用 API ----
+        // 仅在 :a11y 进程（instance != null）有效；A11yOverlayHost（悬浮窗迁移）的执行底座。
+        // 探针（toggleProbeOverlay）已验证该挂载路径可行。
+
+        /** 在 :a11y 进程挂载视图（TYPE_ACCESSIBILITY_OVERLAY 零权限）。须由调用方持视图引用。 */
+        fun attachA11yView(view: View, lp: WindowManager.LayoutParams): Boolean {
+            val service = instance ?: return false
+            val wm = service.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            return try {
+                wm.addView(view, lp)
+                true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        /** 从 :a11y 进程卸载视图。 */
+        fun detachA11yView(view: View): Boolean {
+            val service = instance ?: return false
+            val wm = service.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            return try {
+                wm.removeView(view)
+                true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        /** 更新 :a11y 进程视图的 LayoutParams（位置/flags 变化）。 */
+        fun updateA11yView(view: View, lp: WindowManager.LayoutParams): Boolean {
+            val service = instance ?: return false
+            val wm = service.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            return try {
+                wm.updateViewLayout(view, lp)
+                true
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        private fun remoteStatus(): Bundle? = remoteCall(A11yProtocol.M_STATUS)
 
         private fun remoteCall(method: String, extras: Bundle? = null): Bundle? {
             val ctx = appContext ?: return null
             return try {
-                ctx.contentResolver.call(bridgeUri(ctx), method, null, extras)
-            } catch (_: Exception) {
+                ctx.contentResolver.call(A11yProtocol.a11yUri(ctx), method, null, extras)
+            } catch (e: Exception) {
+                Log.e(TAG, "remoteCall failed: $method", e)
                 null
             }
-        }
-
-        private fun bridgeUri(context: Context): Uri {
-            return Uri.parse("content://${context.packageName}$AUTHORITY_SUFFIX")
         }
 
         private const val ACTION_ACCESSIBILITY_DETAILS_SETTINGS =

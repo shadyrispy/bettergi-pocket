@@ -2,7 +2,7 @@ package com.bettergi.pocket.feature.autoskip
 
 import com.bettergi.pocket.recognition.CaptureContent
 import com.bettergi.pocket.recognition.CaptureScale
-import com.bettergi.pocket.recognition.IntRect
+import com.bettergi.pocket.core.IntRect
 import com.bettergi.pocket.recognition.RecognitionObject
 import com.bettergi.pocket.recognition.RecognitionObjectJsonLoadContext
 import com.bettergi.pocket.recognition.RecognitionObjectJsonLoader

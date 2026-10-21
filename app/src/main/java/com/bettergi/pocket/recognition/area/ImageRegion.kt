@@ -1,15 +1,14 @@
 package com.bettergi.pocket.recognition.area
 
-import android.util.Log
-import com.bettergi.pocket.recognition.ColorConversion
-import com.bettergi.pocket.recognition.IntRect
+import com.bettergi.pocket.core.ColorConversion
+import com.bettergi.pocket.core.IntRect
 import com.bettergi.pocket.recognition.OcrText
 import com.bettergi.pocket.recognition.RecognitionObject
 import com.bettergi.pocket.recognition.RecognitionTypes
 import com.bettergi.pocket.recognition.ocr.IOcrService
 import com.bettergi.pocket.recognition.ocr.OcrFactory
 import com.bettergi.pocket.recognition.opencv.MatchTemplateHelper
-import com.bettergi.pocket.recognition.opencv.MatOps
+import com.bettergi.pocket.core.image.MatOps
 import org.opencv.core.Mat
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
@@ -28,6 +27,16 @@ open class ImageRegion(
         private set
 
     private var cacheGreyMat: Mat? = null
+
+    /**
+     * ★ P3（2026-10-01）二值化缓存：`useBinaryMatch` 分支的 `MatOps.binary(...)` 原先每次识别
+     * 都新建一个 ROI 级二值 Mat。现按 `(阈值)` 缓存在 **Region 上**——依据：
+     * 二值化源恒为本 Region 的 [cacheGreyMatSafe]（惰性创建后内容不变，帧快照只读），
+     * 与 RecognitionObject 无关（ro.templateImageMat 虽共享只读，但被二值化的是**帧侧**灰度图），
+     * 故缓存放 Region 而非 object 上；同一 Region 上多个 binary 识别对象/多次识别直接复用。
+     * 失效时机：[releaseOwnedMats]（Region 关闭/换帧）——帧与帧之间是新 Region，天然不跨帧。
+     */
+    private val cacheBinaryMats = HashMap<Int, Mat>()
     private var released: Boolean = false
 
     val cacheGreyMatSafe: Mat
@@ -87,18 +96,17 @@ open class ImageRegion(
         var ownedTemplate: Mat? = null
         var ownedMask: Mat? = null
         try {
-            val source = templateMatchSource(ro).also { if (it !== cacheGreyMatSafe && it !== srcMat) ownedSource = it }
+            val source = templateMatchSource(ro).also {
+                // ★ 缓存后的二值 Mat 是 Region 持有的共享只读缓存（非本次新建），不得标记 owned 被 release
+                val isCachedBinary = synchronized(cacheBinaryMats) { cacheBinaryMats.containsValue(it) }
+                if (it !== cacheGreyMatSafe && it !== srcMat && !isCachedBinary) ownedSource = it
+            }
             var roi = source
+            var roiRect: IntRect? = null
             if (!search.effectiveRoi.isDefault()) {
-                if (!isRoiInside(source, search.effectiveRoi)) {
-                    Log.e(
-                        TAG,
-                        "在图像${source.cols()}x${source.rows()}中查找模板,名称：${ro.name}," +
-                            "ROI位置${search.effectiveRoi.x}x${search.effectiveRoi.y}," +
-                            "区域${search.effectiveRoi.width}x${search.effectiveRoi.height},边界溢出！",
-                    )
-                }
-                ownedRoiView = MatOps.roiView(source, search.effectiveRoi)
+                // A21：越界先 clamp，clamp 后为空则抛明确异常（不再"打日志后撞 CvException"）
+                roiRect = resolveRoi(source, ro, search)
+                ownedRoiView = MatOps.roiView(source, roiRect)
                 roi = ownedRoiView
             }
 
@@ -122,8 +130,8 @@ open class ImageRegion(
             ) ?: return Region()
 
             val hit = derive(
-                match.x + search.effectiveRoi.x,
-                match.y + search.effectiveRoi.y,
+                match.x + (roiRect?.x ?: 0),
+                match.y + (roiRect?.y ?: 0),
                 effectiveTemplate.cols(),
                 effectiveTemplate.rows(),
             )
@@ -146,10 +154,17 @@ open class ImageRegion(
         var ownedTemplate: Mat? = null
         var ownedMask: Mat? = null
         try {
-            val source = templateMatchSource(ro).also { if (it !== cacheGreyMatSafe && it !== srcMat) ownedSource = it }
+            val source = templateMatchSource(ro).also {
+                // ★ 缓存后的二值 Mat 是 Region 持有的共享只读缓存（非本次新建），不得标记 owned 被 release
+                val isCachedBinary = synchronized(cacheBinaryMats) { cacheBinaryMats.containsValue(it) }
+                if (it !== cacheGreyMatSafe && it !== srcMat && !isCachedBinary) ownedSource = it
+            }
             var roi = source
+            var roiRect: IntRect? = null
             if (!search.effectiveRoi.isDefault()) {
-                ownedRoiView = MatOps.roiView(source, search.effectiveRoi)
+                // A21：与 findTemplate 同口径 —— 先 clamp，空则抛明确异常
+                roiRect = resolveRoi(source, ro, search)
+                ownedRoiView = MatOps.roiView(source, roiRect)
                 roi = ownedRoiView
             }
 
@@ -173,8 +188,8 @@ open class ImageRegion(
                 ro.maxMatchCount,
             ).map { match ->
                 derive(
-                    match.x + search.effectiveRoi.x,
-                    match.y + search.effectiveRoi.y,
+                    match.x + (roiRect?.x ?: 0),
+                    match.y + (roiRect?.y ?: 0),
                     effectiveTemplate.cols(),
                     effectiveTemplate.rows(),
                 ).also { it.matchScore = match.score }
@@ -192,13 +207,15 @@ open class ImageRegion(
             throw IllegalArgumentException("[OCR]识别对象${ro.name}的匹配文本不能全为空")
         }
         val search = resolveSearch(ro) ?: return Region()
-        val ownedRoi = if (!search.effectiveRoi.isDefault()) MatOps.roiView(srcMat, search.effectiveRoi) else null
+        // A21：ROI 先 clamp（空则抛明确异常），命中区域按 clamped rect 回报
+        val roiRect = if (!search.effectiveRoi.isDefault()) resolveRoi(srcMat, ro, search) else null
+        val ownedRoi = roiRect?.let { MatOps.roiView(srcMat, it) }
         try {
             val roi = ownedRoi ?: srcMat
             val result = ocrService.recognize(roi)
             val text = OcrText.normalize(result.text, ro.replaceDictionary)
             return if (OcrText.matches(text, ro.allContainMatchText, ro.oneContainMatchText, ro.regexMatchText)) {
-                derive(search.effectiveRoi.takeUnless { it.isDefault() } ?: IntRect(0, 0, width, height))
+                derive(roiRect ?: IntRect(0, 0, width, height))
             } else {
                 Region()
             }
@@ -209,7 +226,9 @@ open class ImageRegion(
 
     private fun findOcr(ro: RecognitionObject): Region {
         val search = resolveSearch(ro) ?: return Region()
-        val ownedRoi = if (!search.effectiveRoi.isDefault()) MatOps.roiView(srcMat, search.effectiveRoi) else null
+        // A21：ROI 先 clamp（空则抛明确异常）
+        val roiRect = if (!search.effectiveRoi.isDefault()) resolveRoi(srcMat, ro, search) else null
+        val ownedRoi = roiRect?.let { MatOps.roiView(srcMat, it) }
         var colorConverted: Mat? = null
         var colorMasked: Mat? = null
         try {
@@ -228,7 +247,7 @@ open class ImageRegion(
             if (text.isEmpty()) {
                 return Region()
             }
-            val hit = derive(search.effectiveRoi.takeUnless { it.isDefault() } ?: IntRect(0, 0, width, height))
+            val hit = derive(roiRect ?: IntRect(0, 0, width, height))
             hit.text = text
             return hit
         } finally {
@@ -240,12 +259,14 @@ open class ImageRegion(
 
     private fun findOcrMulti(ro: RecognitionObject): List<Region> {
         val search = resolveSearch(ro) ?: return emptyList()
-        val ownedRoi = if (!search.effectiveRoi.isDefault()) MatOps.roiView(srcMat, search.effectiveRoi) else null
+        // A21：ROI 先 clamp（空则抛明确异常），偏移取 clamped 原点
+        val roiRect = if (!search.effectiveRoi.isDefault()) resolveRoi(srcMat, ro, search) else null
+        val ownedRoi = roiRect?.let { MatOps.roiView(srcMat, it) }
         try {
             val roi = ownedRoi ?: srcMat
             val result = ocrService.recognize(roi)
-            val offsetX = if (search.effectiveRoi.isDefault()) 0 else search.effectiveRoi.x
-            val offsetY = if (search.effectiveRoi.isDefault()) 0 else search.effectiveRoi.y
+            val offsetX = roiRect?.x ?: 0
+            val offsetY = roiRect?.y ?: 0
             return result.regions.mapNotNull { ocrRegion ->
                 val clamped = ocrRegion.rect.clampTo(roi.cols(), roi.rows())
                 if (clamped.isEmpty()) {
@@ -290,7 +311,13 @@ open class ImageRegion(
             return srcMat
         }
         if (ro.useBinaryMatch) {
-            return MatOps.binary(cacheGreyMatSafe, ro.binaryThreshold)
+            val gray = cacheGreyMatSafe
+            synchronized(cacheBinaryMats) {
+                cacheBinaryMats[ro.binaryThreshold]?.let { return it }
+                val bin = MatOps.binary(gray, ro.binaryThreshold)
+                cacheBinaryMats[ro.binaryThreshold] = bin
+                return bin
+            }
         }
         return cacheGreyMatSafe
     }
@@ -315,16 +342,30 @@ open class ImageRegion(
         }
         return MatOps.resize(
             mask,
-            com.bettergi.pocket.recognition.IntSize(effectiveTemplate.cols(), effectiveTemplate.rows()),
+            com.bettergi.pocket.core.IntSize(effectiveTemplate.cols(), effectiveTemplate.rows()),
             Imgproc.INTER_NEAREST,
         )
     }
 
-    private fun isRoiInside(src: Mat, roi: IntRect): Boolean {
-        return roi.x >= 0 && roi.y >= 0 &&
-            roi.width >= 0 && roi.height >= 0 &&
-            roi.x + roi.width <= src.cols() &&
-            roi.y + roi.height <= src.rows()
+    /**
+     * ROI 统一入口（A21）：先按源图尺寸 clamp（对齐 [deriveCrop] 先例），clamp 后空/负尺寸
+     * 则 fail-loud —— 抛带 region 名与原始 rect 的明确异常。
+     *
+     * 背景：OpenCV `Mat(Mat, Rect)` 对越界 rect 是 CV_Assert 硬抛（CvException），
+     * 旧代码在 [findTemplate] 里"先打日志再照常 roiView"，等于先报警再崩溃；
+     * 16:10 屏跑 16:9 坐标时 JSON rect 溢出画面就是这条崩溃路径。
+     * 部分越界（rect 与画面有交集）clamp 后继续识别，命中坐标按 clamped 原点回映。
+     */
+    private fun resolveRoi(source: Mat, ro: RecognitionObject, search: ReferenceSearchResult): IntRect {
+        val roi = search.effectiveRoi
+        val clamped = roi.clampTo(source.cols(), source.rows())
+        if (clamped.isEmpty()) {
+            throw IllegalArgumentException(
+                "[ROI]识别对象${ro.name}的ROI越界且clamp后为空: rect=(${roi.x},${roi.y},${roi.width}x${roi.height})，" +
+                    "图像 ${source.cols()}x${source.rows()}",
+            )
+        }
+        return clamped
     }
 
     internal fun releaseOwnedMats() {
@@ -332,6 +373,11 @@ open class ImageRegion(
         released = true
         cacheGreyMat?.release()
         cacheGreyMat = null
+        // 二值化缓存与灰度缓存同生命周期（见 cacheBinaryMats 注释）
+        synchronized(cacheBinaryMats) {
+            cacheBinaryMats.values.forEach { it.release() }
+            cacheBinaryMats.clear()
+        }
         if (ownsMat) {
             srcMat.release()
         }
@@ -342,9 +388,7 @@ open class ImageRegion(
         super.close()
     }
 
-    private companion object {
-        private const val TAG = "BetterGI.Region"
-    }
+    private companion object
 }
 
 class GameCaptureRegion(

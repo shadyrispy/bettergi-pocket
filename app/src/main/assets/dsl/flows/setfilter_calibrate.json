@@ -1,0 +1,21 @@
+{
+  "flow": "setfilter_calibrate",
+  "version": "1.0.0",
+  "profile": "android_3200x1440",
+  "description": "临时标定 set_filter_popup settle：经 setFilter 打开套装筛选并注入 plan 目标强制翻页（settle 日志由 awaitGridStable 打出）",
+  "vars": {},
+  "steps": [
+    {
+      "do": "enterScreen",
+      "target": "artifact_backpack",
+      "chain": ["game_home→bagpack", "artifact_tab"],
+      "anchor": { "kind": "ocr", "rect": "$screens.artifact_backpack.count.rect", "expect": "\\d+\\s*/\\s*\\d+" }
+    },
+    {
+      "do": "setFilter",
+      "entry": "BACKPACK",
+      "chain": ["filterRoundBtn(300,1002)", "filterPanel.setPlus(450,255)"],
+      "selectByOcr": { "grid": "set_filter_popup", "dict": "mappings.artifactSets", "match": "exact" }
+    }
+  ]
+}

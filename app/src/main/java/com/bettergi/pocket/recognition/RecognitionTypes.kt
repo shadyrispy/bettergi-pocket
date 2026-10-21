@@ -1,5 +1,8 @@
 package com.bettergi.pocket.recognition
 
+import com.bettergi.pocket.core.IntRect
+import com.bettergi.pocket.core.IntSize
+
 enum class RecognitionTypes {
     None,
     TemplateMatch,
@@ -17,13 +20,6 @@ enum class TemplateMatchMode {
     CCorrNormed,
     CCoeff,
     CCoeffNormed,
-}
-
-enum class ColorConversion {
-    None,
-    BgrToRgb,
-    BgrToHsv,
-    BgrToGray,
 }
 
 enum class SearchAnchorMode {

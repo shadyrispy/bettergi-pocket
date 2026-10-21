@@ -1,0 +1,144 @@
+package com.bettergi.pocket.debug
+
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.util.Log
+import com.bettergi.pocket.service.TriggerForegroundService
+
+/**
+ * adb 调试控制入口（仅 debug 包使用，便于端到端自动化脚本复用）：
+ *
+ * adb shell am broadcast -a com.bettergi.pocket.debug.SET_SCREEN_SHARE --ez enabled true
+ * adb shell am broadcast -a com.bettergi.pocket.debug.SET_SCAN --ez enabled true
+ * adb shell am broadcast -a com.bettergi.pocket.debug.STATUS
+ * adb shell am broadcast -a com.bettergi.pocket.debug.REPLAY_PCAP --es path <pcap>
+ * adb shell am start -n com.bettergi.pocket/.pcdata.CaptureConsentActivity   # 抓包 C2：弹 VPN 授权
+ * adb shell am broadcast -a com.bettergi.pocket.debug.CAPTURE --ez enabled false
+ *
+ * ⚠️ 抓包 C2 的**开始**走 CaptureConsentActivity：系统 VPN 弹窗要前台 Activity 发起，
+ *    而 EMUI 连 adb 广播都不拉起进程（实测），后台 startForegroundService 也不可靠。
+ *
+ * ⚠️ 指令转发给 TriggerForegroundService 执行（不在此新建 TriggerSettingsRepository——
+ * 多实例的内存缓存不同步，写入 prefs 不会触发 service 的 settingsListener）。
+ */
+class DebugControlReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val app = context.applicationContext
+        val enabled = intent.getBooleanExtra(EXTRA_ENABLED, false)
+        val service = Intent(app, TriggerForegroundService::class.java).apply {
+            when (intent.action) {
+                ACTION_SET_SCREEN_SHARE -> {
+                    action = TriggerForegroundService.ACTION_DEBUG_SET_SCREEN_SHARE
+                    putExtra(TriggerForegroundService.EXTRA_ENABLED, enabled)
+                }
+                ACTION_SET_SCAN -> {
+                    action = TriggerForegroundService.ACTION_DEBUG_SET_SCAN
+                    putExtra(TriggerForegroundService.EXTRA_ENABLED, enabled)
+                }
+                ACTION_SET_PROBE -> action = TriggerForegroundService.ACTION_DEBUG_SET_PROBE
+                ACTION_SET_VERBOSE -> {
+                    action = TriggerForegroundService.ACTION_DEBUG_SET_VERBOSE
+                    putExtra(TriggerForegroundService.EXTRA_ENABLED, enabled)
+                }
+                ACTION_SWIPE_TEST -> {
+                    action = TriggerForegroundService.ACTION_DEBUG_SWIPE_TEST
+                    putExtra(TriggerForegroundService.EXTRA_START_Y, intent.getIntExtra(EXTRA_START_Y, 1150))
+                    putExtra(TriggerForegroundService.EXTRA_DIST, intent.getIntExtra(EXTRA_DIST, 876))
+                    putExtra(TriggerForegroundService.EXTRA_MEASURE, intent.getBooleanExtra(EXTRA_MEASURE, false))
+                }
+                ACTION_SCAN_FLOW -> {
+                    action = TriggerForegroundService.ACTION_DEBUG_SCAN_FLOW
+                    putExtra(
+                        TriggerForegroundService.EXTRA_FLOW,
+                        intent.getStringExtra(EXTRA_FLOW) ?: "artifact_scan",
+                    )
+                    putExtra(TriggerForegroundService.EXTRA_MAX_PAGES, intent.getIntExtra(EXTRA_MAX_PAGES, Int.MAX_VALUE))
+                    // ★ 2026-09-13 修：`timing` 规格此前**没有转发** ⇒ 所有 `--es timing "..."` 的 A/B 都静默跑了默认值
+                    //   （实测每一档"对比档"的 `timing:` 日志都带 `(default)`）。转发后配置类 A/B 才成立。
+                    intent.getStringExtra(TriggerForegroundService.EXTRA_TIMING)?.let {
+                        putExtra(TriggerForegroundService.EXTRA_TIMING, it)
+                    }
+                    // §12.1 起点选择：false = 用 profiles 写死翻页起点，true = 用几何推导的卡缝起点
+                    //   （只切起点；距离规划/记账与此项无关，见 ScanEngine 的主滑规划）
+                    // ★ 默认必须与产线一致（`TriggerForegroundService` / `ScriptRunner` /
+                    //   `ScanEngine` 三处都是 false）。原先这里默认 true ⇒ 走广播入口不显式带
+                    //   `--ez geoAdvance` 时量到的是产线根本不跑的分支，而日志上两者同形。
+                    putExtra(
+                        TriggerForegroundService.EXTRA_GEO_ADVANCE,
+                        intent.getBooleanExtra(EXTRA_GEO_ADVANCE, false),
+                    )
+                    // ★ 2026-09-30 #149：`plan`/`planB64` 此前**没有转发**，与上面 `timing` 是同一条漏法。
+                    //   后果不是报错而是**静默换数据源**：service 侧 `plan ?: GoodRepository.planFor(...)`
+                    //   会回落到"用户在管理器里选好的输入"，于是内联计划被丢掉、跑的是上一轮导入的 plan，
+                    //   两边都空时整轮"跑完了但什么都没做"（实测 3200：`foreach: 'plan' not available or empty`）。
+                    intent.getStringExtra(TriggerForegroundService.EXTRA_PLAN)?.let {
+                        putExtra(TriggerForegroundService.EXTRA_PLAN, it)
+                    }
+                    intent.getStringExtra(TriggerForegroundService.EXTRA_PLAN_B64)?.let {
+                        putExtra(TriggerForegroundService.EXTRA_PLAN_B64, it)
+                    }
+                }
+                ACTION_REPLAY_PCAP -> {
+                    action = TriggerForegroundService.ACTION_DEBUG_REPLAY_PCAP
+                    putExtra(
+                        TriggerForegroundService.EXTRA_PCAP_PATH,
+                        intent.getStringExtra(EXTRA_PATH) ?: DEFAULT_PCAP_PATH,
+                    )
+                }
+                ACTION_CAPTURE -> {
+                    if (!enabled) {
+                        action = TriggerForegroundService.ACTION_DEBUG_CAPTURE
+                        putExtra(TriggerForegroundService.EXTRA_ENABLED, false)
+                    } else {
+                        // 开始必须走授权中转页：系统 VPN 弹窗要前台 Activity 发起，
+                        // 而且本 Activity 未导出（Android 13 的 shell 也拉不动），只能由本进程拉起。
+                        val launched = runCatching {
+                            app.startActivity(
+                                Intent(app, com.bettergi.pocket.pcdata.CaptureConsentActivity::class.java)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                            )
+                        }.onFailure { Log.w(TAG, "capture consent page refused to start", it) }.isSuccess
+                        if (!launched) {
+                            // 拉不动才退回服务：它会回一句"VPN 授权还没给"，不至于静默。
+                            action = TriggerForegroundService.ACTION_DEBUG_CAPTURE
+                            putExtra(TriggerForegroundService.EXTRA_ENABLED, true)
+                        }
+                    }
+                }
+                ACTION_STATUS -> action = TriggerForegroundService.ACTION_DEBUG_STATUS
+                else -> return
+            }
+        }
+        try {
+            androidx.core.content.ContextCompat.startForegroundService(app, service)
+        } catch (e: Exception) {
+            Log.w(TAG, "forward debug command failed", e)
+        }
+    }
+
+    companion object {
+        const val TAG = "BetterGI.Debug"
+        const val ACTION_SET_SCREEN_SHARE = "com.bettergi.pocket.debug.SET_SCREEN_SHARE"
+        const val ACTION_SET_SCAN = "com.bettergi.pocket.debug.SET_SCAN"
+        const val ACTION_SET_PROBE = "com.bettergi.pocket.debug.SET_PROBE"
+        /** §13：识别日志 D 级（逐格/逐次）开关。adb --ez enabled true 开。 */
+        const val ACTION_SET_VERBOSE = "com.bettergi.pocket.debug.SET_VERBOSE"
+        const val ACTION_SWIPE_TEST = "com.bettergi.pocket.debug.SWIPE_TEST"
+        const val ACTION_SCAN_FLOW = "com.bettergi.pocket.debug.SCAN_FLOW"
+        const val ACTION_STATUS = "com.bettergi.pocket.debug.STATUS"
+        /** 抓包数据源 C1：离线回放一个 pcap → GOOD → 输入仓库（不建隧道、不要授权）。 */
+        const val ACTION_REPLAY_PCAP = "com.bettergi.pocket.debug.REPLAY_PCAP"
+        /** 抓包数据源 C2：在线隧道开关（`--ez enabled true|false`）。 */
+        const val ACTION_CAPTURE = "com.bettergi.pocket.debug.CAPTURE"
+        const val EXTRA_PATH = "path"
+        const val DEFAULT_PCAP_PATH = "/sdcard/Android/data/com.bettergi.pocket/files/resume.pcap"
+        const val EXTRA_ENABLED = "enabled"
+        const val EXTRA_START_Y = "startY"
+        const val EXTRA_DIST = "dist"
+        const val EXTRA_MEASURE = "measure"
+        const val EXTRA_FLOW = "flow"
+        const val EXTRA_MAX_PAGES = "maxPages"
+        const val EXTRA_GEO_ADVANCE = "geoAdvance"
+    }
+}

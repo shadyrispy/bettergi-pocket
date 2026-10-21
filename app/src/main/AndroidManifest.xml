@@ -2,8 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 本 app 自身不联网（脚本订阅功能已移除），但抓包数据源是另一回事：
+         :capture 的隧道要把截到的游戏流量**转发出去**（zdtun 开出站 socket +
+         CaptureService.protect()），剥掉 INTERNET 不是"降级抓包"，是游戏掉线。
+         ACCESS_NETWORK_STATE 只影响抓包能否读到本机真 DNS（拿不到就退化成公共
+         解析器），一并恢复。隧道按 addAllowedApplication 只吸原神包，
+         本 app 自己依旧零自建联网行为。 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
@@ -29,8 +35,9 @@
         </intent>
     </queries>
 
+    <!-- ★ A30：allowBackup=false + 两份规则 XML 全排除 —— 备份/迁移整体关闭（依据见各 XML 注释）。 -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:name=".PocketApplication"
@@ -40,8 +47,9 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.BetterGIPocket">
         <activity
-            android:name=".MainActivity"
+            android:name=".ui.MainActivity"
             android:exported="true"
+            android:launchMode="singleTask"
             android:excludeFromRecents="true"
             android:theme="@style/Theme.BetterGIPocket.Transparent">
             <intent-filter>
@@ -60,8 +68,21 @@
             </intent-filter>
         </activity>
 
+        <!-- 投影授权页不导出：仅应用内部拉起（服务 settingsListener 触发 requestCapturePermission，
+             或 MainActivity 持 EXTRA_AUTO_REQUEST_CAPTURE 前台内发起）。adb 调试统一走服务广播
+             DEBUG_SET_SCREEN_SHARE 触发内部链路，不直启本页。 -->
         <activity
             android:name=".capture.CapturePermissionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.BetterGIPocket.Transparent" />
+
+        <!-- 抓包 VPN 授权中转（透明无内容，拿完结果即 finish）：系统 VPN 弹窗必须由前台
+             Activity 发起，从服务 startActivity 在 Android 10+ 会被静默吞掉。 -->
+        <activity
+            android:name=".pcdata.CaptureConsentActivity"
             android:exported="false"
             android:excludeFromRecents="true"
             android:noHistory="true"
@@ -88,11 +109,33 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
+        <!-- 主进程 → 无障碍进程：下发点击 / 滑动 / 悬浮窗指令 -->
         <provider
             android:name=".input.AccessibilityBridgeProvider"
             android:authorities="${applicationId}.a11y"
             android:exported="false"
             android:process=":a11y" />
+
+        <!-- 无障碍进程 → 主进程：读/写设置、请求导出与退出、拉识别日志镜像 -->
+        <provider
+            android:name=".bridge.SettingsBridgeProvider"
+            android:authorities="${applicationId}.settings"
+            android:exported="false" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+        <activity
+            android:name=".debug.BalProbeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance" />
     </application>
 
 </manifest>

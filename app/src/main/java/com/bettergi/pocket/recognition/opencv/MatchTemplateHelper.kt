@@ -9,6 +9,7 @@ import org.opencv.core.Scalar
 import org.opencv.imgproc.Imgproc
 import kotlin.math.abs
 import kotlin.math.floor
+import com.bettergi.pocket.core.image.MatOps
 
 data class TemplateMatchHit(
     val x: Int,
@@ -65,6 +66,13 @@ object MatchTemplateHelper {
                 mode == TemplateMatchMode.CCoeff ||
                 mode == TemplateMatchMode.CCorr
             ) {
+                // ⚠️ 陷阱（2026-09-23 审计 P1-3，今天**不可达**：profiles 里没有任何 `templateMatchMode`
+                //   覆盖，默认 `CCoeffNormed` 走的上面的归一化模式；改这条不会动现有识别行为）：
+                //   非归一化模式的原始分离散度（TM_SQDIFF 上千、TM_CCORR 更大），而 profile 的
+                //   `threshold` 口径是 0..1 ⇒ 只能先 NORM_MINMAX 把整张响应面压进 0..1。
+                //   代价是**最大值恒等于 1.0**：之后的 `score >= threshold` 只表达"这是相对最好的位置"，
+                //   不再表达"够像"——阈值调多高都拦不住一次假命中。
+                //   ⇒ 要按"像不像"卡阈值，只能选 *Normed 模式；用原始模式就等于关掉阈值。
                 Core.normalize(result, result, 0.0, 1.0, Core.NORM_MINMAX)
             }
 
@@ -142,13 +150,23 @@ object MatchTemplateHelper {
         val minY = (selectedY - maxDeltaY).coerceAtLeast(0)
         val maxY = (selectedY + maxDeltaY).coerceAtMost(candidateMask.rows() - 1)
 
+        // P3：逐像素 u8/setU8（每像素一次 JNI get/put）改为整行批量读写 —— 结果逐位一致，
+        // 只是 JNI 次数从 O(区块像素) 降到 O(区块行数)。
+        val rowBuf = ByteArray(maxX - minX + 1)
         for (y in minY..maxY) {
-            for (x in minX..maxX) {
-                if (hasSuppressingOverlap(selectedX, selectedY, x, y, templateWidth, templateHeight) &&
-                    MatOps.u8(candidateMask, y, x) != 0
+            MatOps.u8Row(candidateMask, y, minX, rowBuf)
+            var changed = false
+            for (i in rowBuf.indices) {
+                val x = minX + i
+                if (rowBuf[i].toInt() != 0 &&
+                    hasSuppressingOverlap(selectedX, selectedY, x, y, templateWidth, templateHeight)
                 ) {
-                    MatOps.setU8(candidateMask, y, x, 0)
+                    rowBuf[i] = 0
+                    changed = true
                 }
+            }
+            if (changed) {
+                MatOps.setU8Row(candidateMask, y, minX, rowBuf)
             }
         }
     }

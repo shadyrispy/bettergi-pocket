@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- §13.5#6：识别日志的 Tag 过滤芯片（选中=该 Tag 主色，未选=灰）。 -->
+    <style name="OverlayLogFilterChip">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:layout_marginStart">2dp</item>
+        <item name="android:layout_marginEnd">2dp</item>
+        <item name="android:background">@drawable/bg_overlay_row</item>
+        <item name="android:gravity">center</item>
+        <item name="android:minHeight">20dp</item>
+        <item name="android:textColor">@color/overlay_text_muted</item>
+        <item name="android:textSize">9sp</item>
+    </style>
+</resources>

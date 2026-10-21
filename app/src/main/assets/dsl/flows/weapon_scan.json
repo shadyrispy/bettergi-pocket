@@ -1,0 +1,151 @@
+{
+  "flow": "weapon_scan",
+  "version": "1.1.0",
+  "profile": "android_3200x1440",
+  "description": "流程一：武器背包全量扫描 → GoodWeapon (GOOD v3)",
+  "vars": {
+    "total": "int",
+    "seen": "set<fingerprint>",
+    "results": "list<GoodWeapon>"
+  },
+  "ui": {
+    "label": "武器扫描",
+    "icon": "weapon",
+    "order": 20,
+    "actions": [
+      {
+        "kind": "export",
+        "label": "导出"
+      },
+      {
+        "kind": "run",
+        "label": "开始"
+      }
+    ]
+  },
+  "steps": [
+    {
+      "do": "enterScreen",
+      "target": "weapon_backpack",
+      "chain": [
+        "game_home→bagpack(2786,36)"
+      ],
+      "anchor": {
+        "kind": "ocr",
+        "rect": "$screens._common.titleBar",
+        "expect": "背包",
+        "retries": 3
+      },
+      "note_split1": "2026-09-13：入口链拆两段（对齐 artifact_scan）。第一段只开背包并**确认标题条含「背包」**——否则第 2 击（weapon_tab）会落到还在加载或别的界面上，误触后整条流程带错跑。标题条 ROI `screens._common.titleBar` 为 2244 实测定标（51 张截图标题块包络 x[120,643] y[19,97]），背包页读作 `背包/圣遗物` 或 `背包／武器`。"
+    },
+    {
+      "do": "enterScreen",
+      "target": "weapon_backpack",
+      "chain": [
+        "weapon_tab(210,196,290,321)"
+      ],
+      "anchor": {
+        "kind": "ocr",
+        "rect": "$screens._common.titleBar",
+        "expect": "武器",
+        "retries": 3
+      },
+      "note_split2": "第二段：切武器页签后**确认标题条含「武器」**。⚠️ 不能只匹配 `背包` —— 背包页与武器页都含「背包」无法区分；「武器」才是武器页独有判据（实测 `背包／武器` 置信 0.93）。"
+    },
+    {
+      "do": "clicks",
+      "chain": [
+        "weaponSort",
+        "weaponSort"
+      ],
+      "note": "★2026-09-28 开局归零（对齐 artifact_scan 的 filterReset/dualStateButton）：武器背包没有筛选复位，但列表**排序方向是会话残留态**——上一跑或玩家手动留下的方向不确定。网格右下角「↑↓」排序钮点击=切换方向（实测 1 下 5★置顶、2 下 3★置顶，无弹窗），**点两下净零方向不变、但强制游戏重排并回到列表顶**⇒ 把列表归一到确定状态。动机：本轮 3200 首跑武器只出 131/165，RecurveBow(3★) 被星带投票误读成 2★ ⇒ `stopWhen rarity<=2` 尾部守卫**假触发**、整段 3★ 尾区（35 把）没扫；重排回顶后逐格读、守卫只在真正到底（无 ≤2★）才可能命中。⚠️ 链项**故意不带字面坐标**：2560/2244 档 `screens.weapon_backpack.sort` 尚未实测 ⇒ clickChainEntry 解析不到 profile 键又无字面 ⇒ 打「无坐标跳过」安全降级，绝不误点（要在这两档启用先各自量排序钮补进 profile）。"
+    },
+    {
+      "do": "readCount",
+      "rect": "$screens.weapon_backpack.count",
+      "as": "total",
+      "onZero": "reopenAndRetry"
+    },
+    {
+      "do": "pagedGrid",
+      "grid": "weapon_backpack",
+      "scrollToTop": true,
+      "fingerprintSkip": true,
+      "visit": [
+        {
+          "do": "stopWhen",
+          "mode": "duplicateStreak",
+          "streak": 3,
+          "dupPageConfirm": 1,
+          "action": "Stop",
+          "note": "2026-09-26 方案 C：pagedGrid 内阈值由引擎按**一页 + 一行**（cols×(traverseRows+1)）覆盖且**跨翻页累积**（见 ScanEngine.dupLimitEffective），所以一次命中就等于「点完一整页无新增、再翻一页、第一行仍无新增」⇒ 页级确认置 1。抬这一行的理由：单次滑动没落地只会造出恰好「一页」个重复件，旧阈值 21 会被一次滑空误停。streak=3 仅作 snap/rosterFind 等非翻页路径的兜底。"
+        },
+        {
+          "do": "stopWhen",
+          "expr": "rarity <= 2",
+          "action": "Stop+flush",
+          "note": "恢复（2026-09-17）：删除后并未解决 1★ 漏件（漏仍为 2），反而让低星区多录 7 件 ⇒ 回退。1★ 漏件的真因待查（疑与列表到底判据有关）。"
+        },
+        {
+          "do": "vote",
+          "zone": "weapon.card.lockBadge",
+          "passes": 3,
+          "as": "locked"
+        },
+        {
+          "do": "click",
+          "fast": {
+            "at": "$cell.center"
+          },
+          "fallback": [
+            {
+              "kind": "ocrAnchor",
+              "region": "$panel.weapon_backpack.name"
+            }
+          ]
+        },
+        {
+          "do": "vote",
+          "zone": "weapon.panel.starBand",
+          "as": "rarity",
+          "note": "★ 2026-09-11：星级改由**详情面板星行**判定（必须排在 click 之后——面板显示的是选中件）。卡片 starStrip 在 3★/4★ 边界抖动（同件两次 3★/4★，36 件中 10 件）；面板星行固定坐标、大而清晰，逐格金像素>100 计亮格数=星数。代价：低星件也要点一下才能知道星级（stopWhen 因此略滞后，可接受）。"
+        },
+        {
+          "do": "parsePanel",
+          "panel": "weapon_backpack",
+          "fields": [
+            "name",
+            "slot",
+            "mainLabel",
+            "mainValue",
+            "baseLabel",
+            "baseValue",
+            "level",
+            "refine",
+            "equipped"
+          ],
+          "dict": {
+            "name": "mappings.weapons",
+            "fuzzy": 1
+          }
+        },
+        {
+          "do": "emit",
+          "as": "GoodWeapon",
+          "compose": {
+            "rarity": "$rarity",
+            "locked": "$locked"
+          }
+        }
+      ]
+    }
+  ],
+  "endConditions": [
+    "stopWhen 触发",
+    "pagedGrid 自然遍历完（总数核对 total==len(results)）"
+  ],
+  "pending": [
+    "swipe settle 真机",
+    "2★ 绿色底色旁证补采样（非阻断）"
+  ]
+}

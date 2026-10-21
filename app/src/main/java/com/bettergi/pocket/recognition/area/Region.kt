@@ -1,6 +1,6 @@
 package com.bettergi.pocket.recognition.area
 
-import com.bettergi.pocket.recognition.IntRect
+import com.bettergi.pocket.core.IntRect
 
 fun interface NodeConverter {
     fun toPrev(x: Int, y: Int, w: Int, h: Int): IntRect

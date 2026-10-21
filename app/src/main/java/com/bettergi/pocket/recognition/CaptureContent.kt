@@ -1,12 +1,11 @@
 package com.bettergi.pocket.recognition
 
-import com.bettergi.pocket.capture.Frame
 import com.bettergi.pocket.recognition.area.GameCaptureRegion
 import com.bettergi.pocket.recognition.area.ImageRegion
 import com.bettergi.pocket.recognition.area.Region
 import com.bettergi.pocket.recognition.ocr.IOcrService
 import com.bettergi.pocket.recognition.ocr.OcrFactory
-import com.bettergi.pocket.recognition.opencv.MatOps
+import com.bettergi.pocket.core.image.MatOps
 import com.bettergi.pocket.recognition.opencv.OpenCvRuntime
 import org.opencv.core.Mat
 
@@ -51,17 +50,5 @@ class CaptureContent(
                 frameIndex = frameIndex,
             )
         }
-
-        fun fromFrame(
-            frame: Frame,
-            frameIndex: Int = 0,
-            ocrService: IOcrService = OcrFactory.default,
-        ): CaptureContent = fromBgr(
-            bgr = MatOps.frameToBgr(frame),
-            width = frame.width,
-            height = frame.height,
-            frameIndex = frameIndex,
-            ocrService = ocrService,
-        )
     }
 }

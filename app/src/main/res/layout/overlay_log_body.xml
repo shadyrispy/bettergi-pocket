@@ -1,8 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="260dp"
     android:layout_height="wrap_content"
-    android:background="@drawable/bg_overlay_log_body">
+    android:background="@drawable/bg_overlay_log_body"
+    android:orientation="vertical">
+
+    <!-- §13.5#6：按 Tag 过滤（点击切换显隐；选中态与日志同色） -->
+    <LinearLayout
+        android:id="@+id/overlay_log_filters"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="6dp"
+        android:paddingTop="4dp"
+        android:paddingEnd="6dp">
+
+        <TextView
+            android:id="@+id/overlay_log_filter_autoskip"
+            style="@style/OverlayLogFilterChip"
+            android:text="对话" />
+
+        <TextView
+            android:id="@+id/overlay_log_filter_scan"
+            style="@style/OverlayLogFilterChip"
+            android:text="扫描" />
+
+        <TextView
+            android:id="@+id/overlay_log_filter_lock"
+            style="@style/OverlayLogFilterChip"
+            android:text="加锁" />
+
+        <TextView
+            android:id="@+id/overlay_log_filter_equip"
+            style="@style/OverlayLogFilterChip"
+            android:text="装备" />
+
+        <TextView
+            android:id="@+id/overlay_log_filter_char"
+            style="@style/OverlayLogFilterChip"
+            android:text="角色" />
+    </LinearLayout>
 
     <ScrollView
         android:id="@+id/overlay_log_scroll"
@@ -25,4 +62,4 @@
             android:textColor="@color/overlay_log_green"
             android:textSize="10sp" />
     </ScrollView>
-</FrameLayout>
+</LinearLayout>

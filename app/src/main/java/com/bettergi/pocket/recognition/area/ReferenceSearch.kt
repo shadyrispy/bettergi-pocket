@@ -1,7 +1,7 @@
 package com.bettergi.pocket.recognition.area
 
-import com.bettergi.pocket.recognition.IntRect
-import com.bettergi.pocket.recognition.IntSize
+import com.bettergi.pocket.core.IntRect
+import com.bettergi.pocket.core.IntSize
 import com.bettergi.pocket.recognition.RecognitionTypes
 import com.bettergi.pocket.recognition.SearchAnchorMode
 import com.bettergi.pocket.recognition.SearchOptions

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- M3：可点元素须有按压反馈（原 bg_overlay_row 为纯 shape，点击无状态变化）。 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#33FFFFFF">
+    <item android:drawable="@drawable/bg_overlay_row" />
+</ripple>
