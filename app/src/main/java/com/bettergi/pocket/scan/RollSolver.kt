@@ -48,7 +48,7 @@ object RollSolver {
 
     /**
      * solver 输入项。`inactive` = 该行带「(待激活)」标记（**仅 lv0 可能**，见 GOODScanner
-     * `AGENTS.md §Unactivated Substats`：其数值是**真档位值**，按普通词条参与校验，
+     * `GOODScanner/AGENTS.md §Unactivated Substats`：其数值是**真档位值**，按普通词条参与校验，
      * 但**不计入 totalRolls**，且 lv0 的 init 直接 = 非待激活条数 ⇒ 歧义消失）。
      */
     data class In(val key: String, val value: Double, val inactive: Boolean = false)

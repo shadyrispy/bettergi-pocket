@@ -3,11 +3,14 @@ package com.bettergi.pocket.scan.flows
 import android.util.Log
 import com.bettergi.pocket.scan.ScanEngine
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
+import com.bettergi.pocket.scan.TimingOverrides
 import com.bettergi.pocket.scan.assertScreen
+import com.bettergi.pocket.scan.characterOnAttributesPage
 import com.bettergi.pocket.scan.enterScreen
 import com.bettergi.pocket.scan.navigate
 import com.bettergi.pocket.scan.pagedGridNative
 import com.bettergi.pocket.scan.readConstellation
+import com.bettergi.pocket.scan.readTalent
 import com.bettergi.pocket.scan.runVisitBody
 import com.bettergi.pocket.scan.stopWhenRegisterDuplicateStreak
 import com.bettergi.pocket.scan.visitClick
@@ -79,9 +82,12 @@ internal object CharacterFlow {
         .put("retries", 2)
         .put("onFail", "continue")
 
-    /** 原 visit[4]：解析角色概览面板（dict 平移：name=mappings.characters, fuzzy=1）。 */
+    /** 原 visit[4]：解析角色概览面板（dict 平移：name=mappings.characters, fuzzy=1）。
+     *  ★ 2026-10-15 #308：earlyDedupe——回卷区的重复件只读 header 判重（命中即跳过整份
+     *  5 矩形 parse + 名字重读循环 ≈1.5s/格）；key=null / 新角色照旧全量 parse。 */
     val PARSE_CHAR: JSONObject = FlowDicts.step("parsePanel")
         .put("panel", "char_profile")
+        .put("earlyDedupe", true)
         .put("dict", JSONObject().put("name", "mappings.characters").put("fuzzy", 1))
 
     /**
@@ -125,21 +131,27 @@ internal object CharacterFlow {
 }
 
 /**
- * character_scan 原生入口（spec §3.3）。步序 = 原 flow JSON 的 steps 逐条直调：
- * enterScreen(char_interface) → pagedGridNative(char_strip, scrollToTop)。
+ * character_scan 步序主体（`ScanEngine.run()` 按 flowName 分派用；preamble/postamble 也在那边调）。
+ * 步序 = 原 flow JSON 的 steps 逐条直调：enterScreen(char_interface) →
+ * pagedGridNative(char_strip, scrollToTop)。
+ * ★ D1（#233 单2④ 同批，2026-10-14 删）：这里原先还包着一个 `runCharacterScanNative()`
+ *   （preamble + 本函数 + postamble 的三行壳），全仓零调用者 —— 生产入口是 `run()` 直接分派到
+ *   本函数，壳只让人误以为存在"每流程一个原生入口"这层 API。
  * dedupeSkip 语义内联进 visitBody（key==null 不跳过；跳过后命之座/天赋两跳省略，
  * stopWhen/emit 照跑 = TAIL_RUN_ALWAYS 语义由 `if (!visitSkipTail)` 守卫自行保证）。
  */
-internal suspend fun ScanEngine.runCharacterScanNative() {
-    runPreamble()
-    runCharacterSteps()
-    runPostamble()
-}
-
-/** character_scan 步序主体（ScanEngine.run() 按 flowName 分派用）。 */
 internal suspend fun ScanEngine.runCharacterSteps() {
     nativeStep("enterScreen") { enterScreen(CharacterFlow.ENTER_CHAR) }
+    // ★ #274：`reverse` 是 **object 级**状态（跨 run 存活），而它的语义是"上一格把面板留在了哪一页"。
+    //   刚 enterScreen 完 ⇒ 面板必然在「属性」页（进角色界面的落点），所以这里必须显式回到正序。
+    //   不清的后果：上一轮若结束在"反序待走"，这一轮第 0 格会以为面板停在天赋页 ⇒
+    //   天赋页预读/判重/（本次新增的）天赋读取全部落在属性页上。
+    CharacterFlow.reverse = false
     nativeStep("pagedGrid") {
+        // ★ #219：dup 参数在**进 pagedGrid 之前**登记一次。判据（页级确认 dupPageConfirm）在
+        //   格循环里就被读，而流程体内的那次登记要到第 0 格 visit 才生效 ⇒ 从页 0 起算的值
+        //   才是流程真正声明的那个（流程体内保留同值登记，由守卫静默跳过）。
+        stopWhenRegisterDuplicateStreak(3, 2)
         pagedGridNative(CharacterFlow.GRID, scrollToTop = true) { col, row, idx, prof ->
             runVisitBody(CharacterFlow.GRID, col, row, idx, prof, CharacterFlow.EMIT_CHAR, CharacterFlow.STOP_DUP) { ctx ->
                 // ★ 交替页签序（GS scanner.rs:1770-1822 对齐，2026-10-10 双源名字方案）：
@@ -151,8 +163,29 @@ internal suspend fun ScanEngine.runCharacterSteps() {
                     // ── 正序格 ──
                     // ① 点头像
                     visitClick(CharacterFlow.CLICK_CELL, CharacterFlow.GRID, col, row, idx, ctx, prof)
-                    // ② navigate 复位属性页（上一格结束在天赋页 ⇒ name/header ROI 需回属性页语境）
-                    navigate(CharacterFlow.NAV_ATTRIBUTES)
+                    // ② 复位属性页 —— ★ #233 单2：这一跳**按构造就是多余的**。
+                    //   能走进正序分支就意味着 `reverse==false`，而 reverse=false 只有三种来路：
+                    //   刚 enterScreen（落点就是属性页）／上一格是跳过格（跳过时不翻页）／
+                    //   上一格是反序格且其尾步就是 `navigate(NAV_ATTRIBUTES)`。点头像不换页 ⇒
+                    //   面板此刻已经在属性页，今天的实现仍要点一下 + 等 `nav=700ms`。
+                    //   实测账（BS 全量 click=460 − 158 头像 − 2 前置 ≈ 300 次页签点击，
+                    //   tmNavMs=210000 = 300×700）里正序格占 **107~110 次复位**（48 全格 + 59~62 跳过格；
+                    //   逐条日志与逐格推演在这 2~3 格上对不齐，**实值以摘要新增的 `跳过=N` 为准**）
+                    //   ⇒ 107~110 × 700ms ≈ 全轮 515.6s 的 14.5~15.4%。
+                    //   改成先做一次**正向页判定**（[characterOnAttributesPage]，见其 KDoc 为什么用
+                    //   OCR 而不是像素判稳）：判到就不点不等，判不到照旧导航 ⇒ 自愈能力不变，
+                    //   代价是每格多 1 张帧 + 1 次矩形 OCR（BS ≈ 60ms，换 700ms + 1 击）。
+                    //   ⚠️ 读时序没有被压缩：省掉导航后 parse 落在「点击 + 550ms 面板等待 + 本判定」
+                    //   之后，比反序格那条**已经在生产上跑通的**「点击 + 550ms 就 parse」还晚一拍。
+                    if (TimingOverrides.navSkipRedundant && characterOnAttributesPage()) {
+                        navRedundantSkipped++
+                        Log.i(
+                            TAG,
+                            "visit cell($col,$row) idx=$idx 已在属性页 ⇒ 省一次复位导航（-1 击 -${TimingOverrides.navSettleMs}ms）",
+                        )
+                    } else {
+                        navigate(CharacterFlow.NAV_ATTRIBUTES)
+                    }
                     // ③ parse（assert 属性/元素判据内联同帧）
                     visitParsePanel(CharacterFlow.PARSE_CHAR, CharacterFlow.GRID, col, row, idx, ctx, prof)
                     // ④ dedupeSkip（header 名字判重；key==null 不跳过照旧）
@@ -182,6 +215,20 @@ internal suspend fun ScanEngine.runCharacterSteps() {
                     // ③ dedupeSkip（用天赋页 header 名字判重；已见过 ⇒ 跳过属性/命座两跳）
                     visitDedupeSkip(col, row, idx)
                     if (!visitSkipTail) {
+                        // ★ #274：**这一半角色的天赋读取原先整条不存在**。正序格的天赋是在
+                        //   `navigate(NAV_TALENT)` 里顺带读的（`ScanNavigationDomain.kt:1023`
+                        //   `name.contains("天赋") -> readTalent()`），而反序格**从不导航到天赋页**
+                        //   —— 它开局就停在那一页 ⇒ 2026-10-10「交替页签序省一次点击」把反序这半的
+                        //   读取漏干净了。10-13 华为全量实测：43/95 件导出 `t=[0,0,0]`，
+                        //   而 `char: 天赋等级 [` 只打了 52 次（52 + 43 = 95 逐位对上）⇒ 不是读歪，是没读。
+                        //   补在这里而不是补一次导航：**零额外点击**（面板本来就在这页），
+                        //   且判重跳过的格不付这次读取。
+                        //   先 `assertScreen` 再读：这条断言在正序格里是"确认落到了天赋页"，
+                        //   在反序格里语义换成"确认上一格确实把我们留在了天赋页"——同一个判据、
+                        //   同一个失败行为（未命中 ⇒ 按一次 BACK 后继续），失败时读出来是 0，
+                        //   会被 `charTalentUnread` 当场报出来，不会再静默。
+                        assertScreen(CharacterFlow.ASSERT_TALENT)
+                        readTalent()
                         // ④ 命之座 + ⑤ 属性页（parse 补读 level/元素，结束在属性页）
                         navigate(CharacterFlow.NAV_CONSTELLATION)
                         readConstellation(CharacterFlow.READ_CONSTELLATION)
@@ -189,10 +236,15 @@ internal suspend fun ScanEngine.runCharacterSteps() {
                         visitParsePanel(CharacterFlow.PARSE_CHAR, CharacterFlow.GRID, col, row, idx, ctx, prof)
                         CharacterFlow.reverse = false
                     } else {
-                        // 跳过格：level 没读过 ⇒ 必须回属性页补一次完整 parse（否则该角色 level=0 入库 ✗）
-                        navigate(CharacterFlow.NAV_ATTRIBUTES)
-                        visitParsePanel(CharacterFlow.PARSE_CHAR, CharacterFlow.GRID, col, row, idx, ctx, prof)
-                        Log.i(TAG, "visit cell($col,$row) idx=$idx 已判重 ⇒ 属性页补读后跳过两跳")
+                        // 跳过格：★ 2026-10-15 #308 起不再回属性页补读——那份 parse 的唯一用途
+                        //   是 level/name，但重复件在 emitCharacter 的 dup 分支**不入库**（resetCharDraft
+                        //   后丢弃），level 从未被消费；判重需要的 key 天赋页 headerOnly 已给出。
+                        //   ⚠️ 但 emitCharacter 开头有「charName 为空 ⇒ return」短路，而
+                        //   noteDupAndMaybeStop（回卷止扫判据）在它**之后**——不补 name 会让
+                        //   判据断粮、列表一直滚。这里用 key 原文填 name（只进日志与不入库的
+                        //   GoodCharacter.name，两处都无害）。
+                        if (charName.isEmpty() && charKey != null) charName = charKey!!
+                        Log.i(TAG, "visit cell($col,$row) idx=$idx 已判重 ⇒ 跳过两跳（免属性页补读）")
                         CharacterFlow.reverse = false
                     }
                     stopWhenRegisterDuplicateStreak(3, 2)

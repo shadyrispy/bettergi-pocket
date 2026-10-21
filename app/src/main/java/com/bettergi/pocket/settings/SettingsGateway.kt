@@ -16,6 +16,18 @@ import android.os.Bundle
 interface SettingsGateway {
     fun get(): TriggerSettings
 
+    /**
+     * ★ #183（2026-10-13 用户定口径）：面板「共享屏幕」那颗药丸开关显示**现状**，不是用户意图。
+     *
+     * 意图是 `get().screenShareEnabled`（持久化、点了就翻），而"投影到底开着没"只有主进程的
+     * `ScreenCaptureController.isRunning()` 知道。两者在过去同一个开关上混用，实测症状就是
+     * #250 那轮量到的「开关亮着、其实没投影」（`status screenShare=true captureRunning=false`）。
+     *
+     * ⚠️ 取不到就报 false：权威值只有一个来源（主进程那个活的 controller），
+     * 拿不到 = 服务不在 = 没有投影。宁可不亮，也不能亮着骗人。
+     */
+    fun captureRunning(): Boolean
+
     fun addListener(listener: (TriggerSettings) -> Unit)
 
     fun removeListener(listener: (TriggerSettings) -> Unit)

@@ -41,6 +41,48 @@ object TimingOverrides {
      */
     var pipeDepth: Int = DEFAULT_PIPE_DEPTH
 
+    /**
+     * ★ A③（#69 收尾，2026-10-13）：本轮 `pipe=` 是否**显式给过**。
+     *
+     * 管道深度改按**流程属性**给默认（见 [ScanEngine.PIPE_DEFAULT_BY_FLOW]）之后，这条是
+     * 唯一能把"默认开着管道的流程"拉回同步臂的把手 —— 没有它，`--es timing "pipe=0"`
+     * 会被流程默认覆写，#69 那种正反序 A/B 与"管道出问题先退回同步"的回退路同时失效。
+     */
+    var pipeExplicit: Boolean = false
+
+    /**
+     * ★ #260：管道"锚点早到交付"（#253）那次停等的**无进展轮询次数**上限，
+     * 0 = 用 [ScanEngine.PIPE_ANCHOR_IDLE_POLLS]（45_000 次 × 2ms ≈ 90s 名义）。
+     *
+     * 这里曾经是**墙钟预算**（90s），而干跑里它量的是"这台机器有多忙"：满载复跑（load 12，
+     * 8 个 busy 进程）实测被打满 ⇒ 锚定退回"照常访问" ⇒ 管道臂比同步臂**多击一整条重叠带**
+     * （`expected 43 but was 50`）。当时的处置是给干跑设一个大值把它失效 —— 那是掩码，
+     * 真机侧的静默降级（慢机 90s 内跑不完 2~3 个 job ⇒ 每页白多击数格）还在。
+     * 现在上限改按"消费者有没有处理完 job"计（论证见 [ScanEngine.PIPE_ANCHOR_IDLE_POLLS]），
+     * 负载只会让真实时长变长、不会变短，所以干跑不再需要任何覆盖值；本旋钮只留给
+     * 真机上"想更早收手"的实验。
+     */
+    var pipeAnchorIdlePolls: Long = 0L
+
+    /**
+     * 武器面板那段盲等的覆盖值（`wpdelay=<ms>`，**默认 0 = 不等**）。
+     * 2026-10-14 #233 把原先写死的 300ms 删了（它作用在抓帧之后 ⇒ 只是盲等），
+     * 这个键留着纯粹是为了能把那段等待加回去做对照（照 `dupskip` 的先例）。
+     *
+     * 之所以要能运行时改：2026-10-14 读代码发现**这段延迟在抓帧之后**
+     * （[ArtifactDomainPanels] 里 `frame` 在 :267 就 acquire 好了，:292 才 delay），
+     * 所以它不可能在"等面板渲染完"，只是把 OCR 推迟到一张**已经定格的帧**之后 ⇒ 净效果 = 白等 300ms/格。
+     * 这个结论要靠 A/B 定，不该由我一句话直接删常量。
+     */
+    var weaponPanelDelayMs: Long = 0L
+
+    /**
+     * 签名不可用时那条**固定等待**的覆盖值（`prefresh=<ms>`，`-1` = 用 [ScanEngine.PANEL_REFRESH_MS]）。
+     * 角色流水每格都走这一档 ⇒ 这是"角色等待"唯一的旋钮；对齐方案里 550→400 那条取值决策
+     * 原先没有 A/B 通道（纯 const，改一次重编一次），这个键就是为了补上它。
+     */
+    var panelRefreshMs: Long = -1L
+
     /** 签名轮询步长（仅 [panelSigEnabled] 时生效）。默认 40ms —— 实测面板内容 133ms 就绪（中位）。 */
     var panelSigPollMs: Long = ScanEngine.PANEL_SIG_POLL_MS
     /**
@@ -141,6 +183,11 @@ object TimingOverrides {
         panelSigEnabled = DEFAULT_PANEL_SIG_ENABLED
         panelCrop = DEFAULT_PANEL_CROP
         pipeDepth = DEFAULT_PIPE_DEPTH
+        pipeExplicit = false
+        pipeAnchorIdlePolls = 0L
+        weaponPanelDelayMs = 0L
+        panelRefreshMs = -1L
+        navSkipRedundant = true
         panelSigPollMs = DEFAULT_PANEL_SIG_POLL_MS
         panelSigBand = DEFAULT_PANEL_SIG_BAND
         panelSigSamples = DEFAULT_PANEL_SIG_SAMPLES
@@ -216,6 +263,18 @@ object TimingOverrides {
     var duplicateCellSkipWait: Boolean = false
 
     /**
+     * ★ #233 单2（2026-10-14，默认 **开**）：角色正序格「复位到属性页」那一跳，先用一次正向页判定
+     * 证明已经在属性页，判到就**不点也不等**（省 1 击 + `nav` 那一档）。
+     * `--es timing "navskip=0"` 回退到今天的盲导航（A/B 与回滚用）。
+     *
+     * 与 [duplicateCellSkipWait] 的区别要说清：那条靠"卡格指纹没变"推断"面板还是上一件"，实测会
+     *   抓到上一件的面板而**静默漏格**（已改回默认不跳）；本条靠**目标页自己的文本**做正向证明
+     *   （bottomBar「提升指南」，三页互斥），且这一跳**根本不需要等页面切换** —— 它省的是"点了一下
+     *   同一个已经亮着的页签"之后的动画等待，不是"页面还没到就不等"。判不到一律照旧导航。
+     */
+    var navSkipRedundant: Boolean = true
+
+    /**
      * 入口幂等（开链前先短轮询锚点，命中即跳过入口链）。默认 **开**；
      * 干跑测试关掉它，因为测试夹具的合成帧会让锚点直接命中、从而不再记录入口链的点击（点击计数断言会变）。
      */
@@ -227,6 +286,7 @@ object TimingOverrides {
         anchorBudgetMs = 0L
         overlapSkip = true
         duplicateCellSkipWait = false
+        navSkipRedundant = true
         entryIdempotent = true
         panelSettleMs = 0L
         if (!spec.isNullOrBlank()) {
@@ -251,13 +311,21 @@ object TimingOverrides {
                     "sstable" -> settleStableMs = v
                     // ★ 就绪信号直采 A/B 开关：sig=0 回退为固定 delay(PANEL_REFRESH_MS)（见字段 KDoc）
                     "sig" -> panelSigEnabled = v != 0L
+                    // #233 单2：navskip=0 ⇒ 正序格照旧盲点一次复位页签（A/B 基线臂）
+                    "navskip" -> navSkipRedundant = v != 0L
                     // S1 裁片开关（#69）：crop=1 时解析读裁片
                     "crop" -> panelCrop = v != 0L
                     // S2b 流水线深度（#69）：0=同步；1..8=消费者队列深度（>0 强制 crop=1）
                     "pipe" -> {
                         pipeDepth = v.toInt().coerceIn(0, 8)
+                        pipeExplicit = true
                         if (pipeDepth > 0) panelCrop = true
                     }
+                    // #260：锚点早到交付的预算（干跑给大值，真机留默认 90s）
+                    // #260 后半：锚点停等的"无进展轮询次数"上限（原为墙钟预算，干跑不再需要覆盖）
+                    "panchor" -> pipeAnchorIdlePolls = v.coerceAtLeast(0L)
+                    "wpdelay" -> weaponPanelDelayMs = v.coerceIn(0L, 5000L)
+                    "prefresh" -> panelRefreshMs = v.coerceIn(-1L, 5000L)
                     "sigpoll" -> panelSigPollMs = v.coerceAtLeast(5L)
                     "sigband" -> panelSigBand = v != 0L
                     "sigsamples" -> panelSigSamples = v.toInt().coerceIn(1, 6)
@@ -292,7 +360,10 @@ object TimingOverrides {
             "sig=${if (panelSigEnabled) 1 else 0},crop=${if (panelCrop) 1 else 0},pipe=$pipeDepth,sigpoll=$panelSigPollMs," +
             "sigband=${if (panelSigBand) 1 else 0},sigsamples=$panelSigSamples,sigconfirm=${if (panelSigConfirm) 1 else 0}," +
             "siggate=${if (panelSigGateCached) 1 else 0},phi=${if (phiApply) 1 else 0}," +
-            "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0},panel=$panelSettleMs," +
+            "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0}," +
+            "navskip=${if (navSkipRedundant) 1 else 0},dupskip=${if (duplicateCellSkipWait) 1 else 0}," +
+            "panel=$panelSettleMs," +
+            "wpdelay=$weaponPanelDelayMs,prefresh=$panelRefreshMs," +
             "advdist=$advanceDistPx,advextra=$advanceExtraPx," +
             "skiplimit=$pageSkipLimit,swipecap=$maxTotalSwipes," +
 

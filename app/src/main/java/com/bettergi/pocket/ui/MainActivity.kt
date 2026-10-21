@@ -214,56 +214,66 @@ class MainActivity : AppCompatActivity() {
         //   chooser 永远不起，pendingShareFile 永久留在字段里，用户看到的正是"点了没反应"。
         //   实测：引导没走完时点导出弹出来的是**引导页**；停在管理器页点导出焦点仍停在 MainActivity。
         if (consumeShareCommand()) return
-        // 引导页：从系统设置返回时刷新（开了无障碍就该立刻打勾），不参与下面的中转分支
+        // ★ #276：投影/VPN 授权中继与分享**同性质**，也必须在界面分支之前消费。
+        //   它是 A29 删掉 extras 通道后**唯一**的恢复路径，而 PendingHandoff 是**一次性**交接
+        //   （consume 只读一次，onCreate 那条已在 handleIntent 里用掉）⇒ 一旦被下面的
+        //   onboarding/manager 早返回吞掉就**永久丢失**——没有任何重放者。
+        //   实测路径（真机/模拟器都成立）：用户停在管理器页点悬浮窗的投影授权 ⇒ 服务
+        //   post(RequestCapture) 后以 FLAG_ACTIVITY_REORDER_TO_FRONT 把本页顶到前台 ⇒
+        //   onNewIntent 记账 → onResume 被 managerShown 分支吞掉 ⇒ 标志留在字段里、
+        //   界面一动不动，正是用户看到的"点了没反应"。
+        //   旧注释说"被界面顶掉只是延后"与事实不符（没人重放 ⇒ 就是丢失），故改到此处置前。
+        if (consumeRelayCommand()) return
+        // 引导页：从系统设置返回时刷新（开了无障碍就该立刻打勾），不参与下面的自动起悬浮窗分支
         if (onboardingShown) {
             renderOnboarding()
             return
         }
-        // 管理器界面优先，不能被下面两个中转分支顶掉（曾实测被覆盖 ⇒ 首启仍显示别的界面 ✗）
+        // 管理器界面优先，不能被下面**自动起悬浮窗**的分支顶掉（曾实测被覆盖 ⇒ 首启仍显示别的界面 ✗）
         if (managerShown) {
             // 从系统设置页回来 ⇒ 抓包权限小节要重新判一遍（其余界面不重绘，避免打断操作）
             renderCaptureSection()
             // 「扫描结果」也要刷：停在页面上时刚跑完一轮，不刷就还显示上一份（2026-10-03 实测显示 35h 前那份）
             renderGoodSection()
-            // 授权中转被界面优先延后 —— 留着标志，但必须留痕，否则"点了没反应"又无从归因（同 D1 的教训）
-            if (pendingCaptureRequest || pendingVpnRequest) {
-                android.util.Log.i(
-                    "BetterGI.Main",
-                    "授权中转被管理器界面延后（capture=$pendingCaptureRequest vpn=$pendingVpnRequest）",
-                )
-            }
             return
         }
         // ⚠️ 2026-09-18：这里原先还有一个「显示在上层」授权分支 —— 悬浮窗搬到无障碍进程后
-        //    （TYPE_ACCESSIBILITY_OVERLAY 零权限）已整体删除，只剩投影授权与分享两个中转。
+        //    （TYPE_ACCESSIBILITY_OVERLAY 零权限）已整体删除。
+        // 走到这里：无分享、无授权中继、非引导页、非管理器页 ⇒ 正常路径：起悬浮窗并收掉本页。
+        // （分享已在 [consumeShareCommand] 消费 ⇒ 此处不再有 pendingShareFile 分支。）
+        launchOverlayAndExit()
+    }
+
+    /**
+     * 消费"投影/VPN 授权"这条一次性中继（#276）。
+     * 与分享同性质的界面层命令：进了界面分支就会被吞掉、且 [PendingHandoff] 一次性
+     * ⇒ 必须最先消费，否则这次用户请求永久丢失。
+     * @return true 表示本次 onResume 已由授权中继接管，调用方必须**直接 return**。
+     */
+    private fun consumeRelayCommand(): Boolean {
         when {
             // 前台内发起投影授权（fix53：悬浮球路径的兜底，activity 前台时启动合法）
             pendingCaptureRequest -> {
                 pendingCaptureRequest = false
+                android.util.Log.i("BetterGI.Main", "授权中继: 前台内补发起投影授权")
                 startActivity(
                     Intent(this, CapturePermissionActivity::class.java)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 )
+                return true
             }
             // 前台内发起 VPN 授权（抓包隧道；服务后台拉中转页被 ROM 拦时的同一条兜底）
             pendingVpnRequest -> {
                 pendingVpnRequest = false
+                android.util.Log.i("BetterGI.Main", "授权中继: 前台内补发起 VPN 授权")
                 startActivity(
                     Intent(this, CaptureConsentActivity::class.java)
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 )
-            }
-            // 前台内起系统分享 chooser（service 后台起 chooser 需要 Activity 上下文，不可靠）
-            else -> {
-                val shareFile = pendingShareFile
-                if (shareFile != null) {
-                    pendingShareFile = null
-                    shareGood(shareFile)
-                } else {
-                    launchOverlayAndExit()
-                }
+                return true
             }
         }
+        return false
     }
 
     /**

@@ -24,6 +24,7 @@ import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.Rect
 import org.opencv.imgcodecs.Imgcodecs
+import com.bettergi.pocket.scan.flows.LockFlow
 import com.bettergi.pocket.scan.flows.runArtifactSteps
 import com.bettergi.pocket.scan.flows.runCharacterSteps
 import com.bettergi.pocket.scan.flows.runCharCalibrateSteps
@@ -92,6 +93,21 @@ class ScanEngine(
      * 而用户口径是**游戏切后台本来就会断线重登** ⇒ 这一轮已经没有继续的意义，应当立刻停轮报出来。
      */
     internal val foregroundOk: (() -> Boolean?)? = null,
+    /**
+     * ★ 2026-10-15 S4a：**同包名的 MiHoYo SDK 登录/切号页探针** —— 返回 true = 前台是登录页。
+     * 默认 null = 不判（单测/离线跑不接无障碍）。
+     *
+     * 为什么必须单独一条（不能并进 [foregroundOk]）：SDK 登录页与游戏**同包名**
+     * （`com.miHoYo.Yuanshen/com.miHoYo.sdk.platform.SdkActivity`），前台闸按包名判恒为"是原神"
+     * ⇒ 放行。2026-10-14 06:10 真机实测：被顶号后 SDK 页冒出来，character_scan 当场崩在
+     * `anchor not reached: /元素/`（`20261014_huawei_283/evidence/`）—— 注入侧虽已拦（#283），
+     * 但引擎不知道，会一路重试到超时。
+     *
+     * 处置口径 = **停手 + 通知**（项目红线：一旦冒出登录表单立刻交回用户，绝不自动填）。
+     * 判据走 Activity **类名**（`GenshinPackages.isSdkActivity`），不是画面 —— 画面级判据
+     * 对同包名的登录页无效（详见 `ScreenStateJudge` 顶部"为什么画面判据不够"）。
+     */
+    internal val sdkLoginOnTop: (() -> Boolean?)? = null,
     /** 翻 N 页早停（调试翻页准确性用；默认不限制）。 */
     internal val maxPages: Int = Int.MAX_VALUE,
     /** 单测注入真实时钟用：JVM 里 SystemClock 被 returnDefaultValues 恒返回 0（会挂死轮询）。 */
@@ -169,6 +185,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     }
 
     suspend fun run() {
+        // ★ 复核（2026-10-13）：**先定深度再跑前导** —— `runPreamble` 会打一行本轮生效的
+        //   `timing: … pipe=N …`（canonical 摘要），而 `applyFlowPipeDefault` 以前在它之后跑 ⇒
+        //   摘要里报的是"命令里给的"深度，不是**实际生效**的（例如白名单流程被显式 pipe=2 拉回 0 时，
+        //   摘要仍写 pipe=2）。归因时这行是被当作事实读的，不能报一个本轮没用的值。
+        applyFlowPipeDefault()
         runPreamble()
         // ★ simple 分支（spec §1/§4，2026-10-07）：DSL 运行时已下线 —— 按 flowName 分派到
         //   原生步序（weapon/artifact/character/lock/equip + 两条标定流；dict/vars/步序常量
@@ -176,6 +197,10 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         when (flowName) {
             "weapon_scan" -> runWeaponSteps()
             "artifact_scan" -> runArtifactSteps()
+            // ★ 2026-10-14：套装筛选后扫描（adb 调试工具）——在 artifact_scan 前先按
+            //   LockFlow.SET_FILTER 应用一次套装筛选；筛选未生效即在 runArtifactSteps 内抛
+            //   ScanAbortedException 中止，绝不退化全量扫。pipe 默认 0（不在 PIPE_DEFAULT_BY_FLOW）。
+            "artifact_scan_set" -> runArtifactSteps(setFilterStep = LockFlow.SET_FILTER)
             "character_scan" -> runCharacterSteps()
             "artifact_lock" -> runLockSteps()
             "auto_equip" -> runEquipSteps()
@@ -188,6 +213,40 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         }
         runPostamble()
     }
+
+    /**
+     * ★ A③：把本流程的**默认管道深度**落到 [TimingOverrides.pipeDepth]（在分派前、取帧前置之后）。
+     *
+     * 显式给过 `pipe=` 时一字不动（A/B 与回退把手见 [TimingOverrides.pipeExplicit]）；
+     * 与 `timing` 的 `pipe` 分支同口径：深度 >0 必须同时开 `crop`，因为消费者只拿得到裁片，
+     * 「整帧路径 + 流水线路径」并存会留语义漂移（原注释见 TimingOverrides.pipeDepth KDoc）。
+     */
+    internal fun applyFlowPipeDefault() {
+        val allowed = PIPE_DEFAULT_BY_FLOW.containsKey(flowName)
+        if (!allowed && TimingOverrides.pipeDepth > 0) {
+            // ★ 写类流程（artifact_lock / auto_equip）与角色扫描**一律不许开管道**，
+            //   连显式 `pipe=` 也不行：它们在**下一格开头**读回本格投票位来决定点不点写操作
+            //   （LockFlow.kt 的 curLock、ScanJudgmentDomain 的写流程分支），而管道下这些位
+            //   滞后 ≤pipeDepth 格 ⇒ 拿旧状态点写按钮。以前这条约束只写在注释里，
+            //   而 `pipeExplicit` 让任何人都能把它绕过去 ⇒ 约束落到代码上。
+            Log.e(
+                TAG,
+                "pipe=${TimingOverrides.pipeDepth} 对 flow=$flowName 不生效 ⇒ 强制回同步（写类/角色流程不能开管道，见 PIPE_DEFAULT_BY_FLOW）",
+            )
+            TimingOverrides.pipeDepth = 0
+            return
+        }
+        if (TimingOverrides.pipeExplicit) {
+            Log.i(TAG, "pipe 深度取显式值=${TimingOverrides.pipeDepth}（flow=$flowName 的默认被覆盖）")
+            return
+        }
+        val d = PIPE_DEFAULT_BY_FLOW[flowName] ?: 0
+        if (d == TimingOverrides.pipeDepth) return
+        TimingOverrides.pipeDepth = d
+        if (d > 0) TimingOverrides.panelCrop = true
+        Log.i(TAG, "pipe 深度取流程默认：flow=$flowName ⇒ depth=$d${if (d > 0) "（crop 强制开）" else ""}")
+    }
+
 
     /**
      * run() 的**前半段**（simple 分支抽出，一字未改）：计时/观察计数复位、PerfProbe.reset、
@@ -205,8 +264,16 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   ⇒ 同进程连跑两轮时第二轮的 `scan finished` 摘要会把上一轮的数一起算进去。
         dupRevisits = 0; dupRevisitRecovered = 0; pageFreezeAbandoned = 0; swallowedClickRetries = 0
         clickGiveups = 0; weaponStaleDropped = 0
+        navRedundantSkipped = 0 // #233 单2：冗余复位导航的跳过计数（与上面同一批观察量同点复位）
+        // ★ #241（2026-10-13）：重裁链三计数同点复位 —— 不给复位点就会重演 2026-09-24 那次
+        //   「第二轮摘要把上一轮的观察数一起报」（同 :239-240 的教训）。
+        recropAttempts = 0; recropNewCandidates = 0; recropRescued = 0
         weaponOverlapRepeats = 0; weaponIdentityRuns.clear(); lastEmittedWeaponIdentity = null
-        unknownSetPieces = 0; charUnresolved = 0
+        unknownSetPieces = 0; charUnresolved = 0; charTalentUnread = 0
+        // ★ #265：随 run 复位，与其它观察量同一处。这个量只在 visit 第 ② 步被读，而那时**本格还没投票**
+        //   （星级在第 ⑤ 步才投）⇒ 它天生读的是"上一格的读数"；不清零就会让新一轮/新计划项的
+        //   第 1 格直接继承上一轮尾部那件低星 ⇒ 一开场就止扫。
+        lastVotedWeaponRarity = -1
         weaponDictMiss = 0; weaponDictMissNames.clear()
         panelShotSeq = 0; panelShotDropped = 0; panelShotWriteFailures = 0
         panelShotSpaceCheckedAt = 0; panelShotSpaceOk = true
@@ -264,6 +331,8 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //     ⚠️ 但覆盖到不等于量到：走 snap 的只有 `select_3col`（auto_equip），而它不读背包
         //     计数器 ⇒ `total==null`，这里今天仍然不会为它报警。真实收益在 foreach 那道守卫上。
         val collected = results.size + resultsWeapons.size + resultsCharacters.size
+        // ★ 筛选流程（artifact_scan_set）**不读**表头总数：那 974/2700 是全量持有量、不随筛选变，
+        //   与筛选后的网格不同量纲 ⇒ `total` 保持 null，本判据在筛选下自动不启用（而非误报）。
         val total = vars.total
         val sawWholeList = !vars.stopRequested || (vars.gridExhausted && !vars.matchHit) ||
             vars.stopReason == STOP_REASON_MATERIAL
@@ -297,8 +366,18 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 // ★ P0-B（2026-10-08）：solver 不可解率观测 —— >0 ⇒ 有件按"原样导出"走（roll 未解出），
                 //   持续 >0 就是补图像级重试链的依据（GS 对齐 P0-2，见 simple-conversion-spec §3.6）。
                 (if (RollSolver.missCount > 0) "roll未解=${RollSolver.missCount}件 " else "") +
+                // ★ #241（2026-10-13）：重裁抢救链三口径，紧挨 roll未解 放（两者同解「读失败」这一个问题）：
+                //   进链件数/重读新增候选（去重后）/重裁解出件数。链没进（正常轮）整段不打 ——
+                //   同 roll未解 的条件式零噪声；`抢救>0` 才证明链在兜底在救人，`重裁-抢救` 的差
+                //   就是链跑了却没救回的件数，`新候选≈0` 则说明重读根本没读出东西。
+                (if (recropAttempts > 0) {
+                    "重裁 n=${recropAttempts}/新候选 ${recropNewCandidates}/抢救 ${recropRescued} "
+                } else "") +
                 // ★ #156：身份未解析的位数（照常入库、导出无 key）。>0 就说明昵称表又漏人了，
                 //   对账侧会同时报"多 N 条未解析 + 缺 N 个真角色"。
+                // ★ #274：天赋没读成的角色数（0 不是合法值）——条件式打印，与 `未解析身份` 同一族。
+                //   这条计数的存在理由见字段 KDoc：交替页签序漏了反序格那半，跑完只看得见件数。
+                (if (charTalentUnread > 0) "天赋未读=${charTalentUnread}件 " else "") +
                 "未解析身份=${charUnresolved}位 " +
                 // ★ #46：取证落盘的闸门计数只在**有话说**时出现（默认关取证 ⇒ 全 0 ⇒ 不打，免噪声）
                 (if (panelShotSeq > 0 || panelShotDropped > 0 || panelShotWriteFailures > 0) {
@@ -315,7 +394,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 (if (settleFrameTimeouts > 0) {
                     "判稳无新帧=${settleFrameTimeouts}次(用缓存帧 ${settleStaleFramesUsed}次) "
                 } else "") +
-                "perCell=${perCell}ms perPage=${perPage}ms | waits nav=${tmNavMs} panel=${tmPanelMs} settle=${tmSettleMs}",
+                "perCell=${perCell}ms perPage=${perPage}ms | waits nav=${tmNavMs} panel=${tmPanelMs} settle=${tmSettleMs} " +
+                    // ★ #233 单2：**无条件**打印（不走"非 0 才打"那条惯例）—— 这一条是 A/B 的
+                    //   机制判据，恒 0 意味着页判据从没命中过（故障而非"没优化到"），
+                    //   条件式打印会把"没省"和"没打这行"糊成同一件事。
+                    "| 正序复位导航 跳过=${navRedundantSkipped}格",
         )
         // 只读性能探针：click/swipe 真实注入耗时 + OCR 网关耗时（分量实测，供
         // dsl/verify/_audit/IMAGE-PATH-COST.md §8 决策）。**独立一行**，避免打乱既有日志正则。
@@ -338,6 +421,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         get() = TimingOverrides.panelSettleMs.takeIf { it > 0L } ?: PANEL_SETTLE_MS
 
     val resultsCharacters = ArrayList<GoodCharacter>()
+
+    /**
+     * 已入库件数（三条容器的合计；单轮只有一个域在增长，口径同 [runPostamble] 的 total 核对）。
+     * 目前只有一个读者：管道消费者按 job 前后求差得「本格追加了几件」（#257）。
+     */
+    internal fun engineCellCount(): Int = results.size + resultsWeapons.size + resultsCharacters.size
 
     /** 单角色草稿：parsePanel(char_profile) → navigate(命座/天赋) → emit。 */
     // ── 耗时归因（调试标定用；见 TimingOverrides）──
@@ -365,13 +454,10 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     internal val sigCardCur = ByteArray(SIG_LEN_MAX)
 
     internal var charName = ""
-    /**
-     * 最近一次**成功入库**的角色名。⚠️ `charName` 在 `emitCharacter` 末尾会被清空（重置草稿），
-     * 而 flow 顺序是 `emit` → `stopWhen` ⇒ 止扫判据若读 `charName` 会**恒为空、永不触发**
-     * （2026-09-11 实测：`name == roster[0]` 从未生效，10 角色那次实为 `reachedEnd` 收尾）。
-     * 本字段不清空，专门供止扫判据求值。
-     */
-    internal var lastCharName = ""
+    // ★ #233 单2④（2026-10-14 删）：这里原本有个**不清空**的 `lastCharName`，专门喂给
+    //   `stopWhen` 的 `name == roster[0]` 特判（`emit` 会清 `charName`，那条判据直接读它会恒空）。
+    //   判据本身已随分支一起删（角色流改用 mode=duplicateStreak，见 CharDupJudge），字段留着就是
+    //   一个"只有人写、没人读"的变量 ⇒ 下一轮诊断会以为角色轮还有"回绕即停"这条路。
     /** 连续「已入库过的角色」个数（回卷/遍历完判据）；由 stopWhen mode=duplicateStreak 启用。 */
     internal var charDupStreak = 0
     internal var charDupStreakLimit = 0
@@ -431,6 +517,15 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
 
     /** 三档解析全未命中、按显示名入库的角色数（#156；这些记录**没有 GOOD key**，去管理器页补昵称）。 */
     internal var charUnresolved = 0
+
+    /**
+     * 入库时**三项天赋全为 0** 的角色数（#274）。0 不是合法值（全部战斗天赋基础等级恒 ≥1，
+     * 见 `CharacterDomainPanels.kt:1320` 的实测注释），所以这个数就是"天赋根本没读成"的件数。
+     * 立这条计数的原因：2026-10-10 的「交替页签序」把**反序格**的天赋读整条漏掉了，
+     * 10-13 全量轮实测 43/95 件 `t=[0,0,0]`，而日志里连一条"跳过了"都没有 ⇒
+     * 静默分支必须留下可数的痕迹（同 #152 那条 else 日志的教训）。
+     */
+    internal var charTalentUnread = 0
 
     /** 重读期抑制「连续重复」计数：重访/回读必然重读到刚记过的件，会被回卷判据误判成"整页零新增"。 */
     internal var suppressDupStreak = false
@@ -513,9 +608,49 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     /** 点击打满重发上限、本格将读到陈旧面板的次数（= 一件静默丢失的机会）。 */
     internal var clickGiveups: Int = 0
 
+    /**
+     * ★ #233 单2（2026-10-14）：本轮**判定已在属性页 ⇒ 省掉那次复位导航**的格数（随 run 复位）。
+     *
+     * 为什么单独记一个数：正序格的 `navigate(属性)` 是按构造冗余的（进正序格的前提就是面板已在
+     * 属性页），但它今天**每格都点**。改成先做一次正向页判定之后，"省了多少"只能从这个计数看，
+     * 因为 `waits nav=` 只反映总时长、说不出是不是同一件事在少。
+     * ⚠️ 计数恒 0 = 判据从来没命中 ⇒ 那不是"没优化成"，那是页判据读不出来（ROI 漂了/词典外文本），
+     *   要当故障查（同 [[feedback-verify-action-by-reread-state]]：走了另一条路要能读出来）。
+     */
+    internal var navRedundantSkipped: Int = 0
+
+
     internal var lastWeaponIdentity: String? = null
     internal var weaponSameRun: Int = 0
     internal var weaponStaleDropped: Int = 0
+
+    /**
+     * ★ #241（2026-10-13）：roll 重裁抢救链的会话计数（随 run 复位，进 `scan finished` 摘要）。
+     *
+     * 为什么要这三个：链此前**只有失败可见** —— 失败经 `RollSolver.logMiss` 进 `roll未解`，
+     * 而重裁救回与「首读就解出、链没进过」在计数上完全同相 ⇒ 摘要永远说不出
+     * 「这 N 件本来更多、是链救回来的」，也读不出 ≈1% 进链件的成败比。
+     * - [recropAttempts]：进入重裁链的件数（链入口 +1；只可能是 4★/5★，3★ 被闸门挡在链外）；
+     * - [recropNewCandidates]：重读经去重门槛真正 append 的候选总数（append 处累计，成败都算）；
+     * - [recropRescued]：重裁后解出的件数（「重裁抢救成功」分支 +1）。
+     * 三数合看才成立：`抢救>0` 证明链在兜底；`重裁>0 而 新候选≈0` ⇒ 重读根本没读出东西
+     * （去查链内按裁法的重读异常/丢字）；`重裁-抢救` 的差就是跑了没救回的件数。
+     */
+    internal var recropAttempts: Int = 0
+    internal var recropNewCandidates: Int = 0
+    internal var recropRescued: Int = 0
+
+    /**
+     * ★ #265：**生产者自己**在本格投出来的武器星级（`vote` 的 `weapon.panel.starBand` 两条分支写）。
+     *
+     * 只有一个读者：[stopWhenRarityAtMost2]，它在 visit 第 ② 步求值 ⇒ 量的是**上一格**的星级。
+     * 同步臂下 `vars.rarity` 恰好等于这个值（vote 直接写 vars），所以旧写法看不出差别；
+     * 管道臂下 `vars` 由消费者按它自己的格装载 ⇒ 止扫点会随积压深度漂 ⇒ 尾部那几件低星
+     * 两臂收得不一样（`PAGES=3` 的验收跑走不到列表末尾，撞不到这条）。
+     * 与 [CellVotes] 是同一族的教训：**生产者要用的量必须留在生产者侧**，不能借共享 vars 传话。
+     * `-1` = 未判定哨兵（与 `vars.rarity` 同口径，见 [stopWhenRarityAtMost2] 的守卫）。
+     */
+    internal var lastVotedWeaponRarity: Int = -1
 
     /**
      * **在扫描星级区间内**读到了武器名、却查不到词典 key 的格数（#188，2026-10-04）。
@@ -591,6 +726,29 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
 
     /** 本页身份锚定算出的对齐偏移 d（本页 idx m ≡ 上页 idx d+m）；null = 未锚定（全部照常访问）。 */
     internal var anchoredD: Int? = null
+
+    /**
+     * ★ #292：本页**实测前进行数** `advanceRows = anchoredD / cols`；-1 = 未锚定
+     * （前进量未知 ⇒ [crossPageOverlap] fail-open 不判）。
+     *
+     * 为什么前进量必须来自 [anchoredD] 而不是几何量：`GridAlign.rowsAdvanced` 在每一页都读
+     * `行数=3`（含已知只前进 2 行的页）⇒ 有固有 +1 偏置、不可用；[GridRowCheck] 的 advance 要到
+     * **页末**才有 ⇒ 页内逐格判据拿不到。C' 锚点的 `d` 是内容实测（逐位相邻命中），且与页末
+     * 行级闭环读数一致（实测 d=14 与「前进 14」同值）。
+     */
+    internal var curAdvanceRows: Int = -1
+
+    /**
+     * ★ #292：本页**武器格 idx → [resultsWeapons] 下标**（页内局部语义，每页清空）。
+     *
+     * 动机：锚点在读完 idx2 之后才定出 `d`，而那时 idx0~2 **已经访问并入库**了 ⇒ 它们的跨页
+     * 判据当时拿不到前进量（fail-open，没丢）。锚点定出 `d` 后靠这张表**追认**：
+     * 若 idx0~2 按同一个门控公式命中上页重叠格，就把已入库的那件撤回来（武器侧**没有**内容键
+     * 去重 ⇒ 不撤就多一件）。
+     *
+     * 只武器路径写（[crossPageOverlap] 的唯一调用点）；圣遗物侧恒空（走 `seenArtifactKeys` 内容键去重）。
+     */
+    internal val curPageWeaponEmit = HashMap<Int, Int>()
 
     /**
      * 本轮已入库的「页:行:列:身份」四元组（#58② 同格重解析幂等，用法见 [parseWeaponPanel]）。
@@ -731,11 +889,14 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     /**
      * 断言回卷所需的连续整页零新增页数（flow `stopWhen.dupPageConfirm`，默认 2；=1 恢复旧的立即停行为）。
      *
-     * ⚠️ #219：唯一赋值点是 [stopWhenRegisterDuplicateStreak]，由 [runVisitBody] 按 flow 的
-     * `stopWhen mode=duplicateStreak` 步登记（**本格判据求值之前**），五条 flow 都带该步 ⇒
-     * 逐格第一次求值起读到的就是 flow 的声明值。登记之前只有两处读它：pagedGrid 入口日志与
-     * page0 idx0 的格级门（后者要 `charDupStreak` 带满整页重复才走到，新建引擎不可能）。
-     * flow 未声明 `dupPageConfirm` 时保持本默认 2（`stopWhen` 的 `optInt(…, 2)`）。
+     * ⚠️ #219：唯一赋值点是 [stopWhenRegisterDuplicateStreak]。**五条原生 flow 现在各自在
+     * `pagedGridNative(...)` 之前登记一次**（Artifact 3/1、Weapon 3/1、Lock 3/2、Character 3/2、
+     * Equip 3/2）⇒ 格循环第一次读它时就已经是 flow 声明的值；流程体内保留的同值登记被守卫
+     * 静默跳过（同步臂此前是**逐格**重复登记并逐格打日志，把"值真的变了"淹掉）。
+     * 为什么值得提前：判据在**格循环里**读（`dupRollbackConfirmed` 每页只判一次，`dupPageDecided` 闩住），
+     * 而 page0 的第一读发生在第 0 格 visit 体之前 —— 旧写法下那里读到默认 2，flow 声明 1 意图
+     * "一次命中即停"的流程要多耗一整页才停（并让入口日志报假值）。
+     * flow 未声明 `dupPageConfirm` 时保持本默认 2（`stopWhen` 的 `optInt(…, 2)`；标定流即此档）。
      */
     internal var dupPageConfirm = 2
 
@@ -760,7 +921,14 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     internal var charConstellation = 0
     internal val charTalents = MutableList(3) { 0 }
 
-    /** 当前角色的词典 key（供 `readTalent` 查词典 c3/c5 减命座加成）。 */
+    /**
+     * ★ #281：本格是否已经扣过命座天赋加成（`resetCharDraft` 复位）。
+     * 扣减点从 `readTalent` 挪到入库时点之后，**幂等就不能再靠调用顺序保证** ——
+     * 重复扣与漏扣在导出里都长得像合法等级（静默），所以宁可用一个布尔位钉住。
+     */
+    internal var talentBonusApplied = false
+
+    /** 当前角色的词典 key（供入库时的 `applyTalentBonusForEmit` 查词典 c3/c5 减命座加成）。 */
     internal var lastCharKey: String? = null
 
     /**
@@ -823,18 +991,64 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         val panelKey: String,
         val idx: Int,                // 本格在 pageKeys/pageIdentities 的槽位（页末排水用）
         val votes: CellVotes,        // ★ #69：本格投票位快照（生产者写 vars 会与消费者串格，见 CellVotes）
+        val cols: Int,               // ★ #263：发送时的网格列数/遍历行数（跨页积压时消费者不读活值）
+        val traverseRows: Int,
     ) {
         val cellKey: String get() = "$gridKey:$col:$row"
+        // ★ #263：本格坐标上下文 —— 消费者解析时必须用它自己的，不能读引擎上的活值。
+        fun cellCoord() = CellCoord(page, row, col, idx, cols, traverseRows)
         // 消费者解析完成后回填（单消费者顺序执行，下一 job 解析前必已被生产者读取）：
         var resultKey: String? = null       // ← lastCellKey（contentKey；空读为 null/空）
         var resultIdentity: String? = ""    // ← lastCellIdentity
+        var resultAdded: Int = 0            // ← 本格实际追加进 results/resultsWeapons/resultsCharacters 的件数
     }
+
+    /** 页末排水的一条：本格（idx = pageKeys/pageIdentities 槽位）由消费者产出的结果。 */
+    internal data class PipeCellResult(
+        val idx: Int,
+        val key: String?,
+        val identity: String,
+        val added: Int,
+    )
+
+    /**
+     * ★ #263：**本格坐标**（页号 + 行 + 列 + 页内格序 + 该页的列数/遍历行数）。
+     *
+     * 引擎上的 `curPageNo/curCellRow/curCellCol/curCellIdx/curCols/curTraverseRows` 是**生产者正在
+     * 推进的活值**；`pipe>0` 时解析与 emit 跑在消费者线程上，生产者此刻已走到后面 ≤pipeDepth 格 ⇒
+     * 消费者直接读活值就是「按 B 格的内容判 A 格的坐标」。干跑里消费者 0ms 就追得上 ⇒
+     * 两者恒等、单测抓不到；真机一格 ≈0.5~11s ⇒ 会真的错位。
+     *
+     * 危害不止日志：武器的 `crossPageOverlap`（比上页同列 row1/row2）与 `weaponCellEmitted`
+     * 的「页:行:列:身份」同格键都拿坐标当**丢件判据**，坐标错一格就是丢件/漏挡 ——
+     * #60（上页表下标错位）、#73（跨页丢弃没登记）两支都是同一族。
+     * 与 [com.bettergi.pocket.scan.VoteJudges.weaponLock] 的 `origin` 同一做法：
+     * 参数显式传，同步路径传活值（行为一字不变），消费者传 job 自己的。
+     */
+    internal class CellCoord(
+        val page: Int,
+        val row: Int,
+        val col: Int,
+        val idx: Int,
+        val cols: Int,
+        val traverseRows: Int,
+    )
+
+    /** 同步（非管道）路径的本格坐标：就是引擎上的活值。 */
+    internal fun liveCellCoord() =
+        CellCoord(curPageNo, curCellRow, curCellCol, curCellIdx, curCols, curTraverseRows)
 
     private var pipeChannel: Channel<ParseJob>? = null
     private var pipeScope: CoroutineScope? = null
     private var pipeConsumerJob: Job? = null
     private var pipeNextId = 0
     private var pipeInFlight = 0
+    /**
+     * 消费者**已处理**的 job 累计数（丢弃与解析都算一条），只在 [pipeLock] 下读写。
+     * 它是 [pipeAwaitAnchorIdentities] 的活性信号：那条停等要判的是"消费者还活着吗"，
+     * 而活性的定义是"有 job 被处理完"，不是"过了多少毫秒"（见 #260 后半的说明）。
+     */
+    private var pipeDoneCount = 0L
     private var pipeCancelled = false
     private var pipePageNo = 0
     internal var pipeEmitStep: JSONObject? = null
@@ -950,11 +1164,16 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         val y1 = cropRect.bottom.coerceIn(y0 + 1, frame.rows())
         val crop = synchronized(pipeLock) { pipeAcquireCropLocked(x1 - x0, y1 - y0) }
         val view = Mat(frame, Rect(x0, y0, x1 - x0, y1 - y0))
+        // ★ #252：这次 memcpy 以前**不进任何探针**（管道臂的 `PerfProbe` 摘要里 `crop n=0`），
+        //   所以"管道臂每格到底为裁片付多少"一直没人量过 ⇒ 先让它可见，再谈要不要省。
+        //   复用同步臂已有的 `crop` 计数（同一件事：建视图 + 拷像素），不新增计数器。
+        val tCrop = System.nanoTime()
         try {
             view.copyTo(crop)
         } finally {
             view.release()
         }
+        PerfProbe.addCrop(System.nanoTime() - tCrop)
         val job = ParseJob(
             id = pipeNextId++, epoch = epoch, gridKey = gridKey, col = col, row = row,
             page = synchronized(pipeLock) { pipePageNo },
@@ -963,6 +1182,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             panelKey = panelKey,
             idx = idx,
             votes = currentCellVotes(),
+            cols = curCols, traverseRows = curTraverseRows,
         )
         synchronized(pipeLock) { pipeInFlight++ }
         pipeCellJobSent = true
@@ -981,15 +1201,21 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             if (pipeCancelled || stale) {
                 Log.d(TAG, "pipe job #${job.id} ${if (stale) "过期丢弃" else "取消丢弃"}")
                 PerfProbe.addPipeDiscard()
-                synchronized(pipeLock) { pipeInFlight--; pipeReturnJob(job) }
+                synchronized(pipeLock) { pipeInFlight--; pipeDoneCount++; pipeReturnJob(job) }
                 continue
             }
+            val jobBefore = engineCellCount()
             pipeProcess(job)
             synchronized(pipeLock) {
                 pipeInFlight--
+                pipeDoneCount++
                 // 消费者解析完成 ⇒ 回填本格结果（页末排水按 idx 序写 pageKeys，§3.3）
                 job.resultKey = lastCellKey
                 job.resultIdentity = lastCellIdentity
+                // ★ #257：本格**追加了几件**只能在消费者侧量。生产者在 pagedGrid 里那份 addedCell 读的是
+                //   它此刻的 results 长度，管道臂下消费者还没走到本格 ⇒ 恒 0 —— 那是与 #188
+                //   「拿 key 栏下判决」同一坑的另一栏，事后看日志会把成功格读成未入库。
+                job.resultAdded = engineCellCount() - jobBefore
                 synchronized(pipeDoneLock) { pipeDoneResults.add(job) }
                 pipeReturnJob(job)
             }
@@ -1009,10 +1235,14 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             //   华为实测：vars.crafted 串格 ⇒ 祝圣 yShift(47px@2244) 被错加/漏加在别的格上，
             //   等级读成 0、首条副词条被顶掉、末行读到套装名 ⇒ 内容键变 ⇒ 去重当成新件。
             job.votes.applyTo(vars)
+            // ★ #263：本格坐标随 job 进来（同 #69 的投票位）。引擎上的 curPageNo/curCellRow/
+            //   curCellCol/curCellIdx 此刻是**生产者正在走的那一格**，消费者读它 = 按 B 格的
+            //   内容判 A 格的坐标 ⇒ 武器跨页/同格丢件判据错位。
+            val cell = job.cellCoord()
             if (job.panelKey == "weapon_backpack") {
-                parseWeaponPanel(job.crop, gw, job.parseStep.optJSONObject("dict"), job.origin)
+                parseWeaponPanel(job.crop, gw, job.parseStep.optJSONObject("dict"), job.origin, cell)
             } else {
-                parseArtifactPanel(job.crop, gw, job.panelKey, job.parseStep.optJSONObject("dict"), job.origin)
+                parseArtifactPanel(job.crop, gw, job.panelKey, job.parseStep.optJSONObject("dict"), job.origin, cell)
             }
             vars.panelMatched = evaluatePanelMatch(job.parseStep)
             if (job.parseStep.optString("match").isNotEmpty() && vars.panelMatched) vars.matchHit = true
@@ -1050,22 +1280,22 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         while (true) {
             val n = synchronized(pipeLock) { pipeInFlight }
             if (n == 0) break
-            delay(2)
+            delay(PIPE_POLL_MS)
         }
         // 只等齐，不清空 —— 清空由 [pipeDrainResults] 在排水后做（否则调用方读到空）
     }
 
     /**
      * 页末排水（本页 job 结果，按 job id 序 = 生产者发送序 = 格序）。
-     * 返回 (idx, contentKey, identity)：idx 是该格在 pageKeys/pageIdentities 的槽位。
+     * 返回本格（idx 是它在 pageKeys/pageIdentities 的槽位）的**内容键 / 身份 / 追加件数**。
      * ⚠️ 必须先 [pipeJoinPage]；`pipe=0`（无消费者）时返回空。
      */
-    internal fun pipeDrainResults(): List<Triple<Int, String?, String>> =
+    internal fun pipeDrainResults(): List<PipeCellResult> =
         synchronized(pipeDoneLock) {
             val page = synchronized(pipeLock) { pipePageNo }
             val out = pipeDoneResults.sortedBy { it.id }
                 .filter { it.page == page }
-                .map { Triple(it.idx, it.resultKey, it.resultIdentity ?: "") }
+                .map { PipeCellResult(it.idx, it.resultKey, it.resultIdentity ?: "", it.resultAdded) }
             // 本页结果已全部交付 ⇒ 清空（pipeDrainAppeared 必须在本次调用之前或同批读取，见调用点顺序）
             pipeDoneResults.removeAll { it.page == page }
             out
@@ -1078,26 +1308,41 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      * 按构造恒不命中（真机实测多做 6.5% 功）。锚点只要本页 idx1/idx2 的身份，而此刻生产者
      * 至多发出过本页前 3 格的 job ⇒ join 到在途清零的代价被积压深度封顶，且**每页只发生一次**
      * （不是逐格）。**不摘取结果** —— pageKeys/curPageIds 的交付仍归页末 [pipeDrainResults]。
-     * 超时 / 未交付 ⇒ 对应格按「身份为空」处理，调用侧退回照常访问，绝不无限等。
+     * 无进展到上限 / 未交付 ⇒ 对应格按「身份为空」处理，调用侧退回照常访问，绝不无限等。
+     *
+     * ★ 交付完整性论证（2026-10-13 复核 #260）：走到"在途已归零"那一步时，每个已发送 job 的结果
+     * **必然已在** [pipeDoneResults] 里 —— 消费者把 `pipeInFlight--` 与回填结果放在同一段
+     * [pipeLock] 内，而本函数读在途数也在同一段锁里 ⇒ 不存在"已归零但尚未回填"的中间态。
+     * 提前 return（无进展到上限）按空身份处理，语义与旧超时分支逐字相同。
      */
     internal suspend fun pipeAwaitAnchorIdentities(
         page: Int,
         idxs: IntArray,
-        budgetMs: Long = PAGE_WATCHDOG_MS,
+        idlePolls: Long = PIPE_ANCHOR_IDLE_POLLS,
     ): Map<Int, String> {
         if (pipeChannel == null) return emptyMap()
-        val until = clock() + budgetMs
-        while (synchronized(pipeLock) { pipeInFlight } > 0) {
-            if (clock() >= until) {
+        var idle = 0L
+        var prevDone = synchronized(pipeLock) { pipeDoneCount }
+        while (true) {
+            val (inFlight, done) = synchronized(pipeLock) { pipeInFlight to pipeDoneCount }
+            if (inFlight == 0) break
+            // 消费者处理完过任何一个 job（含丢弃）⇒ 它活着，预算重新给满。
+            // 正常路径就是靠这条退出：在途深度 ≤ pipeDepth+锚点那 3 格，不会一直"无进展"。
+            if (done != prevDone) {
+                prevDone = done
+                idle = 0
+            } else if (++idle >= idlePolls) {
                 Log.w(
                     TAG,
-                    "pipe 锚点早到交付：${budgetMs}ms 内在途 job 仍未清零（page=${page}）⇒ 未交付格按空身份处理，" +
-                        "锚定退回「照常访问」（消费者已死或取消未排空）",
+                    "pipe 锚点早到交付：连续 ${idlePolls} 次轮询（每次 >=${PIPE_POLL_MS}ms）消费者没有处理完任何 job" +
+                        "（page=${page}，在途 ${inFlight}）⇒ 未交付格按空身份处理，锚定退回「照常访问」" +
+                        "（消费者被 Error 打死或取消未排空；注意这条**不是**超时，机器越忙只会等得越久）",
                 )
                 return emptyMap()
             }
-            delay(2)
+            delay(PIPE_POLL_MS)
         }
+        // 在途已归零 ⇒ 本页不会有未交付的格，直接取即可，不需要额外的"等齐 idx 集"分支。
         return synchronized(pipeDoneLock) {
             pipeDoneResults.filter { it.page == page && it.idx in idxs }
                 .associate { it.idx to (it.resultIdentity ?: "") }
@@ -1124,6 +1369,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             pipeCancelled = false
             pipeNextId = 0
             pipeInFlight = 0
+            pipeDoneCount = 0
             pipePageNo = 0
             pipeSentEpoch.clear()
         }
@@ -1158,6 +1404,33 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      */
     internal companion object {
         const val TAG = "BetterGI.Scan"
+
+        /**
+         * ★ A③（#69 收尾，2026-10-13）：管道深度的**流程级默认**（"①流程属性"形态）。
+         *
+         * 依据是这一轮的设备实测，不是推测：
+         * - 华为 EML-AL00 正反序、圣遗物四臂：`pipe=2` 比 `pipe=0` **−10.8%**（反序对，两臂做功
+         *   逐位相同且同步臂单价更低）；BS 2244 同流程 **−5.7%**；两序同向。
+         * - 等价性：BS/华为各四臂导出**全字节相同**（#253/#259/#261 三个串格缺陷都修在管道侧，
+         *   同步臂与管道臂互验后才敢定默认）。
+         *
+         * 只有"读背包"的两条进来。**写类流程一律不列**（按构造排除，不靠注释提醒）：
+         * `artifact_lock`/`auto_equip` 的判据要在**下一格的开头**读回本格投票位（`curLock`
+         * 决定要不要真点锁钮，见 LockFlow.kt:204 与 ScanJudgmentDomain 的 vote），
+         * 而管道下这些位滞后 ≤pipeDepth 格 ⇒ 开了就是拿旧状态点写操作。
+         * 角色扫描 (`character_scan`) 也不列：它的本格要**多次取帧 + 中途分支**
+         * （dedupeSkip 消费解析结果决定跳不跳命座/天赋页），一张裁片的 job 表达不了（#262）。
+         *
+         * 显式 `--es timing "pipe=N"` 永远覆盖本表（[TimingOverrides.pipeExplicit]）。
+         */
+        val PIPE_DEFAULT_BY_FLOW: Map<String, Int> = mapOf(
+            "artifact_scan" to 2,
+            // ★ 2026-10-15 #307：套装筛选流程与全量同一条读背包链（visit 步序一字不差，
+            //   只多一个 setFilter 前置），华为四臂 -10.8% 的依据同样适用；此前漏登记 ⇒
+            //   筛选轮一直跑 pipe=0（2026-10-15 实测 timing 行 pipe=0 而全量是 2）。
+            "artifact_scan_set" to 2,
+            "weapon_scan" to 2,
+        )
         const val ENTER_SETTLE_MS = 1200L
         const val SCREEN_SETTLE_MS = 1500L
         const val CLICK_SETTLE_MS = 600L
@@ -1188,6 +1461,45 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         /** #139：走兜底坐标（返回钮模板未命中）时最多点几次 —— 盲点与"模板命中"不共用上限。 */
         const val RETURN_HOME_BLIND_MAX = 3
         const val RETURN_HOME_SETTLE_MS = 900L
+
+        /**
+         * ★ #266：「点任意处进入」之后等进主界面的**轮询预算**与步长。
+         *
+         * 华为实测（08:38）：标题屏 → 世界的加载远大于 `RETURN_HOME_SETTLE_MS(900)`，
+         * 只等一轮就被"盲点 3 次"那条闸截住 ⇒ 点打了、整轮仍然 `returnHomeStuck`。
+         * 预算取 45s：2026-10-13 华为实测**冷进世界用了 27.7s**（那会儿整机被钳频，
+         * 同轮 OCR 均时 969ms/槽）—— 30s 只剩 2s 余量，太紧；这里多留 1.5 倍。
+         * 到点仍未进游戏就停手（这一试是最后一步，不会回到盲点循环）。
+         */
+        const val TITLE_ENTER_WAIT_MS = 45_000L
+        const val TITLE_ENTER_POLL_MS = 1500L
+
+        /**
+         * ★ 2026-10-15：`returnToHome` 判出 **WAIT 类**（版号屏/加载屏，`near_white ≥ 0.90`）时
+         * 的等待预算与步长。
+         *
+         * 为什么必须"等"而不是点：[ScreenStateJudge] 的 KDoc 记着——这类屏是游戏**自己还在渲染**，
+         * 点它只会打断加载。改动前它们落进"非主界面"，归位链会先烧 3 次盲点返回 + 1 次 BACK
+         * 才轮到 `#266` 的点屏幕（华为实测 41.2s）。
+         *
+         * 预算取 90s：覆盖冷启动从版号屏到世界的最长实测（`startupcapture` 三档冷启动观测
+         * 从版号屏到标题屏约 12~15s，标题屏到世界另有 27.7s 的钳频实测）⇒ 90s 有充足余量，
+         * 且 < `ScriptRunner.SESSION_STALL_MS(120s)`（不会触发会话看门狗抢跑）。
+         * 每拍**重判三态**而不是睡满：加载屏 → 标题屏的转换必须被抓住（否则白等到超时）。
+         */
+        const val WAIT_SCREEN_BUDGET_MS = 90_000L
+        const val WAIT_SCREEN_POLL_MS = 2000L
+
+        /**
+         * ★ 2026-10-15 S4b：断线框点「确认」后**等游戏自动 reload** 的预算与步长。
+         *
+         * reload 是"游戏自己重连 + 回标题屏"，实测（`device-log` 10-03/10-06 两节）点完
+         * "自动 reload 到标题屏"、再点「点击进入」即回世界。等待上限取 30s：
+         * 网络正常时 reload 在秒级完成；30s 还没消失说明不是普通断线（可能真掉登录），
+         * 那就该停手报出来而不是继续等。每拍重判"框还在不在"，一消失立刻交回。
+         */
+        const val DISCONNECT_RELOAD_WAIT_MS = 30_000L
+        const val DISCONNECT_POLL_MS = 1500L
         // §15 P0-1：左侧菜单切页后的稳定等待（长于普通点击，动画约 600~800ms）
         /**
          * 页签切换后的等待。**2026-09-12 由 900 → 700**（档位实测：屏幕侧内容就绪 397~529ms；
@@ -1195,7 +1507,25 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          * ⚠️ 再往下（600/450/300）实测读取错误率翻倍并开始丢件 ⇒ 不要调。
          */
         const val NAVIGATE_PAGE_SETTLE_MS = 700L
-        // §15 P1-1：点格后详情面板刷新等待（武器面板实测切换 >300ms 恒滞后一格 → 取 550 留余量）
+        /**
+         * 签名不可用时那条**固定等待**（角色流水每格都落到这里：`visitClick` 是 visit 首步
+         * ⇒ ctx.frame 空 ⇒ sigUsable 恒假）。武器不走这一档（实测武器 `panel=312ms/格`，是签名闸）。
+         *
+         * ★ 2026-10-14 #233 单2：**试过 400，实测撤回 550**。BS 2244 五臂账（证据
+         *   `/tmp/ab_233/prefresh/` 与 `/tmp/ab_233/p400_default/`）：
+         *     550 两臂：emit 93、93 ⇒ `t=[0, 0, 0]` 零条 ⇒ `c0` 20、20
+         *     400 三臂：emit 93、93、92 ⇒ `t=[0, 0, 0]` 0、1、3 条 ⇒ `c0` 20、21、23
+         *   直接机制在同格对比：cell(0,5) 在 400 下 `headerOnly 预读` 读到的是**上一格**的面板
+         *   （'水元素/沃雅妮' ⇒ Vodyanitsa）⇒ `dedupeSkip：已入库 ⇒ 跳过命之座/天赋`
+         *   ⇒ 该角色以 `c0 t=[0, 0, 0]` 入库，**不报错、件数也还是对的**。
+         *   收益只有 **−4.6%**（`panel=` 差额 23700ms = 150ms × 158 格；elapsed 差的另外 8.7s 在记账之外）。
+         * ⇒ 550 不是"没测过的保守值"，是**这条静默归零故障的下界**。要再降必须先解决
+         *   "预读用签名/稳定判据而不是靠时长"，见 #233 单2 的"跳过的格别等面板"那条（那才是安全的 6.6%）。
+         * 对照杠杆：`--es timing "prefresh=<ms>"`（`-1` = 用本常数）。
+         * ⚠️ 闸门教训：本单的等价判据原先只看「件数 + 对 GT 命中数」，**400 那臂 93 件全在**
+         *   却已经把 3 个角色的命座/天赋写成 0 ⇒ 角色轮的必查项要加
+         *   `char emit #` 行里 `t=[0, 0, 0]` 的条数与 `c0` 计数。
+         */
         const val PANEL_REFRESH_MS = 550L
         /** 面板名「未变但已稳定」的兜底等待：相邻同名时不至于打满 6s 上限（实测省 ~54s/100s）。 */
         const val PANEL_STABLE_FALLBACK_MS = 400L
@@ -1204,13 +1534,40 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   语义不变：超时仍是「按原样解析」，只是不再先白等 6 秒。
         const val PANEL_CHANGE_WAIT_MAX_MS = 400L
 
+        // ── 管道停等的打点与上限（#260 后半，2026-10-13）──
+        /** 在途 job 归零的轮询间隔（[pipeJoinPage] 与 [pipeAwaitAnchorIdentities] 共用）。 */
+        const val PIPE_POLL_MS = 2L
+        /**
+         * [pipeAwaitAnchorIdentities] 的放弃条件：**连续这么多次轮询消费者没有处理完任何一个 job**。
+         *
+         * ★ 为什么不再按墙钟（旧值＝[PAGE_WATCHDOG_MS] 90s 的 `clock() + budget`）：
+         * 那条预算量的是"这台机器多久能跑完 ≤[TimingOverrides.pipeDepth] 个 job"，也就是**机器负载**，
+         * 而不是"消费者是否还活着"。后果有两头：
+         * - 干跑：满载复跑（load 12）实测被打满 ⇒ 锚定退回「照常访问」⇒ 管道臂比同步臂**多击一整条
+         *   重叠带**（43→50），单测红的是机器而不是语义（当时的处置是给 `panchor` 一个大值把它失效，
+         *   见 §16.20 之前的记录 —— 那是掩码不是修）。
+         * - 真机：慢机（华为钳频那两轮 rec 单价 338ms）同样可能在 90s 内跑不完 2~3 个 job ⇒
+         *   **静默降级成"每页多击数格"**，只有一条 W 日志。
+         *
+         * 按"没有进展的轮询次数"计就没有这个毛病：`kotlinx.coroutines.delay` 的契约是
+         * **"for at least the given time"**（只会晚于、不会早于请求时长），
+         * 所以 N 次轮询的真实时长随负载**只增不减** —— 机器越忙，这条越宽松，原理上不可能因为忙
+         * 而误判消费者已死。真正确死/Error 杀掉协程时，进展恒 0 ⇒ 仍然会在有限次轮询后收手。
+         * 名义时长 45_000 × 2ms ≈ 90s，与旧预算同量级（"90s 里一个 job 都没处理完"＝死了）；
+         * 消费者**活着**时本函数照旧在"在途归零"那一刻返回，不会因为换了判据而多等一步。
+         * 真机上"消费者真的不干活"由页级看门狗（[PAGE_WATCHDOG_MS]，按格间进展判挂死）中止整轮兜住。
+         */
+        const val PIPE_ANCHOR_IDLE_POLLS = 45_000L
+
         // ── ★ 就绪信号直采（2026-09-12，取代上面的「抓帧 + OCR」轮询）──
         /**
          * 签名轮询步长。**实测面板内容 133ms（中位）就绪**（PERF-timing.md，样本 67/133/298），
-         * 旧路径却花 428ms/格（= delay(120×3) + 每轮抓帧 + 每轮 OCR）。步长取 40ms 即可
-         * 与帧率（~33ms）解耦；可由 `--es timing "sigpoll=…"` 覆盖。
+         * 旧路径却花 428ms/格（= delay(120×3) + 每轮抓帧 + 每轮 OCR）。
+         * ★ 2026-10-14：40→20。全量 artifact 扫描 A/B（BS，57 页 / 1026 格）：sigpoll=20 臂与
+         * 默认臂 **cells 逐位相同、判滑空=0、吞击重发落在 5~7 的同轮噪声带内**，
+         * panel 263593→242657ms ⇒ −4.6%。可由 `--es timing "sigpoll=…"` 覆盖。
          */
-        const val PANEL_SIG_POLL_MS = 40L
+        const val PANEL_SIG_POLL_MS = 20L
         /** 签名分块数（列×行）；格式与 [VoteJudges.thumbChangedFraction] 对齐（每块 3 字节）。 */
         const val SIG_BLOCKS_X = 8
         const val SIG_BLOCKS_Y = 4
@@ -1339,18 +1696,28 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             s.isNotEmpty() && s.split(',').all { it.trim().toDoubleOrNull() != null }
 
         /**
-         * 武器**跨页重叠**判据（纯函数）：本格是否就是上页那张已经读过的卡。
+         * 武器**跨页重叠**判据（纯函数，#292）：给定本页相对上页的**实测前进量** [advanceRows]，
+         * 判断本格是不是上页那张已经读过的卡。
          *
          * 表必须是**绝对下标** `r*cols+c` 的全行表（`prevAllCellIds`）——#60 就是喂了一张
          * 只存 row1/row2 的紧凑表却仍按绝对下标读，于是"row1"这一路静默失效（见调用处注释）。
          *
-         * 只比**同列**的上页最后两行（`traverseRows-2` / `traverseRows-1`）：
-         * 一页 3 行时，前进 1 行 ⇒ 新 row0 ← 上页 row1；前进 2 行 ⇒ 新 row0 ← 上页 row2。
-         * 前进量 >2 行的部分对应上页 row3/row4，表里没有 ⇒ `getOrNull` 给 null ⇒ 不误伤真·同款多把。
+         * ## 判据（#292：把"固定比末两行"换成"按前进量门控"）
+         * 前进 `a` 行 ⇒ 本页 `(row,col)` 那格在上页的同一位是 `(row+a, col)`：
+         * ```
+         * 丢弃 ⟺ row + a < traverseRows  且  prev[(row+a)*cols + col] == identity
+         * ```
+         * 于是三种情形都由同一条式子给出：`a=0`（整页没动）退化成"比上页同位置" `prev[row*cols+col]`；
+         * `a=1` ⇒ 本页 row0 ← 上页 row1、row1 ← 上页 row2；`a=2` ⇒ 本页 row0 ← 上页 row2；
+         * `a≥traverseRows`（前进 ≥ 一整页 ⇒ 零重叠）**一律不丢** —— 这正是 #215 的根因：
+         * 旧实现不管前进多少，都拿上页 `row1/row2` **固定**比，于是**前进一整页**的页里，本页
+         * 任一格与上页 row1/row2 同列的"同款同列"巧合被当成重叠 ⇒ **静默丢真件**（同款多把）。
          *
-         * 注意 `row` **不参与**取数下标（判据问的是"这个身份在上页末两行出现过吗"，
-         * 不是"上页第 row 行是谁"）——但 `row`/`col` 为 -1 时（snap / rosterFind 等非 pagedGrid 路径）
-         * 本格没有网格位置可谈，一律不判。
+         * ⚠️ 前进量**未知**（首页无上页表 / 锚点未命中 ⇒ `advanceRows < 0`）⇒ 一律不判（fail-open：
+         * 宁可多留一件，也不误丢）。这是有意的：判据一旦错判就是**静默丢件**，代价高于多一件待办。
+         *
+         * `row`/`col` 为 -1 时（snap / rosterFind 等非 pagedGrid 路径）本格没有网格位置可谈，一律不判；
+         * 空身份也不判（不能与表里的空格"相等"，否则读失败的格会被当成重叠）。
          */
         internal fun crossPageOverlap(
             prev: List<String>?,
@@ -1359,13 +1726,58 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             row: Int,
             col: Int,
             identity: String?,
+            advanceRows: Int,
         ): Boolean {
             if (prev == null || row < 0 || col < 0) return false
             // 空身份 = 这格根本没读到东西，不能拿去和表里的空格"相等"（那会把读失败的格当成重叠）。
             if (identity.isNullOrEmpty()) return false
             if (traverseRows < 2 || cols < 1) return false
-            return prev.getOrNull((traverseRows - 2) * cols + col) == identity ||
-                prev.getOrNull((traverseRows - 1) * cols + col) == identity
+            // 前进量未知/为负 ⇒ fail-open（见 KDoc）。
+            if (advanceRows < 0) return false
+            val pr = row + advanceRows
+            // pr >= traverseRows 覆盖 advanceRows >= traverseRows（row>=0）：前进 ≥ 一整页 = 零重叠。
+            if (pr >= traverseRows) return false
+            return prev.getOrNull(pr * cols + col) == identity
+        }
+
+        /**
+         * ★ 2026-10-15 #305：页末**跨页身份重放撤回**的判定（纯函数，供窄测试）。
+         *
+         * 武器的重叠区重读统一出口：同张卡在相邻两页各被读一次、各入库一次。既有三道判据
+         * 都盖不住（像素指纹 0 命中 / `weaponCellEmitted` 键含页行列挡不住位移 / 锚定时刻的
+         * 追认撤不到 idx0——那时它的身份还是生产者竞态残值）。本函数在**页末**跑：此刻
+         * `curPageIds` 已被 pipe 排水回填成权威身份，按本页实测前进量 [advanceRows] 重放
+         * 逐格比对，返回应撤的格下标（= 身份逐位等于上页对齐位的格）。
+         *
+         * 门控与 [crossPageOverlap] 同族：`advanceRows <= 0`（无跨页位移）或
+         * `>= traverseRows`（整页前进零重叠）⇒ 空集；空身份不判（读失败的格不能与空格"相等"）。
+         * 天然同款不受影响：判的是**逐位全等身份**（含词条数值），真列表里同款件相隔几十件，
+         * 不可能落进同一前进量的对齐位。
+         *
+         * @param emitted 本页**emit 过**的格下标集（复制格/未 emit 格不在内 ⇒ 天然幂等；
+         *                锚定时刻追认已撤的格其 emit 记录已 remove，同样不在内）。
+         */
+        internal fun replayWithdrawIdxs(
+            curIds: List<String>,
+            prev: List<String>,
+            cols: Int,
+            traverseRows: Int,
+            advanceRows: Int,
+            emitted: Set<Int>,
+        ): List<Int> {
+            if (advanceRows <= 0 || advanceRows >= traverseRows) return emptyList()
+            if (cols < 1 || traverseRows < 2) return emptyList()
+            val out = ArrayList<Int>(2)
+            for (idx in emitted) {
+                if (idx < 0 || idx >= curIds.size) continue
+                val id = curIds[idx]
+                if (id.isEmpty()) continue
+                val pr = idx / cols + advanceRows
+                val pc = idx % cols
+                if (pr >= traverseRows) continue
+                if (prev.getOrNull(pr * cols + pc) == id) out.add(idx)
+            }
+            return out.sorted()
         }
 
         /**
@@ -1434,7 +1846,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   300ms 时被吞率 53~67%、落地中位 13~19px；700ms 时被吞率 33~40%、中位 128~139px。
         //   机制：滑动后存在 ~0.4s 低速惯性尾（帧间变化恰在 0.10 阈值附近）⇒ 300ms 会在尾巴里判"稳定"
         //   ⇒ 下一次滑动打在滚动动画中 ⇒ 被整段吞掉。700ms 让 settle 跨过尾巴。
-        const val SETTLE_STABLE_MS = 700L
+        // ★ 2026-10-14：700→350。**上述 09-13 的坑已被 09-14 的 requireChange 守卫堵死**
+        //   （命令滑动后必须先观察到一次变化才允许判稳定，见 SETTLE_CHANGE_WINDOW_MS），
+        //   故 350ms 不会再误判惯性尾为稳定帧。全量 artifact 扫描 A/B（BS，57 页 / 1026 格）：
+        //   sstable=350 臂与默认臂 **cells 逐位相同（1026）、判滑空=0、吞击重发=5 落在默认臂 5~7 的噪声带内**，
+        //   settle 87960→67320ms ⇒ 整轮 −4.8%。可由 `--es timing "sstable=…"` 覆盖。
+        const val SETTLE_STABLE_MS = 350L
         const val SETTLE_MAX_MS = 6000L
 
         /**
@@ -1444,6 +1861,22 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          */
         const val SETTLE_CHANGE_WINDOW_MS = 1500L
 
+        /**
+         * ★ 2026-10-14（#293）：命令滑动后 [awaitGridStable] 的**最早判稳时刻**（ms，从 settle 起点算）。
+         *
+         * 为什么需要它（实测，BS 2244，`20261014_192411_2244_artifact_lock_dbg.log`）：
+         * 注入的三段式滑动**标称 800ms**（400 快滑 90% + 300 缓爬 10% + 100 回退），实测整链闭合
+         * `+804ms`；而 `actions.swipe` 是**异步派发**（不等手势走完），段1 走完 90% 位移后
+         * 段2/3 只剩 ~10% 慢爬 —— 24×16 缩略图**看不见**（`diff=0.000`）⇒ settle 在 `629ms`
+         * 就判稳返回，返回帧是**手势中途的位移帧**。顶页 row0（套装列表第一格 = 目标套装所在）
+         * 的字被移出 [textLineCrop] 的 ±slack 搜索窗 ⇒ `行位没量到 ⇒ 不读不点`（+32.272 / +32.524），
+         * 直至甩尾停稳（+32.781）才读得到 ⇒ `selected=0` ⇒ `not_applied` ⇒ 退化全量扫。
+         * 同一根因还让多轮回顶时「下一轮派发打断上一链」（`swipe3 段2 断…手指未抬起`）。
+         *
+         * 取值 **900** = 整链 804ms + ~96ms 余量（覆盖派发起点对齐误差与 ~1fps 的采样抖动）。
+         * 只**延后判稳起点**，不改 moved/到顶口径、不改释放路径；[SETTLE_MAX_MS]=6000 仍是硬上限。
+         */
+        const val SWIPE_CHAIN_MS = 900L
 
         const val SETTLE_FRAME_TIMEOUT_MS = 800L
         /** `pollAnchorReady` 的轮询步长（enterScreen 末端就绪）。一次采样 = 抓帧 + 1 次 rec ≈ 10~25ms。 */
@@ -1515,18 +1948,38 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         const val PANEL_FP_DUP_WAIT_MS = 100L
 
         /** 武器面板**固定延迟**（GOODScanner `DEFAULT_WEAPON_PANEL_DELAY = 50ms`）：同款武器面板全同 ⇒ 指纹无效。 */
-        /**
-         * 武器面板**固定延迟**。GOODScanner 用 `DEFAULT_WEAPON_PANEL_DELAY = 50ms`，
-         * ⚠️ 但**真机实测 50ms 不够**：面板动画未完成就抓帧 ⇒ 精炼/等级行读到空
-         * （首轮 209 件里 57 条的 `refine` 读成 `null` ⇒ 同款 3★ 键全同 ⇒ 大量误判重复
-         *  ⇒ 触发 `duplicateStreak` 早停 ⇒ 3★ 区被截断 ⇒ 漏 100 件 ✗✗）。
-         * 提到 **300ms**（与我方 artifact 的 clickDelay 同量级），给面板渲染留足时间。
-         */
-        const val WEAPON_PANEL_DELAY_MS = 300L
-        // ★ 对齐方案 P1 曾考虑降到 GOODScanner 的 50ms —— **被上面这条事故否决**：
-        //   它 50ms 能活靠「每格单帧 + 无指纹门」，我方就绪逻辑不同，抄数值不抄条件必复现漏件。
+        // ★ 2026-10-14 #233：这里原来有 `WEAPON_PANEL_DELAY_MS = 300L`，**已删**。
+        //   它作用在 `frame` 已经抓妥之后（武器不走换帧分支）⇒ 只是在盲等一张定格的帧；
+        //   原先记在 KDoc 里那条「50ms 实测不够 ⇒ 57 条 refine 读空 ⇒ 漏 100 件」的因果**三条都站不住**：
+        //   ① 形状上不可能（延迟在抓帧之后）② refine 空号是系统性读不出数字「1」
+        //      （同文件账：171 次里「精炼1阶」命中 0 次、空号 43 次，GT 的 R1 正好 39 件），不是时序问题
+        //   ③ 那次事故查无落盘件，只随 10-02 的 squash 提交 b1e2d5a 进了注释。
+        //   GOODScanner 的 50ms 也不是裸等：后面紧跟 ensure_panel_stable(rect,100)；
+        //   而我方的稳定判定本来就在 visitClick 的签名就绪闸里做过了。
+        //   对照杠杆：`--es timing "wpdelay=<ms>"`（默认 0）。实测数见 ArtifactDomainPanels 的注释。
 
-        /** 天赋读数为 0 时（时序性读失败 / 切页淡入）**最多重读次数**与间隔（ms）。 */
+        /**
+         * 天赋读数为 0 时（时序性读失败 / 切页淡入）**最多重读次数**与间隔（ms）。
+         * 单位要说清：这是**重读**次数，样本数 = 首读 1 + 本值 ⇒ 2 就是「最多 3 个样本」。
+         *
+         * ★ 2026-10-14 #233 单2③：**试过 2（=最多 3 个样本），实测撤回 6**。
+         *   离线那半边是成立的：拿 8 臂 742 格的逐格样本序列回放，截到 3 样本与现行
+         *   **逐格全等（0 救 0 坏）**，每轮省 ≈5.7s（正文 `dsl/docs/talent-sample-count-20261014.md`）；
+         *   BS 实测也对得上（`runlogs/bs_pipe_20261014_055758` c1：直方图再无 #3..#6、
+         *   `仍有平票`=0、`仍有未读出行`=0、`天赋等级` 92 = emit 92、对 GT 归一后真差 0）。
+         *   **但真机把它推翻了**：华为同一件产物、同一天两轮 ——
+         *   cap-6 那轮（`runlogs/ui_scan_20261014_043735…`）摘要里**没有** `天赋未读`；
+         *   cap-3 那轮（`…_064526…`）摘要 **`天赋未读=1件`**，导出里 Fischl
+         *   `c0 t=[0, 0, 0]` 而 GT 是 `c6 t=(8,10,9)`。
+         *   ⇒ 离线回放只能证明"**已有样本序列下**结论不变"，证明不了"**多等几帧会不会等到**"：
+         *   慢机上那 4~6 帧里有一部分不是空转，是在等交叉淡入（`#166` 记的 ~2.5s 就是这台机量的）。
+         *   收益 5.7s/轮（≈0.5~1.3%）对价是"每轮可能有一个角色三项天赋静默归零"⇒ **不划算，撤回**。
+         * ⚠️ **不要往下调到 1（=2 样本）**：13 个分歧槽的正确性全部由第 3 帧的多数票兑现
+         *   （现行 13/13 对；反事实"平票取更晚"只有 5/10 ≈ 抛硬币、"取更大即停"8/10 会漏掉
+         *   Alyosha/Charlotte 两笔偏大错读）。第二样本本身不产生正确性，它产生的是
+         *   **"触发第三样本"的资格** —— 这正是它 700ms 的价钱买的东西。
+         *   离线口径同时给出：只取首读会错 ≈4.9 格/轮（现行 1 格/8 轮）。
+         */
         const val TALENT_RETRY_MAX = 6
         const val TALENT_REREAD_DELAY_MS = 700L
 

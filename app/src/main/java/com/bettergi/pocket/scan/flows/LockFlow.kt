@@ -131,17 +131,13 @@ internal object LockFlow {
 }
 
 /**
- * artifact_lock 原生入口（spec §3.4）。步序 = 原 flow JSON 的 steps 逐条直调：
+ * artifact_lock 步序主体（`ScanEngine.run()` 按 flowName 分派用；planSummary 在本体内）。
+ * 步序 = 原 flow JSON 的 steps 逐条直调：
  * enterScreen×2 → dualStateButton → filterReset → setFilter → assertScreen
  * → clicks(排序钮+确认，#255 按钮回顶) → pagedGridNative(pageSkip, visitBody) → planSummary。
+ * ★ D1（2026-10-14 删）：原先另有一个三行壳 `runLockScanNative()`（preamble+本函数+postamble），
+ *   全仓零调用者 ⇒ 删；生产入口就是 `run()` 的分派。
  */
-internal suspend fun ScanEngine.runLockScanNative() {
-    runPreamble()
-    runLockSteps()
-    runPostamble()
-}
-
-/** artifact_lock 步序主体（ScanEngine.run() 按 flowName 分派用；planSummary 在本体内）。 */
 internal suspend fun ScanEngine.runLockSteps() {
     try {
         runLockStepsInner()
@@ -177,6 +173,10 @@ private suspend fun ScanEngine.runLockStepsInner() {
         clickChainEntry("sortPopupConfirm")
     }
     nativeStep("pagedGrid") {
+        // ★ #219：dup 参数在**进 pagedGrid 之前**登记一次。判据（页级确认 dupPageConfirm）在
+        //   格循环里就被读，而流程体内的那次登记要到第 0 格 visit 才生效 ⇒ 从页 0 起算的值
+        //   才是流程真正声明的那个（流程体内保留同值登记，由守卫静默跳过）。
+        stopWhenRegisterDuplicateStreak(3, 2)
         pagedGridNative(LockFlow.GRID, pageSkipExpr = LockFlow.PAGE_SKIP_EXPR) { col, row, idx, prof ->
             runVisitBody(LockFlow.GRID, col, row, idx, prof, pipeEmit = null, pipeStop = LockFlow.STOP_DUP) { ctx ->
                 // ① 止扫登记（阈值只作 snap/rosterFind 兜底；pagedGrid 内被引擎覆盖）

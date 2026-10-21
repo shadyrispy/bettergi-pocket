@@ -57,6 +57,23 @@ class BridgeSettingsRepository(private val context: Context) : SettingsGateway {
 
     override fun get(): TriggerSettings = cached
 
+    /**
+     * ★ #183：投影**现状**要现问主进程（它是唯一持有 `ScreenCaptureController` 的进程），
+     * 不能吃 [cached] —— 缓存里只有"用户意图"。
+     *
+     * ⚠️ 这是一次同步的 ContentProvider 往返，只允许出现在**面板重绘**这条低频路径上
+     * （`OverlayWindowController.refreshStatus`），不要拿进热路径。
+     * 失败（主进程没起 / provider 抛）⇒ false：拿不到权威值时宁可不亮，
+     * 与本方法的口径（"开关反映投影开没开"）同向；不许回退成"读意图"，那正是 #183 的病。
+     */
+    override fun captureRunning(): Boolean = try {
+        call(SettingsBridgeProvider.METHOD_CAPTURE_STATE, null, null)
+            ?.getBoolean(SettingsBridgeProvider.KEY_VALUE) == true
+    } catch (e: Exception) {
+        Log.w(TAG, "capture_state 读不到 ⇒ 按未投影显示", e)
+        false
+    }
+
     override fun addListener(listener: (TriggerSettings) -> Unit) {
         listeners.add(listener)
         mainHandler.post { listener(cached) }

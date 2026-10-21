@@ -8,6 +8,7 @@ import android.util.Log
 import com.bettergi.pocket.capture.FrameSource
 import com.bettergi.pocket.capture.ScreenCaptureController
 import com.bettergi.pocket.input.InputAccessibilityService
+import com.bettergi.pocket.notice.NoticeCenter
 import com.bettergi.pocket.log.RecognitionLog
 import com.bettergi.pocket.bridge.OverlayBridge
 import com.bettergi.pocket.core.FlowSource
@@ -274,6 +275,15 @@ class ScriptRunner(
                 "回退累计=${StartGateLiveAsk.cacheFallbacks}）",
         )
         if (foreground == false) {
+            // ★ #283：顶号时 MiHoYo SDK 登录页被拉到前台，**包名与游戏相同**（所以闸门判得出来），
+            //   单独点一句把"谁挡的"说清楚 —— 否则现场只看得到 not_in_genshin，无从归因。
+            if (InputAccessibilityService.sdkLoginOnTop() == true) {
+                Log.w(
+                    TAG,
+                    "起扫前台闸: 前台是 MiHoYo SDK 登录/切号页（与游戏同包名 com.miHoYo.Yuanshen）⇒ " +
+                        "拒绝起跑，避免把流程入口点到 SDK 页上（#283）",
+                )
+            }
             listener.onFinished("not_in_genshin")
             return
         }
@@ -337,6 +347,10 @@ class ScriptRunner(
                     // #83：页首前台闸门。null（无障碍未连接/还没观察到窗口切换）= 放行，
                     // 与注入侧 `allowInject` 对"未知"的口径一致 —— 拦它会把整条流程变全 false。
                     foregroundOk = { InputAccessibilityService.isGenshinInForeground() ?: true },
+                    // ★ 2026-10-15 S4a：同包名的 SDK 登录/切号页探针（顶号时常见）。
+                    //   不能并进上面那条 —— 那条按**包名**判，而 SDK 页与游戏同包名 ⇒ 恒放行；
+                    //   这条走**类名**（GenshinPackages.isSdkActivity，与 #283 起跑闸同源）。
+                    sdkLoginOnTop = { InputAccessibilityService.sdkLoginOnTop() },
                 )
                 // ★ 2026-09-14：取消扫描期常驻穿透，回到逐点 prepare/restore（OverlayWindowController
                 //   内调用点均健在）。e63f7a4 引入常驻穿透是为防悬浮窗盖住操作区时手势 UP 不穿透；
@@ -364,9 +378,9 @@ class ScriptRunner(
                     // 有界重试（挂死 ⇒ 扫描协程不再 add ⇒ 重试必然拿到稳定快照，见该类注释），
                     // 整个导出体包 runCatching——失败走 RecognitionLog + logcat，绝不裸抛。
                     runCatching {
-                        val arts = ResultsSnapshot.withRetry { engine.results.toList() }
-                        val wps = ResultsSnapshot.withRetry { engine.resultsWeapons.toList() }
-                        val chs = ResultsSnapshot.withRetry { engine.resultsCharacters.toList() }
+                        val arts = ResultsSnapshot.snapshot(engine.results)
+                        val wps = ResultsSnapshot.snapshot(engine.resultsWeapons)
+                        val chs = ResultsSnapshot.snapshot(engine.resultsCharacters)
                         if (arts.isEmpty() && wps.isEmpty() && chs.isEmpty()) {
                             Log.w(TAG, "导出跳过（$why）：无已入库结果")
                             return
@@ -393,6 +407,23 @@ class ScriptRunner(
                 }
                 // 交给 try 外的 catch 用：异常发生时本轮已识别的结果不能跟着一起没了（P2-3）。
                 exportResults = { exportNow("aborted") }
+                // ★ 2026-10-16 #309：**游戏死亡哨兵**（与看门狗同线程同拍，判定逻辑在
+                //   [GameDeathSentinel]，纯函数、判定表可单测）。动机：游戏被系统杀/被顶号
+                //   闪退后投影流可能吐静止缓存帧，引擎在 #196 决策表下反复取帧失败直到
+                //   会话看门狗 120s 兜底——空转两分钟且有对着死画面 OCR 的脏读数风险。
+                //   哨兵用前台闸连续 2 拍非游戏（≈10s）提前了断。保守三原则（判死要确认 /
+                //   UNKNOWN 不计次不清零 / 首见 IN_GAME 前不判死）见该类 KDoc。
+                val deathSentinel = GameDeathSentinel()
+                // ★ 2026-10-16 #309b：**投影帧率哨兵**（借鉴 MAA-Meow GameFpsWatcher/Advisor 的
+                //   分层：纯可观测、无控制动作）。帧计数差分采样（`frameGeneration` 原子读），
+                //   15 窗占比式判定——**占比而非均值**：转场/加载时几秒的深谷不该触发
+                //   （华为实测加载屏可整段 0 新帧）。覆盖盲区 = "投影死了但游戏活着"
+                //   （华为投影服务偶发收回：前台闸看游戏，这条看我们的取帧流）。
+                //   动作 = 每会话一次 W 日志（`fpsAdvised` 旗标），不停止不重启。
+                var fpsLastGen = captureController.frameGeneration()
+                var fpsLastWall = android.os.SystemClock.elapsedRealtime()
+                val fpsWindow = ArrayDeque<Long>(FPS_WINDOW_SIZE)
+                var fpsAdvised = false
                 val wd = Thread {
                     while (!wdStop.get()) {
                         try {
@@ -401,6 +432,49 @@ class ScriptRunner(
                             return@Thread
                         }
                         if (wdStop.get()) return@Thread
+                        // ★ #309 死亡哨兵先于挂死判定（它 10s 就该响，不该等 120s）。
+                        //   isGenshinInForeground 为 null（无障碍断开）折叠成 UNKNOWN = 不判死。
+                        if (deathSentinel.onTick(
+                                GameDeathSentinel.fold(InputAccessibilityService.isGenshinInForeground()),
+                            )
+                        ) {
+                            Log.e(TAG, "游戏死亡哨兵触发 ⇒ 中止本轮并抢救导出")
+                            runCatching {
+                                engine.vars.stopRequested = true
+                                if (engine.vars.stopReason == null) engine.vars.stopReason = "gameDied"
+                            }
+                            NoticeCenter.error("游戏已退出/被切走（前台连续非原神）⇒ 自动收尾，已入库结果照常导出")
+                            exportNow("gameDied")
+                            wdStop.set(true)
+                            return@Thread
+                        }
+                        // ★ #309b 帧率采样（在挂死判定之前，纯观测；先于 last<=0 的 continue——
+                        //   起跑早期 lastProgressAtMs 还没打点，但投影帧率此刻就该被观测）。
+                        //   gen 没变也要记一拍 fps=0：投影停更的形态就是"gen 恒不变"，
+                        //   只在变化时采样的话，死投影永远填不满窗口 ⇒ 恰好告不出它要告的东西。
+                        run {
+                            val now = android.os.SystemClock.elapsedRealtime()
+                            val gen = captureController.frameGeneration()
+                            val fps = if (gen != fpsLastGen && now > fpsLastWall) {
+                                (gen - fpsLastGen) * 1000.0 / (now - fpsLastWall)
+                            } else 0.0
+                            fpsLastGen = gen
+                            fpsLastWall = now
+                            fpsWindow.addLast(fps.toLong())
+                            if (fpsWindow.size > FPS_WINDOW_SIZE) fpsWindow.removeFirst()
+                            if (!fpsAdvised && fpsWindow.size == FPS_WINDOW_SIZE) {
+                                val low = fpsWindow.count { it < FPS_LOW_FPS }
+                                if (low >= (FPS_WINDOW_SIZE * FPS_LOW_FRACTION).toInt()) {
+                                    fpsAdvised = true
+                                    Log.w(
+                                        TAG,
+                                        "投影帧率哨兵：近 ${FPS_WINDOW_SIZE} 拍里 $low 拍 < ${FPS_LOW_FPS}fps" +
+                                            "（中位 ${fpsWindow.sorted()[FPS_WINDOW_SIZE / 2]}）⇒ 投影可能已停更/被收回" +
+                                            "（游戏进程可能仍活着）。只告警不动作；引擎侧表现为取帧超时增多。",
+                                    )
+                                }
+                            }
+                        }
                         val last = engine.lastProgressAtMs
                         if (last <= 0L) continue
                         val idle = android.os.SystemClock.elapsedRealtime() - last
@@ -551,6 +625,14 @@ class ScriptRunner(
         const val SESSION_STALL_MS = 120_000L
         const val MAIN_DISPATCH_TIMEOUT_MS = 5000L
 
+        // ── ★ #309b 投影帧率哨兵（纯观测）────────────────────────────
+        /** 帧率滑动窗拍数（5s/拍 ⇒ 15 拍 = 75s 观测窗，MAA Advisor 用 15 个 1s 样本）。 */
+        const val FPS_WINDOW_SIZE = 15
+        /** 低于此帧率算"低"：投影流健康时 ≥15fps（游戏 60fps、引擎空闲时也远高于此）。 */
+        const val FPS_LOW_FPS = 10L
+        /** 触发占比：≥80% 的拍都低才告警（转场/加载的深谷不该触发，MAA `minFraction=0.8` 同款）。 */
+        const val FPS_LOW_FRACTION = 0.8
+
         /**
          * A15：stop() 等待旧扫描协程真正终结的上限（几百 ms 量级）。
          * stop 可能从主线程调（悬浮窗/applySettings/服务销毁）⇒ 不能无界阻塞主线程；
@@ -626,9 +708,15 @@ internal object MainDispatchGate {
  * A13（2026-09-30）：并发容器的**有界重试**快照（纯 JVM，ScriptRunnerTest 直接驱动）。
  *
  * 背景：会话级看门狗线程在扫描协程可能仍持锁 add 的情况下读 engine.results（ArrayList）
- * ⇒ ConcurrentModificationException。有界重试必然成功的依据（工单口径）：看门狗只在判
+ * ⇒ ConcurrentModificationException；扩容窗口还有 IOOBE 与「null 槽」两种撕裂形态
+ * （成因与处理见 [snapshot]）。有界重试必然成功的依据（工单口径）：看门狗只在判
  * 「挂死」（SESSION_STALL_MS 无进展）后才并发读——挂死 = 扫描协程不再 add ⇒ 重试必然拿到
  * 稳定快照。retries 耗尽仍冲突 ⇒ 原样抛出，交给 exportNow 的 runCatching 兜底（绝不裸抛）。
+ *
+ * 为什么不按「给 writer 加锁 / 换并发容器」修：writer 在 ScanEngine 的领域文件里裸
+ * `add`（ArtifactDomainPanels/ScanControlDomain），既没有可同步的 writer 锁，加锁或换
+ * 容器都要动引擎核心且都是热路径 ⇒ 本对象内的重试是**唯一不动 writer** 的修法，
+ * 也是本通道（看门狗抢救导出）已采纳的既有机制。
  *
  * 测试口径：真 CME 的并发构造不稳定，单测用「第 N 次调用才成功」的桩模拟冲突；
  * 真机验证方式：DEBUG_SCAN_FLOW 注入挂死触发看门狗导出，观察 logcat BetterGI.ScanRunner
@@ -637,7 +725,34 @@ internal object MainDispatchGate {
 internal object ResultsSnapshot {
 
     /**
-     * @param retries 总尝试次数（≥1）；每次 CME 后睡 [retryDelayMs] 再试
+     * 引擎结果列表的**撕裂感知**快照（看门狗导出路径的唯一入口）。
+     *
+     * 为什么不能直接 `list.toList()`：`ArrayList.toArray()` 在并发 add 的扩容窗口里读到的
+     * size 与 elementData 不是同一时刻的状态 ⇒ 两条损坏形态：
+     * - `ArrayIndexOutOfBoundsException`（size 已增、底层数组还是旧的）；
+     * - **null 槽**（按新 size 拷贝时尾部被补齐 null）——它不在快照时炸，而在导出/序列化
+     *   时才炸（或更糟：静默导出残缺内容）。
+     * 两者都按「撕裂快照」处理：重试（挂死前提见类注释，重试必然收敛）；null 槽伪装成
+     * CME 进入同一条重试路径。采样即校验的代价是 O(n) 一次 `contains(null)` 等价的遍历，
+     * 只发生在 120s 停滞抢救路径上，不在扫描热路径。
+     */
+    fun <T> snapshot(list: List<T>, retries: Int = 3, retryDelayMs: Long = 50L): List<T> =
+        withRetry(retries, retryDelayMs) {
+            val copy = list.toList()
+            if (hasNullSlot(copy)) {
+                throw ConcurrentModificationException("torn snapshot: null slot from concurrent growth")
+            }
+            copy
+        }
+
+    /** 快照里是否有 null 槽（`List<*>` 以避免泛型非空比较告警，供 [snapshot] 用）。 */
+    private fun hasNullSlot(list: List<*>): Boolean {
+        for (e in list) if (e == null) return true
+        return false
+    }
+
+    /**
+     * @param retries 总尝试次数（≥1）；每次撕裂异常（CME / IOOBE）后睡 [retryDelayMs] 再试
      *                （睡眠被打断则不吞中断标记、不再睡，立即补试剩余次数）
      */
     fun <T> withRetry(retries: Int = 3, retryDelayMs: Long = 50L, snapshot: () -> T): T {
@@ -646,7 +761,10 @@ internal object ResultsSnapshot {
         repeat(retries) { attempt ->
             try {
                 return snapshot()
-            } catch (e: ConcurrentModificationException) {
+            } catch (e: Exception) {
+                // A13 原只认 CME；扩容窗口的 IOOBE（AIOOBE 是其子类）是同一处撕裂的
+                // 另一种抛法 ⇒ 一并重试；其余异常照旧原样穿透。
+                if (e !is ConcurrentModificationException && e !is IndexOutOfBoundsException) throw e
                 last = e
                 if (attempt < retries - 1) {
                     try {

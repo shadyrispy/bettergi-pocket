@@ -29,6 +29,17 @@ class TriggerSettingsRepository(context: Context) : SettingsGateway {
 
     override fun get(): TriggerSettings = current
 
+    /**
+     * ★ #183：投影**现状**的权威读法。它不是用户设置，所以**不落 prefs**，
+     * 而是由 `TriggerForegroundService` 在 onCreate 注入一个指向活的 controller 的探针
+     * （`captureRunningProbe = { captureController.isRunning() }`）。
+     * 没注入 = 服务还没起来/进程刚复活 ⇒ false，与"取不到就不亮"的口径同向。
+     */
+    @Volatile
+    var captureRunningProbe: () -> Boolean = { false }
+
+    override fun captureRunning(): Boolean = captureRunningProbe()
+
     override fun addListener(listener: (TriggerSettings) -> Unit) {
         listeners.add(listener)
         mainHandler.post { listener(current) }

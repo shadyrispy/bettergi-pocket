@@ -31,6 +31,7 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.FILTER_PANEL_BACK_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.MAX_ROSTER_PAGES
 import com.bettergi.pocket.scan.ScanEngine.Companion.MAX_SNAP_ROUNDS
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_RAW_DUMP
+import com.bettergi.pocket.scan.ScanEngine.Companion.SWIPE_CHAIN_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
 import com.bettergi.pocket.scan.ScanEngine.Companion.TALENT_LEVEL_MAX
 import com.bettergi.pocket.scan.ScanEngine.Companion.TALENT_REREAD_DELAY_MS
@@ -228,7 +229,7 @@ internal suspend fun ScanEngine.traverseRoster(
             val before = try { freshFrame() } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
             val beforeThumb = before?.let { try { VoteJudges.gridThumb(it, profile, gridKey) } finally { it.release() } }
             actions.swipe(fx, fy, tx, ty)
-            val after = awaitGridStable(profile, gridKey)
+            val after = awaitGridStable(profile, gridKey, minElapsedMs = SWIPE_CHAIN_MS)
             val afterThumb = try { VoteJudges.gridThumb(after, profile, gridKey) } finally { after.release() }
             val looped = firstSeen != null && charName == firstSeen
             Log.i(
@@ -884,9 +885,12 @@ internal suspend fun ScanEngine.parseCharacterPanel(
      *  天赋页上 name/level 矩形读的是天赋名/天赋等级（脏值）⇒ 只判 key、**不写角色草案字段**、
      *  不进重读循环；正式采集由随后的属性页 parse 完成。 */
     headerOnly: Boolean = false,
+    /** ★ 2026-10-15 #308：**属性页判重短路**——先只读 header 判重，命中已见 key ⇒ 整段返回。 */
+    earlyDedupe: Boolean = false,
 ) {
     // 步声明可覆盖（visitParsePanel 经 step 传入，无需改调用点签名）
     val headerOnlyEffective = headerOnly || step.optBoolean("headerOnly", false)
+    val earlyDedupeEffective = earlyDedupe || step.optBoolean("earlyDedupe", false)
     val gateway = ocr
     if (gateway == null) {
         Log.w(TAG, "parseCharacterPanel: OCR 未接入，跳过")
@@ -895,8 +899,36 @@ internal suspend fun ScanEngine.parseCharacterPanel(
     val frame = ctx?.acquire { freshFrame() } ?: freshFrame()
     val owned = ctx?.frame != null
     try {
+        // ★ 2026-10-15 #308 属性页判重短路（earlyDedupe）：回卷区的重复件占全轮 ~45%（华为
+        //   170 格里 77 格跳过），旧实现仍付整份 5 矩形 parse + 名字重读循环（≈1.5s/格），
+        //   而那些字段对"不入库的重复件"毫无消费者。此处先只读 header 一个矩形判重（与
+        //   headerOnly 同一读法——属性页 header 同样是「X元素/名字」，三页签同位）：
+        //   命中已见 key ⇒ 只写判重所需字段就返回；未命中 / key=null ⇒ 照旧完整 parse
+        //   （同帧已抓，多花的只有 header 那 1 矩形的推理宽度，且这类格本来就要付全价）。
+        //   解析只走昵称表 + 词典两档（与下方 resolveKey 前两档同口径；旅行者元素规则
+        //   **故意不进早判**——早判 miss 无损失，命中反而可能把换元素的旅行者错并；旅行者
+        //   格照旧全价 parse）。
+        //   ⚠️ key=null 必须照旧——判不了身份就不能跳（宁可慢不可丢，CharDupJudge 教训）。
+        //   ⚠️ charName 必须填：emitCharacter 开头「charName 为空 ⇒ return」在
+        //   noteDupAndMaybeStop（回卷止扫判据）之前——空着会让判据断粮、列表滚不停。
+        if (earlyDedupeEffective && !headerOnlyEffective) {
+            val hTexts = gateway.readRois(frame, listOf(profile.rect("panels.char_profile.header")))
+            val headerText = StatParser.clean(hTexts.getOrElse(0) { "" })
+            val headerCjk = Regex("[\\u4e00-\\u9fa5/／]+").findAll(headerText).map { it.value }.joinToString("")
+            val hEl = Regex("^(.+?)元素").find(headerCjk)?.groupValues?.getOrNull(1)
+            val hName = headerCjk.substringAfter('/', headerCjk)
+            val hKey = nameOverrides.characterKeyOf(hName)
+                ?: lookupName(dictKeyOf(step, "name") ?: DEFAULT_CHAR_DICT, hName, dictFuzzy(step))
+            if (hKey != null && characterAlreadySeen(hKey)) {
+                charKey = hKey
+                lastCharKey = hKey
+                charName = hName
+                Log.i(TAG, "char: 判重短路 header='$headerText' ⇒ $hKey 已入库，跳过整份属性页 parse")
+                return
+            }
+        }
         // ★★ 2026-10-10 headerOnly 预读（交替序反序格）：**只读 header 一个矩形**——天赋页上
-        //   name/level 矩形是天赋名/天赋等级（脏值），bottomBar/titleBar 是属性页判据（天赋页无意义）
+        //   name/level 矩形读的是天赋名/天赋等级（脏值），bottomBar/titleBar 是属性页判据（天赋页无意义）
         //   ⇒ 4 个矩形全是浪费的推理宽度。预读只需要 header 出名字判重。
         //   正常格读 5 矩形：[0]=name [1]=level [2]=header [3]=bottomBar [4]=titleBar。
         val rects = if (headerOnlyEffective) {
@@ -926,11 +958,18 @@ internal suspend fun ScanEngine.parseCharacterPanel(
         // ★ 2026-10-10 assert 内联（原 assertScreen×2 → 同帧判定）：onFail=continue 语义不变，
         //   未命中只打 W（不打断流程——与原 assertScreen 的 retries 重试不同，这里同一帧内
         //   不再重试：parse 的名称重读循环本身就会再拿新帧，届时 bottomBar/titleBar 一并重判）。
+        // ★ #281（2026-10-14）：**headerOnly 预读必须跳过这两条判定**。预读只取 1 条矩形
+        //   （`texts` 只有下标 0），而这里按下标 3/4 取 ⇒ 恒得空串 ⇒ **每格必打两条 W**。
+        //   它不是"页判据没命中"的信息，是恒假分支里的噪声，而且噪声大到会被当成判别信号：
+        //   当晚就是这 48~51 条/轮的 `属性页判据未命中` 被拿去和"天赋漏扣"做了 2×2
+        //   （`dsl/docs/talent-plus3-20261014.md`），它真正的含义只是"这一格走的是反序相位"。
         run {
-            val attrOk = Regex("提升指南|升指南").containsMatchIn(texts.getOrElse(3) { "" })
-            val elOk = Regex("元素").containsMatchIn(texts.getOrElse(4) { "" })
-            if (!attrOk) Log.w(TAG, "char: 属性页判据未命中（bottomBar='${texts.getOrElse(3) { "" }}'）⇒ 继续")
-            if (!elOk) Log.w(TAG, "char: 元素判据未命中（titleBar='${texts.getOrElse(4) { "" }}'）⇒ 继续")
+            if (!headerOnlyEffective) {
+                val attrOk = Regex("提升指南|升指南").containsMatchIn(texts.getOrElse(3) { "" })
+                val elOk = Regex("元素").containsMatchIn(texts.getOrElse(4) { "" })
+                if (!attrOk) Log.w(TAG, "char: 属性页判据未命中（bottomBar='${texts.getOrElse(3) { "" }}'）⇒ 继续")
+                if (!elOk) Log.w(TAG, "char: 元素判据未命中（titleBar='${texts.getOrElse(4) { "" }}'）⇒ 继续")
+            }
         }
 
         /**
@@ -1285,10 +1324,47 @@ internal suspend fun ScanEngine.charPanelLooksWrongPage(): Boolean {
     }
 }
 
+/**
+ * 面板当前**是不是已经停在属性页**（#233 单2 给正序格用的正向页判据）。
+ *
+ * 判据 = `panels.char_profile.bottomBar` 读到「提升指南」。选它而不是选像素判稳，有两个理由：
+ * 1. **像素判稳这条路已经实测证伪过**（`ScanNavigationDomain.navigate` 的 KDoc 记着 2026-09-12
+ *    三轮：严格判据在切换动画期打满 700ms 零收益，放宽到 12 块才开始判稳但**丢件** 10→8）。
+ *    那条注释自己指的出路就是「要重做必须先换更结构化的信号（如目标页做一次 OCR 判定）」——本函数就是它。
+ * 2. 三页的宽底部条文本**互斥**（本档 profiles note：属性页 `提升指南`+`上限突破` / 天赋页 `天赋演示` /
+ *    命座页 空）⇒ 读到「提升指南」是"在属性页"的**正向证明**，不是"没读到别的"的推断。
+ *
+ * ⚠️ 只在能证明时才省：OCR 网关缺失、取帧失败、读空、抛异常 **一律回 false**（= 照今天的盲导航）。
+ *   这条闸门的失败方向被刻意做成"退回旧行为"，所以计数恒 0 才是异常信号（见 [ScanEngine.navRedundantSkipped]）。
+ */
+internal suspend fun ScanEngine.characterOnAttributesPage(): Boolean {
+    val g = ocr ?: return false
+    val f = runCatchingCancellable { settleFrame() }.getOrNull() ?: return false
+    return try {
+        val t = try {
+            g.readRois(f, listOf(profile.rect("panels.char_profile.bottomBar"))).firstOrNull().orEmpty()
+        } catch (e: OcrUnavailableException) {
+            throw e
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            ""
+        }
+        Regex("提升指南|升指南").containsMatchIn(t)
+    } finally {
+        f.release()
+    }
+}
+
 /** 天赋：3 个战斗天赋等级 OCR（panels.char_talent.lvRois）。 */
 internal suspend fun ScanEngine.readTalent() {
-    val gateway = ocr ?: return
-    val lv = profile.rawObject("panels.char_talent")?.optJSONArray("lvRois") ?: return
+    // ★ #274：三条 early return 原先**一声不吭** ⇒ "整步没走"与"走了但立刻退出"在日志里长得一样
+    //   （本轮就是靠数 `char: 天赋等级 [` 的次数 52 vs 件数 95 才分清的）。全部改成响亮。
+    val gateway = ocr ?: run { Log.w(TAG, "char: 天赋读取跳过 ⇒ OCR 网关不可用"); return }
+    val lv = profile.rawObject("panels.char_talent")?.optJSONArray("lvRois") ?: run {
+        Log.w(TAG, "char: 天赋读取跳过 ⇒ 本档 profile 缺 panels.char_talent.lvRois")
+        return
+    }
     val rects = ArrayList<FrameRect>()
     for (i in 0 until lv.length()) {
         val a = lv.getJSONArray(i)
@@ -1296,7 +1372,8 @@ internal suspend fun ScanEngine.readTalent() {
     }
     val frame = try {
         freshFrame()
-    } catch (e: CancellationException) { throw e } catch (_: Exception) {
+    } catch (e: CancellationException) { throw e } catch (ex: Exception) {
+        Log.w(TAG, "char: 天赋读取跳过 ⇒ 取帧失败：${ex.message}")
         return
     }
     var texts = try {
@@ -1344,6 +1421,10 @@ internal suspend fun ScanEngine.readTalent() {
     //   ⚠️ 旧的 max 合并在 Manekina/Fischl 这两例**都是对的** ⇒ 本改法不是回退 #153：
     //   多数票仍然保留（它挡"单帧偶发"，不依赖方向），只是不再让平票冒充多数票。
     //   循环节奏/延迟/上限一个都不动。
+    //     ↑ 这句是 #166 当时写的。2026-10-14 #233 单2③ **试过**把 [TALENT_RETRY_MAX]
+    //       从 6 收到 2（=最多 3 个样本）—— 离线 742 格回放说逐格全等、BS 三臂也没报错，
+    //       但**华为真机那轮出现 1 个角色三项天赋全 0**（cap-6 同机同日 0 例）⇒ 已撤回 6。
+    //       完整对价与"离线回放证明不了什么"那条教训写在 [TALENT_RETRY_MAX] 的 KDoc 里。
     while (attempts < TALENT_RETRY_MAX) {
         if (attempts > 0 && charTalents.none { it <= 0 } && !talentSamplesTied(samples)) break
         attempts++
@@ -1455,12 +1536,49 @@ internal suspend fun ScanEngine.readTalent() {
                 " ｜ 取值=${charTalents.toList()} ｜ 原文=${texts.take(3).map { "'" + it + "'" }}",
         )
     }
-    // ── ★ 2026-10-01 #155：命座天赋加成改**数据驱动**（GOODScanner `adjust_talents` 同法）──
-    //   旧实现是一张 GT 监督反推的手表（51 角色 ×「本账号当时那一档命座」），换个命座档就查不到 ⇒
-    //   落进 `c≥3⇒E / c≥5⇒Q` 的近似规则。而词典里 `c3`/`c5` 一直就有（120/123 角色齐全，此前被
-    //   中间那层 re-encode 丢掉），且**绫华 / 莫娜 / 琴…方向正好相反**（c3=Q、c5=E）⇒ 近似规则两头都减错，
-    //   表现就是 #155 的「成片少减 3」。手表 51 条里 50 条与本规则逐位一致，唯一差异是 Tartaglia
-    //   的普攻 +1（与命座无关，旧表把它塞进 c=0 那一格 ⇒ 达达利亚一旦有命座就丢掉这个 +1）。
+    // ★ #281（2026-10-14）：**这里不再扣命座加成**。
+    //   旧实现把 `applyConstellationTalentBonus` 放在 readTalent 末尾，读的是一旁的
+    //   `charConstellation` —— 而交替页签序的**反序格**是「天赋页开局 ⇒ 先读天赋 ⇒ 才去命座页」，
+    //   那一刻 c 还是 0 ⇒ 一分不减 ⇒ 导出带上面板的 +3。BS 全量实测（四臂 373 行、
+    //   `dsl/docs/talent-plus3-20261014.md` 的 2×2）：漏扣 99 行里 c@talent **全部为 0**、
+    //   扣对 108 行里命座**全部先读到**，零反例；而面板值本身**跨臂从不冲突**
+    //   ⇒ "天赋读数在抛硬币"是假的，真相是**同一角色走哪个方向就决定了减不减加成**，
+    //   轮间的正/反相位随判重跳过的位置漂 ⇒ 看起来像随机。
+    //   扣减点改到 `emitCharacter`（那时 c 已经是本格终值），**零额外点击/抓帧**。
+    // 诊断：这一行仍然只报**面板原值**（#274 的判据就是数它的条数 vs 件数，别改这个前缀）。
+    Log.i(
+        TAG,
+        "char: 天赋等级 ${charTalents.toList()}（面板原值，未扣加成） ｜ 原文=${texts.take(3).map { "'" + it + "'" }} " +
+            "｜ ROI=${rects.take(3).joinToString { "(${it.left},${it.top},${it.right},${it.bottom})" }}",
+    )
+}
+
+/**
+ * 入库前扣掉命座对天赋行的加成（#155 的数据驱动规则 + #281 的时点修正）。
+ *
+ * **为什么必须在 emit 时点做**：交替页签序下反序格是「先天赋、后命座」，
+ * 放在 readTalent 里就会拿到 `charConstellation==0` 而整批漏扣（机制与实测账见
+ * [applyConstellationTalentBonus] 上方 readTalent 里那段注释，以及
+ * `dsl/docs/talent-plus3-20261014.md`）。而两条访问顺序里 `charConstellation` 在
+ * **emit 之前**都已经落终值 ⇒ 扣减只能放在 emit 这一侧，两条顺序才共用同一个 c。
+ *
+ * 幂等：由 [ScanEngine.talentBonusApplied] 守住"本格只扣一次"，`resetCharDraft` 复位。
+ * 漏扣/重复扣都是**静默**的（导出仍是合法等级数字），所以宁可多一个布尔位也不能靠调用顺序。
+ */
+internal fun ScanEngine.applyTalentBonusForEmit() {
+    if (talentBonusApplied) return
+    talentBonusApplied = true
+    if (charTalents.all { it <= 0 }) return // 没读过天赋（判重跳过格就是这一支）⇒ 无可扣，别打日志刷计数
+    // ★ 2026-10-15 #306：**奇偶命座归零在 emit 时补一道**。`readConstellation` 末尾那次守卫
+    //   读的是 `lastCharKey`，而交替页签序下命座读取**早于**属性页 parse：headerOnly 预读把
+    //   名字 OCR 成「随机姓」（缺尾字）⇒ resolveKey=null ⇒ lastCharKey=null ⇒ 守卫查不到
+    //   NO_CONSTELLATION_KEYS ⇒ c=6 原样入库（华为 10-15 实测 Manekin c6 vs GT c0；
+    //   Manekina 那格有 `6 → 0` 日志是因为 headerOnly 恰好解析成功——纯相位运气）。
+    //   走到这里 lastCharKey 已是属性页 parse 修好的权威值 ⇒ 在此兜底。幂等：c 已是 0 时无感。
+    if (lastCharKey != null && lastCharKey in NO_CONSTELLATION_KEYS && charConstellation != 0) {
+        Log.i(TAG, "char: $lastCharKey 属奇偶（无命座，emit 时补守卫）⇒ 命座读数 $charConstellation → 0")
+        charConstellation = 0
+    }
     val c = charConstellation
     // 旅行者的 GOOD 键带元素后缀（TravelerDendro…），而词典只有一个 `Traveler` 条目 ⇒ 归一到基名再查。
     val dictKey = lastCharKey?.let { k -> if (TRAVELER_BY_ELEMENT.containsValue(k)) "Traveler" else k }
@@ -1468,20 +1586,18 @@ internal suspend fun ScanEngine.readTalent() {
     if (dictKey != null && attrs == null) {
         Log.w(TAG, "char: 词典里没有角色 $dictKey ⇒ 命座加成无从可查，天赋按面板原值入库")
     }
+    val panel = charTalents.toList()
     val (bonus, suspicious) = applyConstellationTalentBonus(charTalents, dictKey, attrs, c)
     if (suspicious) {
         Log.w(
             TAG,
-            "char: $dictKey c=$c 该减加成的天赋行读数 <4（面板原值=${texts.take(3).map { "'" + it + "'" }}）" +
-                "⇒ 疑似命座误读，导出可能偏 3",
+            "char: $dictKey c=$c 该减加成的天赋行读数 <4（面板原值=$panel）⇒ 疑似命座误读，导出可能偏 3",
         )
     }
-    // 诊断：实测我方天赋 = GT + 3（恒差，非命座加成 ✗）⇒ 打印 OCR 原文与 ROI 定位
     Log.i(
         TAG,
-        "char: 天赋等级 ${charTalents.toList()} ｜ 原文=${texts.take(3).map { "'" + it + "'" }} " +
-            "｜ bonus=${bonus.toList()} key=$dictKey c=$c attrs(c3,c5)=${attrs?.c3}/${attrs?.c5} " +
-            "｜ ROI=${rects.take(3).joinToString { "(${it.left},${it.top},${it.right},${it.bottom})" }}",
+        "char: 天赋扣加成 面板=$panel ⇒ 入库=${charTalents.toList()} ｜ bonus=${bonus.toList()} " +
+            "key=$dictKey c=$c attrs(c3,c5)=${attrs?.c3}/${attrs?.c5}",
     )
 }
 

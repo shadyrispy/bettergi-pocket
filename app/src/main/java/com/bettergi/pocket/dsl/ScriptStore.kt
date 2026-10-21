@@ -49,6 +49,10 @@ object ScriptStore {
         NativeFlow("auto_equip", "自动装备", "equip", 50, true, listOf(OverlayAction("import", "导入"), OverlayAction("run", "开始"))),
         NativeFlow("char_calibrate", "char_calibrate", "gear", Int.MAX_VALUE, false, emptyList()),
         NativeFlow("setfilter_calibrate", "setfilter_calibrate", "gear", Int.MAX_VALUE, false, emptyList()),
+        // ★ 2026-10-14：套装筛选后扫描（adb 调试工具，无 ui 段 ⇒ 只在管理器「开发用」小节）。
+        //   注册进 KEYS 是**必须**的：ScriptRunner 起跑校验 `flowName !in KEYS` 会静默回落
+        //   artifact_scan（全量），那正是本流程要避免的。
+        NativeFlow("artifact_scan_set", "artifact_scan_set", "artifact", Int.MAX_VALUE, false, emptyList()),
     )
 
     /** 全部 flowName 的**单一事实源**：run() 分派、ScriptRunner 起跑校验、UI 清单三处共用。 */

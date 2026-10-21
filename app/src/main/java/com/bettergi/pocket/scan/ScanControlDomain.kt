@@ -22,6 +22,7 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_REFRESH_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_MAX_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_STABLE_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SNAP_TOL
+import com.bettergi.pocket.scan.ScanEngine.Companion.SWIPE_CHAIN_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
 import com.bettergi.pocket.recognition.name.GoodNames
 import com.bettergi.pocket.log.RecognitionLog
@@ -107,6 +108,11 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
         Log.w(TAG, "emit GoodCharacter: 草稿为空（char_profile 未解析），跳过")
         return
     }
+    // ★ #281（2026-10-14）：命座天赋加成的扣减点从 `readTalent` 挪到这里。
+    //   交替页签序的反序格是「天赋页开局 ⇒ 先读天赋 ⇒ 才去命座页」，在 readTalent 里读
+    //   `charConstellation` 恒得 0 ⇒ 整批漏扣 +3（BS 四臂 2×2 零反例，见
+    //   `dsl/docs/talent-plus3-20261014.md`）。到这里**两条顺序的 c 都已落终值** ⇒ 同一个口径。
+    applyTalentBonusForEmit()
     val c = GoodCharacter(
         key = charKey,
         name = charName,
@@ -115,9 +121,10 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
         constellation = charConstellation,
         // ascension：由 `parseCharacterPanel` 算好（优先面板等级上限 Lv.X/Y 的 Y，缺失按 level 分层）
         ascension = lastCharAscension,
-        // ★ 2026-09-30 #155：面板显示的是**含命座加成**的值，GT/GOOD 要基础值 ⇒ 减法在 `readTalent`
-        //   里做（`applyConstellationTalentBonus`，查字典 c3/c5 是哪一行 + 旅行者那条特例），
-        //   这里拿到的已经是基础值。旧的"c≥3⇒skill、c≥5⇒burst"近似规则连同那张 GT 反推的手表一起删了。
+        // ★ 2026-09-30 #155：面板显示的是**含命座加成**的值，GT/GOOD 要基础值 ⇒ 减法由
+        //   `applyTalentBonusForEmit`（查字典 c3/c5 是哪一行 + 旅行者/达达利亚两条特例）在
+        //   紧上方完成，这里拿到的已经是基础值。旧的"c≥3⇒skill、c≥5⇒burst"近似规则
+        //   连同那张 GT 反推的手表一起删了。
         talents = charTalents.toList(),
     )
     // ── 连续重复角色判据（2026-09-11 用户定：连续 3 个重复 = 遍历完）──
@@ -133,7 +140,6 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
     //   一眼可见，不用去翻逐条 Log.w。
     val seenKeys = seenCharKeys()
     val dup = characterAlreadySeen(c.key)
-    lastCharName = c.name
     noteDupAndMaybeStop(c.key, seenKeys)
     if (dup) {
         // ⚠️ 不入库：角色侧无 dedupe（`dedupe` 只作用于圣遗物），重复件入库会污染导出。
@@ -145,6 +151,18 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
     // ★ #156：数一下"没有 GOOD key 的入库件"，进 `scan finished` 摘要（逐条只有 Log.w，
     //   翻日志才看得见；对账侧表现为"多 N 条未解析 + 缺 N 个真角色"）。
     if (c.key == null) charUnresolved++
+    // ★ #274：**天赋一项都没读到**也进摘要（与上面 `未解析身份` 同一条纪律：逐条只有 Log 的话，
+    //   翻 3579 行日志才看得见）。这里判的是"导出里 t=[0,0,0]"，它**不是合法值**：
+    //   全部战斗天赋基础等级恒 ≥1（`CharacterDomainPanels.kt:1320` 那条实测），所以 >0 就是漏读，
+    //   不管漏在"整步没走"还是"重读打满上限"。本轮实测 43/95 全 0 ⇒ 这个数就是那 43。
+    if (c.talents.none { it > 0 }) {
+        charTalentUnread++
+        Log.w(
+            TAG,
+            "char: 天赋未读 ⇒ 导出 t=${c.talents} 不是合法值（${c.name} lv=${c.level} " +
+                "asc=${c.ascension}，全部战斗天赋基础等级恒 ≥1）",
+        )
+    }
     // #122：给「格级:」日志一个**与本格入库同源**的标签（由 pagedGrid 在本格日志后清）
     lastCharCellLabel = "c:${c.key ?: c.name}/lv${c.level}"
     Log.i(TAG, "char emit #${resultsCharacters.size}: ${c.name} lv=${c.level} c${c.constellation} t=${c.talents}")
@@ -155,7 +173,7 @@ internal fun ScanEngine.emitCharacter(step: JSONObject) {
     resetCharDraft()
 }
 
-/** 重置角色草稿（不清 `lastCharName`：它供止扫判据使用）。 */
+/** 重置角色草稿。 */
 internal fun ScanEngine.resetCharDraft() {
     charName = ""
     charKey = null
@@ -163,6 +181,7 @@ internal fun ScanEngine.resetCharDraft() {
     charElement = null
     charConstellation = 0
     for (i in charTalents.indices) charTalents[i] = 0
+    talentBonusApplied = false // #281：本格还没扣过加成（扣减点在 emit，见 applyTalentBonusForEmit）
 }
 
 /** 计划中目标的**最低稀有度**（稀有度止扫判据）。计划为空或无 rarity 字段返回 null ⇒ 判据不生效。 */
@@ -227,7 +246,16 @@ internal fun ScanEngine.swipeLogged(gridKey: String, x: Int, y0: Int, y1: Int, w
     return ok
 }
 
-internal suspend fun ScanEngine.setFilter(step: JSONObject) {
+/**
+ * 套装筛选：chain 打开子面板 → 清空旧条件 → 按行位 OCR 勾选目标 → 确认。
+ *
+ * @return `true` = 筛选**已生效**（已按目标确认/带筛确认）；`false` = **未生效**
+ *   （面板没打开 / 词典缺 / 无目标 / 一个都没勾上 / 部分命中被清筛改扫全量）。
+ *   调用方 `artifact_scan_set` 据此决定是否中止本轮 —— 未生效时**绝不放行成全量扫描**，
+ *   否则"筛选后扫描"就退化成了全量扫（既慢又违背意图）。既有调用点（lock/equip/标定）
+ *   忽略返回值，行为零变化。
+ */
+internal suspend fun ScanEngine.setFilter(step: JSONObject): Boolean {
     val ocrGateway = ocr
     val chain = step.getJSONArray("chain")
     // §16.4 链项解析统一走 clickChainEntry（命中 CHAIN_ANCHOR_PATHS → profile 机读坐标，
@@ -243,7 +271,7 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
         // 非激进：此时面板**很可能压根没打开**（例如游戏内 5★ 视图把漏斗禁用），
         // 按 BACK 只会把背包关掉 ⇒ 让 flow 的 assertScreen 去兜。
         leaveFilterPanels("setFilter 放弃", aggressive = false, homeHint = homeHintOf(step))
-        return
+        return false
     }
     // §12.4-① 开始筛选前先清空已选条件（filterPanel.reset）。
     // 2560 实测：setPlus 打开子面板有动画，紧接的 reset 点击落在过渡态被吞 → 游戏残留勾选
@@ -261,13 +289,13 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
     if (sel == null) {
         // 无 OCR 选择段（如 PILL 直达）→ 直接确认关闭
         confirmFilter(step)
-        return
+        return true
     }
     val gridKey = sel.optString("grid", "set_filter_popup")
     val dictKey = sel.optString("dict", "mappings.artifactSets")
     if (GoodNames.kindOf(dictKey) == null || names == null) {
         Log.w(TAG, "setFilter: dictionary '$dictKey' not loaded")
-        return
+        return false
     }
     val lookup: (String) -> String? = { text -> lookupName(dictKey, text) }
     val match = sel.optString("match", "exact")
@@ -280,16 +308,16 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
         //   ⇒ 之后 foreach/panelMatch 全程对着子面板跑（真机实测：每格 verify FAILED）。
         Log.w(TAG, "setFilter: 无筛选目标（未注入 setName/targets）⇒ 不确认、直接退出（not_applied）")
         leaveFilterPanels("无筛选目标", homeHint = homeHintOf(step))
-        return
+        return false
     }
-    val grid = profile.rawObject("grids.$gridKey") ?: return
+    val grid = profile.rawObject("grids.$gridKey") ?: return false
     val columns = grid.getJSONObject("columns")
     val rowYTop = grid.getJSONArray("rowYTop")
     val leftX = columns.getJSONObject("left").getInt("checkboxX")
     val rightX = columns.getJSONObject("right").getInt("checkboxX")
     val leftBox = columns.getJSONObject("left").getJSONArray("nameBox")
     val rightBox = columns.getJSONObject("right").getJSONArray("nameBox")
-    if (ocrGateway == null) return
+    if (ocrGateway == null) return false
     val rowHeight = grid.optInt("rowHeight", 120)
     // 行距以 `rowYTop` 相邻差为准（缺 rowYTop 时回退 profile 的 rowPitch 键）。
     // 三档实测：2244=102、2560=136、3200=136（2560 那份 2026-10-02 傍晚前是 133，
@@ -454,7 +482,8 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
             )
             actions.swipe(nx, ny, nx, ny + profile.scale(rowPitch / 2, profile.scaleY))
             // 半行位移喂给 24×16 缩略图的"确实变了"判据太弱 ⇒ 这里只等画面静止。
-            awaitGridStable(profile, gridKey).release()
+            // minElapsedMs：往回轻推也是三段链注入，必须等手势闭合再判稳（#293）。
+            awaitGridStable(profile, gridKey, minElapsedMs = SWIPE_CHAIN_MS).release()
             continue
         }
         pageNudges = 0
@@ -479,7 +508,10 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
         )
         // requireChange=true：必须**先看到列表变了**才允许判稳定；超窗未变会告警，
         // 那种情况才真的可能是"滑动未送达 / 确实到底"。
-        val stable = awaitGridStable(profile, gridKey, requireChange = true)
+        // minElapsedMs：翻页也是三段链注入，等手势闭合再判稳（#293）。
+        val stable = awaitGridStable(
+            profile, gridKey, requireChange = true, minElapsedMs = SWIPE_CHAIN_MS,
+        )
         stable.release()
     }
     if (pending.isNotEmpty()) Log.w(TAG, "setFilter: 目标未全部点选，剩余=$pending")
@@ -487,7 +519,7 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
     if (selected == 0) {
         Log.w(TAG, "setFilter: 一个目标都没勾上（selected=0，翻页 $turns 次）⇒ 不确认、直接退出（not_applied）")
         leaveFilterPanels("selected=0", homeHint = homeHintOf(step))
-        return
+        return false
     }
     // ★ P0-C（2026-10-08，GS 对齐 lock_manager.rs set_filter_plan 三态）：**部分命中**
     //   （勾上了部分、剩余目标没找到）⇒ **清掉筛选改扫全量**，不再"带半套筛选扫"。
@@ -501,7 +533,7 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
             // 非 lock/非计划驱动流程（防御）：保持旧行为（带半套筛选扫）
             Log.w(TAG, "setFilter: 部分命中 selected=$selected 未点完=$pending ⇒ 确认带筛扫（旧语义，非计划驱动）")
             confirmFilter(step)
-            return
+            return true
         }
         Log.w(
             TAG,
@@ -510,10 +542,11 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
         )
         vars.lockFilterPartial = true
         leaveFilterPanels("partial=$selected", homeHint = homeHintOf(step))
-        return
+        return false
     }
     Log.i(TAG, "setFilter: 已勾选全部 $selected 个目标（翻页 $turns 次）⇒ 确认筛选")
     confirmFilter(step)
+    return true
 }
 
 /** 取当前帧网格缩略图（失败返回 null），用于到底判据（差异比例阈值）。 */
@@ -683,6 +716,10 @@ internal fun ScanEngine.resetScanAccumulation() {
     curPageIds.clear()
     skipCopyFrom.clear()
     anchoredD = null
+    // #292：本页实测前进行数（来自身份锚定 d/cols）与"本页武器格 → resultsWeapons 下标"映射，
+    // 都是**本页**语义（页序跨目标会重号 ⇒ 下标失效）⇒ 与 anchoredD 一起清。
+    curAdvanceRows = -1
+    curPageWeaponEmit.clear()
     curCellIdx = -1
     curCellRow = -1
     curCellCol = -1
@@ -1115,13 +1152,21 @@ internal suspend fun ScanEngine.visitClick(
             // 可读的名字 ROI（character_scan 的 click 是 visit 首步，ctx.frame 为空）。
             // ⚠️ 历史上这里曾误用 coerceAtMost(panelPollMs) 把 550ms 拖到 120ms ——
             //   panelPollMs/PANEL_POLL_MS 已于 2026-10-05 连根删除（该常量从未被任何
-            //   生效路径引用），本分支如今就是纯固定等待，不存在可调的步长。
+            //   生效路径引用）。本分支**当时**不存在可调的步长；
+            //   2026-10-14 起有 `prefresh=<ms>` 这个**显式 A/B 覆盖档**（默认 -1 = 用常数），
+            //   与当年那个"没人读的常数"不同 —— 它只服务于"550 该不该降到 400"这一次测量。
             // ★ 2026-10-05：原先这里前面还有一条「抓帧 + OCR 读名字轮询」分支
             //   （`waitPanelNameReady`），在**全部存档真机日志里 0 次命中**（签名分支的
             //   「面板未变但选中框已移动」有 4956 次），留着只会误导"以为就绪判定还依赖 OCR"。
             //   ⇒ 已删；签名采样失败这类情形统一落到本分支，由上面的 W 日志暴露。
-            tmPanelMs += PANEL_REFRESH_MS
-            delay(PANEL_REFRESH_MS)
+            // ★ 2026-10-14：加 `prefresh=<ms>` 覆盖档 —— 对齐方案 §8.3 那条"550→400"的取值决策
+            //   一直没有 A/B 通道（本常数原先是纯 const，改一次要重编一次 APK）。
+            //   角色流水每一格都落到这里（click 是 visit 首步 ⇒ ctx.frame 空 ⇒ sigUsable 恒假），
+            //   所以这个旋钮就是角色线"等待"的唯一闸；实测签名路径反而更慢（556→689ms/格，
+            //   见本文件上面那段 KDoc），故走"降固定档"而不是"接签名门"。
+            val refreshMs = TimingOverrides.panelRefreshMs.takeIf { it >= 0L } ?: PANEL_REFRESH_MS
+            tmPanelMs += refreshMs
+            delay(refreshMs)
         }
     }
     // 收敛帧兜底：签名路径若从未确认成功（未变兜底/超时），此处补抓一次，

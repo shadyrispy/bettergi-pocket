@@ -49,10 +49,17 @@ class DebugControlReceiver : BroadcastReceiver() {
                 }
                 ACTION_SCAN_FLOW -> {
                     action = TriggerForegroundService.ACTION_DEBUG_SCAN_FLOW
-                    putExtra(
-                        TriggerForegroundService.EXTRA_FLOW,
-                        intent.getStringExtra(EXTRA_FLOW) ?: "artifact_scan",
-                    )
+                    // ★ 2026-10-14：`flow` 改**仅显式给过才转发**。原先这里无条件写 `?: "artifact_scan"`，
+                    //   会在 service 侧把"由 sets 推出的 artifact_scan_set"覆盖成 artifact_scan ⇒
+                    //   套装筛选静默变成全量扫（正是本工具要避免的）。默认交给 service 按 sets 决定。
+                    intent.getStringExtra(EXTRA_FLOW)?.let {
+                        putExtra(TriggerForegroundService.EXTRA_FLOW, it)
+                    }
+                    // ★ 2026-10-14 套装筛选后扫描：转发套装 key 列表（与上面 plan/timing 同一条教训——
+                    //   漏转发 = 静默退化，不报错）。service 侧据它合成 `[{"setKey":"…"}]` 计划。
+                    intent.getStringExtra(TriggerForegroundService.EXTRA_SETS)?.let {
+                        putExtra(TriggerForegroundService.EXTRA_SETS, it)
+                    }
                     putExtra(TriggerForegroundService.EXTRA_MAX_PAGES, intent.getIntExtra(EXTRA_MAX_PAGES, Int.MAX_VALUE))
                     // ★ 2026-09-13 修：`timing` 规格此前**没有转发** ⇒ 所有 `--es timing "..."` 的 A/B 都静默跑了默认值
                     //   （实测每一档"对比档"的 `timing:` 日志都带 `(default)`）。转发后配置类 A/B 才成立。
@@ -138,6 +145,8 @@ class DebugControlReceiver : BroadcastReceiver() {
         const val EXTRA_DIST = "dist"
         const val EXTRA_MEASURE = "measure"
         const val EXTRA_FLOW = "flow"
+        /** 2026-10-14 套装筛选后扫描：逗号分隔的套装词典 key（如 `HeartOfTheFurnace`）。 */
+        const val EXTRA_SETS = "sets"
         const val EXTRA_MAX_PAGES = "maxPages"
         const val EXTRA_GEO_ADVANCE = "geoAdvance"
     }

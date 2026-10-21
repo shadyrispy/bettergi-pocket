@@ -240,12 +240,28 @@ object GridAlign {
 
         val barsByCol = ArrayList<List<Int>>(g.cols)
         var bars = 0
+        // ★ 2026-10-12 #226 性能修（先量再改；单价/浪费见 GridAlignTest「rowPhase 每页单价与整帧行浪费」）：
+        //   ① 行窗：旧写法对**整帧**行数算 rowMean，而 brightBands 只读 [yFrom,yTo]（2244 档
+        //      903/1080、3200 档 1205/1440 ⇒ 白算 16.4%/16.3%）⇒ 只量窗内。窗内剖面与整帧剖面
+        //      逐位相同、带中心统一 +yFrom 还原绝对坐标 ⇒ 输出逐位不变（等价性见 GridAlignTest
+        //      「复用缓冲与限定行窗都逐位等价」；本机 JVM 对拍：2244/3200 多偏移下旧/新 RowPhase
+        //      与 measureError 全等，openpnp 4.9.0-0 与单测同源）。
+        //   ② 行缓冲：旧 rowMean 里**每行** new ByteArray(width·3)（2244 档一次 rowPhase =
+        //      7列×1080行 = 7560 个短命数组 ≈3.18MB/页；3200 档 10080 个 ≈6.05MB）⇒ 本次调用
+        //      **一次** grow-only 缓冲、跨列跨行复用。不落字段：object 级缓冲才有所有权/清理问题
+        //      （先例 ScanEngine.panelCropBuf），本地缓冲随调用回收、跨调用零状态。实测：2244 档
+        //      rowPhase ≈2.1→1.6ms、线程分配 3.58→0.25MB/次；3200 档 ≈3.0→2.4ms、6.54→0.31MB/次
+        //      （20 次中位）。
+        var rowBuf = ByteArray(0)
         for (c in 0 until g.cols) {
             val x0 = profile.scale(g.colXs[c], profile.scaleX).coerceIn(0, frame.cols() - 2)
             val x1 = profile.scale(g.colXs[c] + g.cardW, profile.scaleX)
                 .coerceIn(x0 + 2, frame.cols())
-            val prof = DoubleArray(frame.rows()) { rowMean(frame, it, x0, x1) }
-            val kept = periodKeep(brightBands(prof, yFrom, yTo, minRun, maxRun), pitch, tol)
+            val need = (x1 - x0) * frame.channels()
+            if (rowBuf.size < need) rowBuf = ByteArray(need)
+            val n = yTo - yFrom + 1
+            val prof = DoubleArray(n) { rowMean(frame, yFrom + it, x0, x1, rowBuf) }
+            val kept = periodKeep(brightBands(prof, 0, n - 1, minRun, maxRun).map { it + yFrom }, pitch, tol)
             if (kept.size >= 2) {
                 bars += kept.size
                 barsByCol.add(kept)
@@ -416,11 +432,19 @@ object GridAlign {
         val h = frame.rows()
         val cols = g.cols
         val profiles = Array(cols) { DoubleArray(h) }
+        // ★ 2026-10-12 #226：行缓冲**每次调用分配一次**、跨行（跨列）复用 —— 旧写法 rowMean 每行
+        //   new ByteArray(width·3)，本函数 7×h 个短命数组（2244 档每次 detectRow 7×1080×420B≈3.18MB，
+        //   实测线程分配 3.39→0.07MB/次）。本函数**不缩行窗**：detectStep 用 profiles[0].size 当帧高
+        //   钳 hi（h−1−STEP_BELOW），缩窗要改它的坐标契约，另属一件；且 detectRow 每轮仅 1 次
+        //   （+phaseOffset 兜底），成本在分配不在行数。
+        var rowBuf = ByteArray(0)
         for (c in 0 until cols) {
             val x0 = profile.scale(g.colXs[c], sx).coerceIn(0, frame.cols() - 1)
             val x1 = profile.scale(g.colXs[c] + g.cardW, sx).coerceIn(x0 + 1, frame.cols())
+            val need = (x1 - x0) * frame.channels()
+            if (rowBuf.size < need) rowBuf = ByteArray(need)
             val m = profiles[c]
-            for (y in 0 until h) m[y] = rowMean(frame, y, x0, x1)
+            for (y in 0 until h) m[y] = rowMean(frame, y, x0, x1, rowBuf)
         }
         return profiles
     }
@@ -476,14 +500,18 @@ object GridAlign {
         return grp.sorted()[grp.size / 2]
     }
 
-    /** 行均值（BGR 三通道均值），整行 Mat.get 读一次。 */
-    private fun rowMean(frame: Mat, y: Int, x0: Int, x1: Int): Double {
-        val width = x1 - x0
-        val buf = ByteArray(width * frame.channels())
+    /**
+     * 行均值（BGR 三通道均值），整行 Mat.get 读一次。
+     * [buf] 由调用方**复用**（grow-only，size ≥ (x1−x0)·channels）：多出的尾部会被 Mat.get 线性
+     * 拷到下一行像素（行为见 GridAlignTest「Mat get 用超长缓冲读到的是下一行」）⇒ 只累加前 need
+     * 字节、除 need —— 与"每行新分配"逐位等价，而分配次数从 rows/列降到 ≤1 次/调用。
+     */
+    private fun rowMean(frame: Mat, y: Int, x0: Int, x1: Int, buf: ByteArray): Double {
+        val need = (x1 - x0) * frame.channels()
         frame.get(y, x0, buf)
         var sum = 0L
-        for (i in buf.indices) sum += buf[i].toLong() and 0xFF
-        return sum.toDouble() / buf.size
+        for (i in 0 until need) sum += buf[i].toLong() and 0xFF
+        return sum.toDouble() / need
     }
 
     // ================= #169 逐行锚定的文本行裁剪（与 rowPhase 同为"绝对行相位"家族）=================

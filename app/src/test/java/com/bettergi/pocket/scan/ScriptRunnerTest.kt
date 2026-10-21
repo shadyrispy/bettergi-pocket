@@ -211,6 +211,40 @@ class ScriptRunnerTest {
         }
     }
 
+    @Test
+    fun `snapshot retries array index out of bounds then succeeds`() {
+        // 扩容窗口的第二种撕裂：size 已增、elementData 还是旧数组 ⇒ IOOBE/AIOOBE。
+        // 旧实现只重试 CME ⇒ 这条在旧代码上红（AIOOBE 直接穿透到看门狗线程）。
+        val calls = AtomicInteger(0)
+        val out = ResultsSnapshot.withRetry(retries = 3, retryDelayMs = 1) {
+            if (calls.incrementAndGet() == 1) throw ArrayIndexOutOfBoundsException("size grew before array")
+            listOf("a")
+        }
+        assertEquals(listOf("a"), out)
+        assertEquals(2, calls.get())
+    }
+
+    @Test
+    fun `snapshot returns a clean copy when the list is stable`() {
+        assertEquals(
+            listOf("a", "b"),
+            ResultsSnapshot.snapshot(listOf("a", "b"), retries = 1, retryDelayMs = 1),
+        )
+    }
+
+    @Test
+    fun `snapshot rejects null slot torn by concurrent growth`() {
+        // Arrays.copyOf 的补齐语义：并发扩容窗口里读到的拷贝可能在尾部带 null 槽。
+        // 它不在快照时抛，而是在导出/序列化炸 ⇒ snapshot() 必须把含 null 槽的拷贝当
+        // 撕裂快照重试；重试耗尽后抛 CME（交给 exportNow 的 runCatching 兜底，绝不裸抛）。
+        val withNull = ArrayList<Any?>()
+        withNull.add("a")
+        withNull.add(null) // 扩容窗口中 Arrays.copyOf 补齐出的 null 槽
+        assertThrows(ConcurrentModificationException::class.java) {
+            ResultsSnapshot.snapshot(withNull, retries = 2, retryDelayMs = 1)
+        }
+    }
+
     // ---- #197：起扫闸现问的有界重试 + 「落回缓存」计数 ----
     //
     // 实测前提（不许推翻，2026-10-04 华为 EML-AL00）：点 ▶ 那一刻现问恒为 null

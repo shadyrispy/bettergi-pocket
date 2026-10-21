@@ -23,7 +23,6 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.STOP_MARKER_RARITY
 import com.bettergi.pocket.scan.ScanEngine.Companion.ARTIFACT_STOP_NAMES
 import com.bettergi.pocket.scan.ScanEngine.Companion.WEAPON_FORGING_STOP_NAMES
 import com.bettergi.pocket.scan.ScanEngine.Companion.hitsStopName
-import com.bettergi.pocket.scan.ScanEngine.Companion.WEAPON_PANEL_DELAY_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.WEAPON_SAME_IDENTITY_CAP
 import com.bettergi.pocket.scan.ScanEngine.Companion.DEFAULT_SET_DICT
 import com.bettergi.pocket.scan.ScanEngine.Companion.crossPageOverlap
@@ -289,7 +288,19 @@ internal suspend fun ScanEngine.parsePanel(
     } else {
         emptyList()
     }
-    if (isWeaponPanel) delay(WEAPON_PANEL_DELAY_MS)
+    // ★ 2026-10-14 #233：**删掉了原先这里的 `delay(WEAPON_PANEL_DELAY_MS)`（300ms）**。
+    //   理由不是"觉得太长"，是它**原理上不可能起作用**：`frame` 在上面就 acquire 好了，
+    //   而武器 `fpRects` 恒空 ⇒ 走不到下面 `if (fpRects.isNotEmpty())` 的换帧分支
+    //   ⇒ 这段延迟改不到被 OCR 的那张帧，只是把 OCR 推迟到一张已经定格的帧上。
+    //   BS 2244 实测（runlogs/bs_pipe_20261014_004949 与 _005701）：
+    //     3 页四臂（正反两序）elapsed −36.6% / −38.2%，每格省 289/306ms ≈ 就是那 300ms；
+    //     全量两臂 cells 均 168、件数均 161 = GT 161、对 GT 命中数同为 160。
+    //   `wpdelay=<ms>` 仍可把这段等待加回来做对照（默认 0）。
+    val wpDelayMs = TimingOverrides.weaponPanelDelayMs
+    if (isWeaponPanel && wpDelayMs > 0L) {
+        delay(wpDelayMs)
+        Log.d(TAG, "weapon panel 盲等 ${wpDelayMs}ms（wpdelay 覆盖档，帧已在 delay 之前抓妥 ⇒ 仅用于对照）")
+    }
     // ★ P1（2026-10-06）：重复格（卡格指纹没变 = 同一件再点）**整段跳过等待**，
     //   对齐 GOODScanner backpack_scanner.rs:1417（is_duplicate ⇒ 面板等待直接不走）。
     //   语义：等的是「面板变化」，同一件点了面板本就不会变 ⇒ 等是白等。
@@ -384,10 +395,12 @@ internal suspend fun ScanEngine.parsePanel(
         origin = FramePoint(x0, y0)
     }
     try {
+        // ★ #263：同步路径 = 生产者自己这一格 ⇒ 传引擎活值（与改前逐字等价）。
+        val cell = liveCellCoord()
         if (panelKey == "weapon_backpack") {
-            parseWeaponPanel(parseFrame, ocr, step.optJSONObject("dict"), origin)
+            parseWeaponPanel(parseFrame, ocr, step.optJSONObject("dict"), origin, cell)
         } else {
-            parseArtifactPanel(parseFrame, ocr, panelKey, step.optJSONObject("dict"), origin)
+            parseArtifactPanel(parseFrame, ocr, panelKey, step.optJSONObject("dict"), origin, cell)
         }
     } finally {
         if (owned) frame.release()
@@ -448,7 +461,19 @@ internal suspend fun ScanEngine.parseWeaponPanel(
     dict: JSONObject? = null,
     /** 见 [parseArtifactPanel] 的同名参数：裁片左上角帧坐标，rect 建树处统一减。 */
     origin: FramePoint = FramePoint(0, 0),
+    /** ★ #263：本格坐标（见 [ScanEngine.CellCoord]）。同步路径传活值，管道消费者传 job 自己的。 */
+    cell: ScanEngine.CellCoord,
 ) {
+    // ★ #263：本函数体内**一律用别名**，不要再直接读引擎上的 cur* 活值 ——
+    //   管道臂下这些活值是"生产者正在走的那一格"，而下面几处把它当**丢件判据**的坐标
+    //   （crossPageOverlap 比上页同列 row1/row2、weaponCellEmitted 的 页:行:列:身份）。
+    //   逐处替换会有漏（函数体 250 行、还有嵌套 lambda），别名一处封顶。
+    val curPageNo = cell.page
+    val curCellRow = cell.row
+    val curCellCol = cell.col
+    val curCellIdx = cell.idx
+    val curCols = cell.cols
+    val curTraverseRows = cell.traverseRows
     fun sh(r: FrameRect): FrameRect =
         if (origin.x == 0 && origin.y == 0) r else r.shiftedBy(-origin.x, -origin.y)
     val yShift = 0
@@ -595,27 +620,25 @@ internal suspend fun ScanEngine.parseWeaponPanel(
     //   用于验证"翻页/点击是否造成重复或漏点"（此前武器路径不写 identity ⇒ 格级日志 `item` 全是 `-` ✗）
     lastCellIdentity = "$key/$level/$rarity#R$refine" + (if (location.isNotEmpty()) "@$location" else "")
     if (curCellIdx >= 0) curPageIds[curCellIdx] = lastCellIdentity ?: ""
-    // ★ 跨页重叠判定（identity 版）：本格若与**上页同列**的 row1/row2 身份相同 ⇒ 是同一张卡 ⇒ 丢弃
-    //   （实测像素指纹跨页零命中 ✗；identity 为 OCR 内容、稳定 ✓；**只比同列** ⇒ 不伤同款多把）
-    //   前进量可为 0~2 行（滑不动时整页 3 行全重叠）；前进 2 行时新页 row1/row2 对应上页 row3/row4
-    //   —— 上页表里没有那两格 ⇒ 取到 null ⇒ 不误判真·多把 ✓
-    // ⚠️ 2026-09-25 #60 第一次试修**已回退**：把窗口放宽成"本格查上页 r..r+2 三行" ⇒ 2560 实测
-    //   **负收益**（导出 155→157 件，且丢掉 TravelersHandySword / BloodtaintedGreatsword /
-    //   SkyriderSword / FilletBlade / FerrousShadow 5 件真 3★，页级冻结放弃 0→17 格）。
-    //   成因：identity **不唯一**（ThrillingTalesOfDragonSlayers 光 L1R5 就有 2 把），窗口一放宽，
-    //   "真·同款多把"就会被当成跨页重叠丢掉 ⇒ 判据本身**维持只比 row1/row2**。
-    // ★2026-09-25 #60 真正的成因 = **上页表下标错位**：原先喂给本判据的是一张紧凑表
-    //   （只存 row1/row2 ⇒ 槽位 0/1），而判据按绝对下标 `(traverseRows-2)*cols+c` /
-    //   `(traverseRows-1)*cols+c` 读 ⇒ 第一个取到的其实是 row2、第二个**恒越界 null**
-    //   ⇒ 事实上只比 row2 ⇒ "前进 1 行"（新 row0 ← 上页 row1）无人管 ⇒ 尾区假重复。
-    //   实测（同码对照轮）：判据命中的 **19** 条全是 `新行 ← 上页 row2`（page3/7 各 6 条 r0 +
-    //   page9 6 条 r1 + page5 1 条 r2）；漏掉的 6 件**全是** `page9 row0 ← page8 row1`
-    //   （TwinNephrite/EmeraldOrb/OtherworldlyStory/BlackTassel/ThrillingTales×2）。
-    //   ⇒ 本轮只换表（紧凑 → [prevAllCellIds] 绝对表），判据逻辑一字不动。
-    // ⚠️ 日志此前把行号写死成字面量 `r0` ⇒ "丢弃全落在 row0"是**日志假象**，别拿它当证据。
-    //   下标算术已抽成纯函数 [crossPageOverlap] 并单测（这条判据错过一次，代价是一整轮误修）。
-    if (crossPageOverlap(prevAllCellIds, curCols, curTraverseRows, curCellRow, curCellCol, lastCellIdentity)) {
-        Log.i(TAG, "跨页重复(identity) 丢弃: page=$curPageNo r${curCellRow}c$curCellCol $lastCellIdentity")
+    // ★ 跨页重叠判定（identity 版）：本格若与**上页按实测前进量对齐的那一格**身份相同 ⇒ 同一张卡 ⇒ 丢弃
+    //   （实测像素指纹跨页零命中 ✗；identity 为 OCR 内容、稳定 ✓；只比同列 ⇒ 不伤同款多把）
+    // ★★ 2026-10-14 #292（= #215 根因）：把"固定比上页 row1/row2"换成"**按本页实测前进量 aRows 门控**"。
+    //   旧实现在**任何**前进量下都拿上页 row1/row2 比 ⇒ 前进**一整页**（零重叠）时，本页某格与上页
+    //   row1/row2 同列的"同款同列"巧合被当成重叠 ⇒ **静默丢真件**。实测 100842 日志：104 次翻页里
+    //   只有 11 次 OVERLAP（欠滚），却有 124 次丢弃 ⇒ 绝大多数丢在**零重叠页**上 = 误丢。
+    //   新判据：前进 a 行 ⇒ 只比 `prev[(row+a)*cols+col]`；`a≥traverseRows`（一整页）一律不丢。
+    //   `aRows` 来自 C' 锚点的 `d/cols`（内容实测，见 [curAdvanceRows]）；未锚定 ⇒ -1 ⇒ fail-open 不判。
+    // ⚠️ #60 的坑仍在：表必须是**绝对下标** r*cols+c 的全行表（[prevAllCellIds]）——紧凑表会让
+    //   "row1" 那一路静默失效。⚠️ 日志此前把行号写死成字面量 `r0` ⇒ "丢弃全落在 row0"是日志假象。
+    if (
+        crossPageOverlap(
+            prevAllCellIds, curCols, curTraverseRows, curCellRow, curCellCol, lastCellIdentity, curAdvanceRows,
+        )
+    ) {
+        Log.i(
+            TAG,
+            "跨页重复(identity) 丢弃: page=$curPageNo r${curCellRow}c$curCellCol $lastCellIdentity（前进 $curAdvanceRows 行）",
+        )
         // ★★ #73（2026-09-27 实测定位）：这条 return **必须先把本格登记**，否则它绕过了
         //   下面那段 `weaponCellEmitted.add`，被丢的格在表里是"没来过"的状态 ⇒
         //   同一页的**定点重访**再点这一格时 cellTag 又是新的 ⇒ 又入库一次。
@@ -683,6 +706,8 @@ internal suspend fun ScanEngine.parseWeaponPanel(
         location = location,
         ascension = ascension,
     )
+    // ★ #292：登记本格入库下标 —— 锚点定出前进量后要"追认" idx0~2 里与上页重叠的那几件（撤回）。
+    if (curCellIdx >= 0) curPageWeaponEmit[curCellIdx] = resultsWeapons.size
     resultsWeapons.add(weapon)
     // ★ 内容键必须落到 `lastCellKey`（2026-10-04 #188 复盘）：这条赋值以前**没有**，
     //   武器路径的 `lastCellKey` 因此恒为 null ⇒ 两处后果，都不是"日志难看"这么轻：
@@ -715,7 +740,15 @@ internal suspend fun ScanEngine.parseArtifactPanel(
      * 本函数内所有 rect 统一减它换到裁片坐标。**rect 建树只在这一处减**，不要散到使用点。
      */
     origin: FramePoint = FramePoint(0, 0),
+    /** ★ #263：本格坐标（见 [ScanEngine.CellCoord]）。同步路径传活值，管道消费者传 job 自己的。 */
+    cell: ScanEngine.CellCoord,
 ) {
+    // ★ #263：同 [parseWeaponPanel] —— 本函数体内的 cur* 一律走别名的**本格**值，
+    //   读者是 emit 段的 `curPageIds` 槽位与全部带 page/行/列 的日志（含取证 manifest）。
+    val curPageNo = cell.page
+    val curCellRow = cell.row
+    val curCellCol = cell.col
+    val curCellIdx = cell.idx
     fun sh(r: FrameRect): FrameRect =
         if (origin.x == 0 && origin.y == 0) r else r.shiftedBy(-origin.x, -origin.y)
     val base = "panels.$panelKey"
@@ -915,9 +948,9 @@ internal suspend fun ScanEngine.parseArtifactPanel(
         return
     }
     // §14 dict.subStats：OCR 数值吸附到标准档位（rollTable），使导出值与游戏内一致
-    dict?.optString("subStats")?.takeIf { it.isNotEmpty() }?.let { subDict ->
-        substats = snapSubstats(substats, rarity, subDict)
-    }
+    // ★ #269：词典键提到局部变量，下方 roll 重裁链（:1007 附近）用的是**同一个吸附**。
+    val subDictKey = dict?.optString("subStats")?.takeIf { it.isNotEmpty() }
+    subDictKey?.let { substats = snapSubstats(substats, rarity, it) }
 
     // ★ A1'（2026-09-16）：把单件名规范化为**词典标准名**，供去重键使用（见内容键注释）。
     //   只影响"入键用的名字"，不改变 setKey 反推本身；词典未命中/未注入词典时回落原始名。
@@ -952,7 +985,15 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //   只在失败后触发（≈1% 的件），正常件零开销。
     val rollIn = substats.map { RollSolver.In(it.key, it.value, it.inactive) }
     var solved = RollSolver.solve(rarity, vars.level, rollIn)
-    if (solved == null && substats.isNotEmpty()) {
+    // ★★ #241 闸门（2026-10-12）：重裁链只对 RollSolver 解得动的星级（4★/5★）开启。
+    //   `RollSolver.solve` 对 rarity ∉ {4,5} 按构造恒 null（RollSolver.kt:109 函数首行即返，
+    //   不看数值/等级）⇒ 3★ 件（2026-09-19 起纳入导出）走旧条件时每件白跑两批多 ROI 重读
+    //   （右缘 -8%/-16% 各一轮），失败后再经失败分支的 `logMiss` 记进 `roll未解`。
+    //   而 #241 要 `roll未解>0` 只表示阅读器真失败（读数歪了、救不回来）—— 3★ 的构造性
+    //   无解是确定事件、不是读失败，混进来就是把该信号稀释成「3★ 有几件」。
+    //   3★ 其余行为一字未动：照常导出（2026-09-19 用户定稿），只是不进链、不计 miss。
+    if (solved == null && substats.isNotEmpty() && (rarity == 4 || rarity == 5)) {
+        recropAttempts++ // #241 观测（摘要「重裁 n=」）：进链件数，每件一次
         // ⚠️ 行对应关系：rollIn[i] 对应 subRects 前 N 行（parseBlock 是"连续块"读取，压缩尾部空行），
         //    候选列表必须按 rollIn 构建而非 subRects.indices（3★ 件 subRects=4 行、rollIn 可能只有 2 条
         //    —— 22:36 真机 IndexOutOfBounds 即此错位）。
@@ -982,7 +1023,16 @@ internal suspend fun ScanEngine.parseArtifactPanel(
                 if (t.isBlank()) continue
                 val line = if (VoteJudges.substatRowPending(frame, subRects[i]) == true && !t.contains("待激活")) "$t（待激活）" else t
                 val parsed = StatParser.parse(line, names) ?: continue
-                val cand = RollSolver.In(parsed.key, parsed.value, parsed.inactive)
+                // ★ #269：重裁候选必须过**和首读同一个**档位吸附，否则两个候选口径不同：
+                //   首读那条在 :941 已被 `snapSubstats` 吸到 rollTable 格点（容差 SNAP_TOL=0.06），
+                //   而这里原先直接把 `StatParser.parse` 的原值包成候选。solver 侧的匹配容差是
+                //   `RollTable.canReach` 的 `|shown − value| < 0.02`（RollTable.kt:170），
+                //   表内 combos 命中则要求显示值逐字相等 ⇒ 落在 0.02…0.06 这段的重读值
+                //   （正是吸附本来要吃掉的那段抖动）**用它仍无解** ⇒ 重裁白跑两批多 ROI 重读。
+                //   副作用是有意的：吸附后与首读同值 ⇒ 那条本就是同一个读数，不该再计成「新候选」
+                //   （下方 :1010 的 <0.01 去重门槛会把它吸收掉，`重裁-新候选` 计数会因此下降）。
+                val snapped = subDictKey?.let { snapSubstats(listOf(parsed), rarity, it).first() } ?: parsed
+                val cand = RollSolver.In(snapped.key, snapped.value, snapped.inactive)
                 if (candidates[i].none { it.key == cand.key && Math.abs(it.value - cand.value) < 0.01 }) {
                     candidates[i].add(cand)
                     anyNew = true
@@ -992,12 +1042,17 @@ internal suspend fun ScanEngine.parseArtifactPanel(
             if (anyNew) {
                 solved = RollSolver.solve(rarity, vars.level, candidates)
                 if (solved != null) {
+                    recropRescued++ // #241 观测（摘要「抢救 …」）：重裁后解出的件数，每件一次
                     Log.i(TAG, "roll 重裁抢救成功（-$cropPct%）: " +
                         candidates.joinToString("|") { c -> c.joinToString(",") { "${it.key}=${it.value}" } })
                     break
                 }
             }
         }
+        // #241 观测：「新候选」= 重读经去重门槛真正 append 入候选列表的数量，**成败都累计** ——
+        //   抢救成功的链同样产出过候选（break 前的 anyNew 至少 1 个），若只记失败侧会把
+        //   总数系统性记小；失败时该数恰等于下方失败日志报告的 M，两边可互对。
+        recropNewCandidates += newCands
         if (solved == null) {
             Log.w(
                 TAG,

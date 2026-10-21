@@ -7,6 +7,7 @@ import com.bettergi.pocket.scan.flows.runArtifactScanNative
 import com.bettergi.pocket.scan.flows.runArtifactSteps
 import com.bettergi.pocket.scan.flows.runWeaponScanNative
 import com.bettergi.pocket.scan.forEachPlanItem
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -195,6 +196,13 @@ class ScanEngineDryRunTest {
          * 页间同坐标 ⇒ 前进量恒 0，身份锚定只会给出被整行哨兵拒绝的 d）。null = 现状（按坐标）。
          */
         val pieceOf: ((pageIndex: Int, cellIdx: Int) -> Int)? = null,
+        /**
+         * ★ #260 注入器：**第 N 次格点击的抓帧完成后**，夹具替引擎再点一次「本格之后第 2 格」的坐标
+         * （只点一下、不改引擎的控制流）。这就是管道臂在生产者领先时的真实形状——
+         * 「一帧已经交出去了，harness 的点击进度又往前走了一格」。
+         * 0 = 不注入。见 [strayClickDoesNotShiftFixtureContent]。
+         */
+        val strayClickAfterVisit: Int = 0,
     ) {
         var pageIndex = 0
             private set
@@ -223,6 +231,18 @@ class ScanEngineDryRunTest {
         // readNumber 可编程脚本（onZero 重试等按次序变化场景）；空则回退页静态值
         val numberScript = ArrayDeque<Int?>()
 
+        /**
+         * ★ #260 后半：把"消费者正在干活但这一格慢"做成**定点**注入 —— 只有帧身份等于
+         * [slowReadAt] = (页, 页内格序) 的**第一次** OCR 读取挂起 [slowReadMs] 毫秒。
+         * 其余读取一律照旧。
+         * ⚠️ 为什么必须定点而不是"每次都慢"：全线放慢会饿到格间就绪门
+         * （`PANEL_CHANGE_WAIT_MAX_MS` 400ms 内读不到签名变化 ⇒ 判"点击被吞"⇒ 同坐标重发一次），
+         * 实测全量并发跑下锚定臂因此多 1 击（43→44），量的又是套件并发度而不是本用例的语义。
+         */
+        var slowReadMs: Long = 0L
+        var slowReadAt: Pair<Int, Int>? = null
+        private var slowReadFired = false
+
         // ── A11 冻结注入状态 ──
         /** 帧身份 → 该帧被抓时的 (格序, 面板名)。OCR 夹具据此回放"这一帧里显示的是哪一格"。 */
         private val frameOcrState = HashMap<Int, Pair<Int, String>>()
@@ -230,6 +250,130 @@ class ScanEngineDryRunTest {
         private val frozenFrames = HashMap<Int, Mat>()
         /** 已服务到的最大冻结格序（每格只在 visit 的第一帧服务一次）。 */
         private var servedFreezes = 0
+
+        // ── #260 多击注入状态 ──
+        /** 注入只做一次（同一格会抓多帧）。 */
+        private var strayDone = false
+
+        /** 格序（row*cols+col）→ 格心坐标：与引擎同一套网格几何（本档 clickDy=130、列内 +100）。 */
+        private fun cellCenter(cell: Int): Pair<Int, Int> {
+            val col = cell % GRID_COLS
+            val row = (cell / GRID_COLS).coerceIn(0, GRID_TRAVERSE_ROWS - 1)
+            return (CARD_ORIGIN[0] + col * CARD_PITCH[0] + 100) to (CARD_ORIGIN[1] + row * CARD_PITCH[1] + 130)
+        }
+
+        // ── ★ #260 帧身份条（identity band）：内容随**帧**走，不随点击进度走 ──
+        /**
+         * 一行像素码画在**帧坐标** x 2332..2402 / y 905..910（12 槽、步距 6、槽宽 4）：
+         * 槽 0 = MAGIC、槽 1..5 = 页内格序（LSB，31=无效）、槽 6 = MAGIC2、
+         * 槽 7..10 = 页号（LSB，15=无效）、槽 11 = 那 9 个数据位的奇偶。
+         *
+         * **为什么只能走像素**：`parsePanel` 读的是**裁片**——同步臂是复用 Mat
+         * （`ScanEngine.panelCropBuf`，逐格同一个 Java 对象）、管道臂的 `job.crop` 来自
+         * `pipeJobPool`（归还后会被复用）⇒ `System.identityHashCode` **认不出**「这张裁片
+         * 是哪一帧」，而 `frameOcrState` 那套帧身份侧信道在裁片路径上根本没有登记点。
+         * 裁片是父帧的逐像素拷贝（`view.copyTo(...)`）、冻结帧是父帧的克隆 ⇒ 身份写进像素就能
+         * 跟着进裁片、进克隆、进消费者，且**读侧零依赖**「读到这一刻为止点了几下」。
+         *
+         * 墨色取纯黑（BGR 0,0,0）：`VoteJudges.substatRowPending` 只数中性色
+         * lum∈[90,150)（深灰=激活）与 [150,215)（中灰=待激活），黑(0) 与白(255) 都不入账
+         * ⇒ 副词条三态判据逐位不变；`equippedRowPresent`(y1170..1210) 与 `countStars`(y599..640)
+         * 也不在这条带上。`PanelFingerprint` 按原始字节比 ⇒ 只是多一个**逐格不同**的差异，
+         * 闸门行为与既有红色 tick 标记一致（不变多、不变少）。
+         * 位置：落在 `panels.artifact_backpack.subStats[1]`（2264..2720 × 858..912）行带内
+         * ⇒ 同时在**两个面板的裁片并集**内；与既有 tick 标记包络 (2300..2328, 900..904) 不相交，
+         * 也与武器 `refine` 的祝圣平移变体 (2285..2443, 842..900) 不相交（y 取 905..910 就是为了
+         * 同时躲开这两块）。
+         * 这些包含/不相交关系由 `FixtureRoiCouplingTest.identityBandLivesInsideThePanelCrop…` 钉住
+         * （改 ROI 时会先在那里红，而不是让干跑静默退回点击进度读法）。
+         */
+        private val BAND_X0 = 2332
+        private val BAND_TOP = 905
+        private val BAND_BOT = 910
+        private val BAND_PITCH = 6
+        private val BAND_SLOT_W = 4
+        private val BAND_SLOTS = 12
+        private val CELL_BITS = 5
+        private val PAGE_BITS = 4
+
+        /** 编码上界：31 / 15 是「无效」哨兵 ⇒ 可编码 0..30 格、0..14 页（越界 ⇒ 不画 ⇒ 读侧回落到旧行为）。 */
+        private val CELL_MAX = (1 shl CELL_BITS) - 2
+        private val PAGE_MAX = (1 shl PAGE_BITS) - 2
+
+        /** 把「这一帧显示的是哪一页哪一格」画进帧。越出编码范围 ⇒ 不画。 */
+        private fun paintIdentityBand(m: Mat, page: Int, cell: Int) {
+            if (cell < 0 || cell > CELL_MAX || page < 0 || page > PAGE_MAX) return
+            val bits = bandBits(page, cell)
+            for (i in 0 until BAND_SLOTS) {
+                if (bits[i] != 1) continue
+                val x = BAND_X0 + i * BAND_PITCH
+                org.opencv.imgproc.Imgproc.rectangle(
+                    m,
+                    org.opencv.core.Point(x.toDouble(), BAND_TOP.toDouble()),
+                    org.opencv.core.Point((x + BAND_SLOT_W - 1).toDouble(), BAND_BOT.toDouble()),
+                    org.opencv.core.Scalar(0.0, 0.0, 0.0),
+                    -1,
+                )
+            }
+        }
+
+        private fun bandBits(page: Int, cell: Int): IntArray {
+            val bits = IntArray(BAND_SLOTS)
+            bits[0] = 1
+            bits[6] = 1
+            var pop = 0
+            for (i in 0 until CELL_BITS) {
+                val b = (cell shr i) and 1
+                bits[1 + i] = b
+                pop += b
+            }
+            for (i in 0 until PAGE_BITS) {
+                val b = (page shr i) and 1
+                bits[7 + i] = b
+                pop += b
+            }
+            bits[11] = pop % 2
+            return bits
+        }
+
+        /**
+         * 读帧自带的身份条 ⇒ (页号, 页内格序)。
+         * 返回 null 的三种情形：帧里没有条（越出编码范围、或非 `grabFresh` 产出的帧）、
+         * 条落在画外（收到的是比面板裁片更小的图）、magic/奇偶不符 ⇒ **回落到改前的读法**
+         * （`frameOcrState` 帧身份 ⇒ 再回落 harness 活值），这样本改动对没画条的路径逐位无影响。
+         */
+        private fun readIdentityBand(frame: Mat): Pair<Int, Int>? {
+            if (frame.empty() || frame.channels() < 3) return null
+            val cropped = frame.cols() < fullFrameW
+            val ox = if (cropped) cropOrigin.first else 0
+            val oy = if (cropped) cropOrigin.second else 0
+            val y = (BAND_TOP + BAND_BOT) / 2 - oy
+            if (y < 0 || y >= frame.rows()) return null
+            val bits = IntArray(BAND_SLOTS)
+            for (i in 0 until BAND_SLOTS) {
+                val x = BAND_X0 + i * BAND_PITCH + BAND_SLOT_W / 2 - ox
+                if (x < 0 || x >= frame.cols()) return null
+                val px = frame.get(y, x)
+                bits[i] = if (px[0] < 64 && px[1] < 64 && px[2] < 64) 1 else 0
+            }
+            if (bits[0] != 1 || bits[6] != 1) return null
+            var cell = 0
+            var page = 0
+            var pop = 0
+            for (i in 0 until CELL_BITS) {
+                val b = bits[1 + i]
+                cell = cell or (b shl i)
+                pop += b
+            }
+            for (i in 0 until PAGE_BITS) {
+                val b = bits[7 + i]
+                page = page or (b shl i)
+                pop += b
+            }
+            if (bits[11] != pop % 2) return null
+            if (cell > CELL_MAX || page > PAGE_MAX) return null
+            return page to cell
+        }
 
         val frameSource = object : FrameSource {
             /**
@@ -282,6 +426,9 @@ class ScanEngineDryRunTest {
                     org.opencv.core.Scalar(0.0, 0.0, 255.0),
                     -1,
                 )
+                // ★ #260：把「这一帧显示的是哪一页哪一格」**写进像素**（在冻结素材克隆之前画，
+                //   克隆/裁片就都带着自己的身份 ⇒ 消费者晚读也不会读到别人家的读数）。
+                paintIdentityBand(m, pageIndex, cellIdx)
                 if (freezeCells > 0) {
                     frameOcrState.putIfAbsent(System.identityHashCode(m), cellIdx to lastNameCell)
                     val visitingCell = clicks.size - entryClicks - 1
@@ -292,6 +439,17 @@ class ScanEngineDryRunTest {
                         // 克隆是新对象 ⇒ 帧状态映射要**同帧登记**（服务/重访时按克隆身份回放）
                         frameOcrState[System.identityHashCode(saved)] = cellIdx to lastNameCell
                     }
+                }
+                // ★ #260 注入点：本格帧**已经成型并交出**之后，替引擎多点一次「本格之后第 2 格」。
+                //   这就是管道臂生产者领先时的真实形状：帧的内容属于本格，而 harness 的点击进度
+                //   又往前走了一格。内容若按点击进度派生，从这里起**所有格的读数会整体平移**。
+                //   （只动 harness 的状态，不动引擎的控制流 ⇒ 引擎照常按自己的序列点击。）
+                if (strayClickAfterVisit > 0 && !strayDone &&
+                    clicks.size - entryClicks == strayClickAfterVisit
+                ) {
+                    strayDone = true
+                    val (sx, sy) = cellCenter((cellIdx + 2) % CELLS_PER_PAGE)
+                    actions.click(sx, sy, 180L)
                 }
                 return m
             }
@@ -342,11 +500,28 @@ class ScanEngineDryRunTest {
         val ocr = object : OcrGateway {
             override suspend fun readNumber(frame: Mat, rect: FrameRect): Int? {
                 if (numberScript.isNotEmpty()) return numberScript.removeFirst()
-                return pages[pageIndex].ocrNumber
+                // ★ #260：读数也按**帧自带的页号**回（活值 `pageIndex` 在管道臂/重滑场景里会比
+                //   这一帧新 ⇒ 同一张帧能读出两个总数）。认不出条 ⇒ 维持旧的活值读法。
+                return pages[readIdentityBand(frame)?.first ?: pageIndex].ocrNumber
             }
 
-            override suspend fun readLines(frame: Mat, rects: List<FrameRect>): List<String> =
-                rects.mapNotNull { r ->
+            override suspend fun readLines(frame: Mat, rects: List<FrameRect>): List<String> {
+                // ★ #260（本轮改动的主断言点）：内容身份**优先从帧自带的身份条**读 ⇒
+                //   「这一帧显示的是哪一页哪一格」是帧的属性，而不是「读到这一刻为止点了几下」。
+                //   这一行代码把 #260 的后半（夹具身份模型耦合点击序列）与 §16.16(c) 里
+                //   「一次多击 ⇒ 后面所有格读数整体平移」这条机理**断开**。
+                val band = readIdentityBand(frame)
+                // ★ #260 后半的**定点**注入：只把"这一页这一格"的第一次读取挂慢（见 [Harness.slowReadMs]）
+                run {
+                    val target = slowReadAt
+                    if (slowReadMs > 0L && !slowReadFired && target != null &&
+                        band?.first == target.first && band?.second == target.second
+                    ) {
+                        slowReadFired = true
+                        delay(slowReadMs)
+                    }
+                }
+                return rects.mapNotNull { r ->
                     // ⚠️ 2026-09-11 修：原为 ${nameCounter++}（**每次读取**都变），而引擎
                     //    visit 的「面板已稳定」判据要求 `名字已变 && 连续两次读数一致` —— 每次读都变
                     //    使该条件永不成立 → 每格打满 PANEL_CHANGE_WAIT_MAX_MS(6000ms)。
@@ -358,10 +533,15 @@ class ScanEngineDryRunTest {
                     //   （由同一点击坐标派生 ⇒ 同一格跨页取同值、不同格不同值，与真实"每件词条不同"一致）。
                     // ★ A11：**按帧身份回放** —— 冻结帧（上一格保存帧的克隆）在真机里 OCR 读到的就是
                     //   旧面板 ⇒ 这里按帧被抓时的 (格序, 名字) 回放，使"解析旧帧 ⇒ 读到旧内容"成立。
-                    //   未注入冻结时映射为空 ⇒ 与原行为逐位一致（cellIdx/lastNameCell 直取）。
-                    val st = frameOcrState[System.identityHashCode(frame)]
-                    val stateCell = st?.first ?: cellIdx
-                    val stateName = st?.second ?: lastNameCell
+                    //   #260 之后冻结帧的**像素**就带着上一格的条 ⇒ 这条映射只作为无条帧的回落。
+                    val st = if (band != null) null else frameOcrState[System.identityHashCode(frame)]
+                    val statePage = band?.first ?: pageIndex
+                    val stateCell = band?.second ?: st?.first ?: cellIdx
+                    // 名字后缀只是「这一格是谁」的标记（NameMatcher 走反向子串补全，不看后缀），
+                    // 但必须与 `lastNameCell` 的初值不撞 ⇒ 条路径用 1000+格序（初值是 #0）。
+                    val stateName = band?.let {
+                        "晨光的明誓#" + (pieceOf?.invoke(statePage, stateCell) ?: (1000 + stateCell))
+                    } ?: (st?.second ?: lastNameCell)
                     // #253 夹具：pieceOf 模式下 sub0 跟着**件号**走（名字后缀即件号），
                     // 同一件跨页读到同一身份；否则维持现状（按页内格序）。
                     val sub0Idx = pieceOf?.let { stateName.substringAfterLast('#').toIntOrNull() } ?: stateCell
@@ -381,9 +561,10 @@ class ScanEngineDryRunTest {
                         WEAPON_NAME_RECT -> weaponNames?.getOrNull(stateCell % weaponNames.size)
                         WEAPON_LEVEL_RECT -> "Lv.90"
                         SUB0_RECT, SUB0_RECT_CRAFTED -> sub0
-                        else -> pages[pageIndex].ocrLines[rr]
+                        else -> pages[statePage.coerceIn(pages.indices)].ocrLines[rr]
                     }
                 }
+            }
 
 
         }
@@ -503,6 +684,11 @@ class ScanEngineDryRunTest {
         craftedByCell: ((Int) -> Boolean)? = null,
         /** ★ #253 夹具：件号映射（见 [Harness.pieceOf]），造「页 2 前若干格 ≡ 页 1 尾若干格」的真重叠。 */
         pieceOf: ((Int, Int) -> Int)? = null,
+        /** ★ #260 注入器：第 N 次格点击的抓帧完成后，夹具替引擎多点一格（见 [Harness.strayClickAfterVisit]）。 */
+        strayClickAfterVisit: Int = 0,
+        /** ★ #260 后半：把 (页, 页内格序) = [slowReadAt] 的第一次 OCR 挂慢 [slowReadMs] 毫秒。null/0 = 不注入。 */
+        slowReadMs: Long = 0L,
+        slowReadAt: Pair<Int, Int>? = null,
     ): RunResult {
         // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
@@ -535,8 +721,11 @@ class ScanEngineDryRunTest {
             },
             craftedByCell = craftedByCell,
             pieceOf = pieceOf,
+            strayClickAfterVisit = strayClickAfterVisit,
         )
         numberScript.forEach { h.numberScript.addLast(it) }
+        h.slowReadMs = slowReadMs
+        h.slowReadAt = slowReadAt
         // dedupe=false：dry-run 的 21 格 mock OCR 文本相同（人工场景），全量入库便于断言；
         // 真机每件内容不同，生产默认 true。
         // clock 注入真实时间：JVM 单测 SystemClock 被 returnDefaultValues 恒 0，会让 settle 轮询死循环
@@ -563,7 +752,18 @@ class ScanEngineDryRunTest {
         //    加 withTimeout：卡死从「永久挂起」变成「失败 + 协程栈」，既防呆又能直接定位卡点。
         val prevPipe = TimingOverrides.pipeDepth
         val prevCrop = TimingOverrides.panelCrop
+        val prevExplicit = TimingOverrides.pipeExplicit
         TimingOverrides.pipeDepth = pipeDepth
+        // ★ A③（#69 流程默认）：`ScanEngine.run()` 现在会按 flowName 给 artifact/weapon 填默认深度，
+        //   把手就是 `pipeExplicit`。干跑里本用例集比的正是**传进来的那两档**（0 vs 2），
+        //   所以必须声明成"显式给过"，否则 JSON 路径（nativeFlow=null，直接 engine.run()）的用例会
+        //   被静默升成管道臂 —— 断言的还是同步期望，红法是随机的（#260 那类墙钟敏感假象的温床）。
+        TimingOverrides.pipeExplicit = true
+        // ★ #260 后半（2026-10-13）：这里**不再设 `panchor`**。锚点早到交付那条停等原来按墙钟计，
+        //   满载复跑（load 12）实测会把预算烧光 ⇒ 管道臂多击一整条重叠带（`expected 43 but was 50`），
+        //   当时是靠"测试里给一个等于不限的预算"遮掉的。现在它的上限改成"消费者连续多少轮询没有
+        //   处理完任何 job"（ScanEngine.PIPE_ANCHOR_IDLE_POLLS 的 KDoc），负载只会让真实等待变长，
+        //   所以干跑与真机用同一个默认值即可 —— 空载/满载两遍复跑是本条的验收。
         if (pipeDepth > 0 || forceCrop) TimingOverrides.panelCrop = true
         try {
             runBlocking {
@@ -596,6 +796,7 @@ class ScanEngineDryRunTest {
         } finally {
             TimingOverrides.pipeDepth = prevPipe
             TimingOverrides.panelCrop = prevCrop
+            TimingOverrides.pipeExplicit = prevExplicit
         }
         return RunResult(engine, h)
 
@@ -729,8 +930,22 @@ class ScanEngineDryRunTest {
                 forceCrop = true,
                 nativeFlow = "artifact",
             )
-            assertEquals("pipe=$pipe：只应入库已点过的 10 格", 10, engine.results.size)
-            assertEquals("pipe=$pipe", ENTER_CHAIN_CLICKS + 10, h.clicks.size)
+            // ★ 复核（2026-10-13）**收回**上一版把它放宽成区间 `[10-pipeDepth, 10]` 的改法：
+            //   区间是想给"取消时丢弃在途 job"留余量，但今天核了一遍——**取消路径根本走不到**：
+            //   `pipeCancel()` 全仓零调用（`pipeReset` 亦然），止扫只置 `stopRequested` 后 `break`，
+            //   页末 `pipeJoinPage` 仍会把在途 job 全部消费完 ⇒ 这 10 格必然全 emit。
+            //   少一件只可能来自真实丢失（消费者抛异常 / emit 缺失），而那正是本用例要抓的；
+            //   放宽下界等于**把要抓的东西放过去**（还静默容忍 2 件丢失）。
+            //   所以恢复 `== 10`，并把两条"少件只可能出自这里"的计数器一起断言，让红的时候直接归因：
+            //   - `pipeDiscard` = 有过期/取消丢弃（纪元打标或重访语义错）；
+            //   - `pipeFail` = 消费者抛异常被 catch 吞掉。
+            //   满载跑曾见 `was 8`，那是 #253 锚点预算被打满导致点击数变少（前置探针多烧了几次）。
+            //   #260 后半起那条预算不再是墙钟（改成"消费者有没有处理完 job"），干跑也不再设 `panchor`
+            //   ⇒ 若这里再红且日志出现「锚点早到交付：连续 … 轮询没有处理完任何 job」，
+            //   那就是消费者**真的**停了，不是机器忙。
+            assertEquals("pipe=$pipe：只应入库已点过的 10 格（少了就是真丢件，不是「给了余量」）", 10, engine.results.size)
+            assertEquals("pipe=$pipe：有过期/取消丢弃 ⇒ 纪元打标或重访语义错", 0L, PerfProbe.pipeDiscardCount())
+            assertEquals("pipe=$pipe：消费者抛异常被吞 ⇒ 少件的唯一另一条路", 0L, PerfProbe.pipeFailCount())
             assertTrue("pipe=$pipe 应正常收尾（非异常）", h.finished != null)
         }
     }
@@ -783,6 +998,181 @@ class ScanEngineDryRunTest {
         val b = piped.engine.results.map { it.setKey to it.slotKey to it.substats.map { s -> s.key to s.value } }
         assertEquals("两臂入库逐件同序同值", a, b)
         assertEquals(sync.harness.finished, piped.harness.finished)
+    }
+
+    /**
+     * ★ #260 后半的语义钉：锚点早到交付那条停等的放弃条件是"消费者有没有干活"，不是墙钟。
+     *
+     * 注入 = **定点**把页 2 第 0 格的第一次 OCR 挂慢 600ms（[runEngine] 的 `slowReadMs/slowReadAt`），
+     * 作用是让"锚点问的那一刻在途必然 >0"变成确定事件，其余读取全速。两臂只差
+     * `TimingOverrides.pipeAnchorIdlePolls`：
+     * - **0（＝生产默认 45_000 次 ≈ 90s）** ⇒ 600ms 后那格处理完 ⇒ 有进展 ⇒ 不等满 ⇒
+     *   锚定照常命中 ⇒ 页 2 不重访重叠带（做功与同步臂相同 = 43 击）；
+     * - **1** ⇒ 进停等后第一次轮询看不到进展就收手 ⇒ 锚定退回「照常访问」⇒
+     *   页 2 重访整条重叠带（43+4=47 击，正是历史上 load 12 那个 `43 vs 50` 的同形）。
+     *
+     * ⚠️ 为什么"定点"而不是"每次都慢"：全线放慢会饿到**格间就绪门**（400ms 内读不到签名变化 ⇒
+     * 判点击被吞 ⇒ 同坐标重发），实测把锚定臂的绝对点击数从 43 抬成 44 —— 那量的又是套件并发度、
+     * 不是本用例的语义（第一版这条在全量里就是这么红的）。断言因此**同时**钉总数与
+     * "带内格的重数"，后者保证差值出自那条重叠带而不是随机多按了一下。
+     *
+     * ⚠️ 本用例不区分新旧规则（600ms 的单格延迟在旧的 90s 墙钟下同样不会烧穿预算）；
+     * 新旧之差靠"进展计数随负载只松不紧"这个契约撑（`delay` 只会晚不会早，论证见
+     * `ScanEngine.PIPE_ANCHOR_IDLE_POLLS` 的 KDoc），实证是空载/满载两遍全量
+     * （dsl/docs/scan-pipeline-20261006.md §16.22，执行件 `dsl/dev/dryrun_load_ab.sh`）。
+     */
+    @Test
+    fun `S2b 锚点停等按进展而不是墙钟决定放弃`() {
+        val pieceOf = { page: Int, cell: Int ->
+            when {
+                page == 0 -> cell
+                cell < GRID_COLS -> CELLS_PER_PAGE - GRID_COLS + cell
+                else -> CELLS_PER_PAGE + cell - GRID_COLS
+            }
+        }
+        fun run() = runEngine(
+            listOf(
+                Page(syntheticFrame(5), pageLines("Lv.90"), 1026),
+                Page(syntheticFrame(5, page = 1), pageLines("Lv.90"), 1026),
+            ),
+            pipeDepth = 2,
+            forceCrop = true,
+            nativeFlow = "artifact",
+            maxPages = 2,
+            pieceOf = pieceOf,
+            // 定点注入：页 2（索引 1）第 0 格的第一次 OCR 挂 600ms ⇒ 锚点问的那一刻在途必不为 0，
+            // 而其余读取全速（"每次都慢"会饿到格间就绪门 ⇒ 多击一发，实测 43→44 就是这么来的）
+            slowReadMs = 600L,
+            slowReadAt = 1 to 0,
+        )
+        // 格序 → 格心坐标：与引擎/夹具同一套网格几何
+        fun center(cell: Int): Pair<Int, Int> {
+            val col = cell % GRID_COLS
+            val row = (cell / GRID_COLS).coerceIn(0, GRID_TRAVERSE_ROWS - 1)
+            return (CARD_ORIGIN[0] + col * CARD_PITCH[0] + 100) to (CARD_ORIGIN[1] + row * CARD_PITCH[1] + 130)
+        }
+        val band = (3 until GRID_COLS).toList()      // idx3..6：夹具造出的重叠带里"应被锚定跳掉"的那几格
+        val anchorCell = 0                            // idx0：锚点本身，两臂都必须点（页 1 一次 + 页 2 一次）
+        val prev = TimingOverrides.pipeAnchorIdlePolls
+        try {
+            TimingOverrides.pipeAnchorIdlePolls = 0L
+            val alive = run()
+            TimingOverrides.pipeAnchorIdlePolls = 1L
+            val givenUp = run()
+            val mult = { clicks: List<Pair<Int, Int>>, c: Pair<Int, Int> -> clicks.count { it == c } }
+            val expected = ENTER_CHAIN_CLICKS + 2 * CELLS_PER_PAGE - band.size
+            assertEquals(
+                "默认上限：锚定命中 ⇒ 做功与同步臂相同（$expected 击）",
+                expected, alive.harness.clicks.size,
+            )
+            assertEquals(
+                "上限=1：放弃锚定 ⇒ 整条重叠带被重访（$expected+${band.size} 击）",
+                expected + band.size, givenUp.harness.clicks.size,
+            )
+            // 对照：非带格的重数两臂必须相同 ⇒ 下面的差值不是"整臂都多按了几下"
+            assertEquals(
+                "对照格（锚点 idx0）重数必须相同，否则差值解释不成立",
+                mult(alive.harness.clicks, center(anchorCell)),
+                mult(givenUp.harness.clicks, center(anchorCell)),
+            )
+            for (idx in band) {
+                val c = center(idx)
+                assertEquals(
+                    "带内格 idx$idx：放弃锚定后页 2 必须重访这一次（默认臂=$c 重数 " +
+                        "${mult(alive.harness.clicks, c)}）",
+                    mult(alive.harness.clicks, c) + 1,
+                    mult(givenUp.harness.clicks, c),
+                )
+            }
+            assertEquals(
+                "整轮做功之差必须正好是那条重叠带（${band.size} 格）",
+                alive.harness.clicks.size + band.size, givenUp.harness.clicks.size,
+            )
+            // 件数不受影响：跳过的是"同一件的第二面"，去重本来就不入库
+            assertEquals(
+                "两臂入库件数必须相同（锚定只省点击，不改内容）",
+                alive.engine.results.size, givenUp.engine.results.size,
+            )
+        } finally {
+            TimingOverrides.pipeAnchorIdlePolls = prev
+        }
+    }
+
+    /**
+     * ★ #260 的另一半：夹具的**逐格内容**必须是「这一帧显示的是哪一格」的函数，
+     * 而不是「到目前为止点了几下」的函数。
+     *
+     * 旧夹具把件名/sub0 挂在 harness 的**活值**上（最后一次点击派生的 `cellIdx` / `lastNameCell`），
+     * 于是任何一次多击——管道臂生产者领先、吞击重发、欠滑补滑——都会把**已经交出去的旧帧**
+     * 的读数整体平移 ⇒ 满载复跑（load 12）下五条 S2b 用例红成「内容不一致」，
+     * 量的其实是机器负载（dsl/docs/scan-pipeline-20261006.md §16.16(c)「没修的那半」）。
+     *
+     * 这里把「生产者领先一格点击」这件事**确定性化**：第 5 格的首帧成型后，夹具替引擎再点一次
+     * 「本格之后第 2 格」（只推进 harness 状态，不动引擎的控制流）。
+     * 断言三条：
+     * ① 正对照——多击**确实发生了**（clicks 比对照轮多 1），否则这条是空跑；
+     * ② 入库序列与对照轮**逐件相同**（旧夹具在 ①成立时必然红：第 5 格读到第 7 格的词条值）；
+     * ③ 件数也相同（平移若撞上已入库的内容键，去重语义也会跟着变）。
+     * 同步臂与管道臂各证一次。
+     */
+    @Test
+    fun strayClickDoesNotShiftFixtureContent() {
+        fun run(pipe: Int, stray: Int) = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
+            pipeDepth = pipe,
+            forceCrop = true,
+            nativeFlow = "artifact",
+            strayClickAfterVisit = stray,
+        )
+        fun seq(r: RunResult) = r.engine.results.map {
+            it.setKey to it.slotKey to it.substats.map { s -> s.key to s.value }
+        }
+        for (pipe in listOf(0, 2)) {
+            val control = run(pipe, 0)
+            val injected = run(pipe, 5)
+            assertEquals(
+                "夹具前提：第 5 格之后确实多了一次点击（否则本用例是空跑）",
+                control.harness.clicks.size + 1, injected.harness.clicks.size,
+            )
+            assertEquals("pipe=$pipe：中途多一击不得改变入库序列（旧夹具挂在点击进度上 ⇒ 整体平移）", seq(control), seq(injected))
+            assertEquals("pipe=$pipe：多一击也不得改变入库件数", control.engine.results.size, injected.engine.results.size)
+        }
+    }
+
+    /**
+     * #260 的**机理级**钉子（不起引擎、秒级）：**同一张帧再读一次，必须还是那一格的内容**，
+     * 与「读到这一刻为止点了几下」无关。
+     *
+     * 上面那条端到端用例证明「多一击不改变入库序列」，但它要跑四轮 engine.run()；
+     * 这条把同一件事钉在夹具自己身上，红的时候直接指出是哪一格被点心的进度带跑了。
+     * 旧夹具在这里返回的是**最后一次点击**那格的 sub0（`cellIdx` 活值）⇒ 第二次读会平移 0.4%。
+     */
+    @Test
+    fun fixtureContentFollowsTheFrameNotTheClickProgress() = runBlocking {
+        val h = Harness(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
+            entryClicks = ENTER_CHAIN_CLICKS,
+        )
+        // 与引擎同一套网格几何：格序 → 格心（本档 clickDy=130、列内 +100）
+        fun center(cell: Int): Pair<Int, Int> {
+            val col = cell % GRID_COLS
+            val row = cell / GRID_COLS
+            return (CARD_ORIGIN[0] + col * CARD_PITCH[0] + 100) to (CARD_ORIGIN[1] + row * CARD_PITCH[1] + 130)
+        }
+        val sub0Rect = FrameRect(2264, 794, 2720, 848)   // ≡ panels.artifact_backpack.subStats[0]
+        val (x2, y2) = center(2)
+        h.actions.click(x2, y2, 180L)
+        val frame = h.frameSource.grabFresh(0L, 0L)
+        val early = h.ocr.readLines(frame, listOf(sub0Rect))
+        // 之后又点了别的格（进度前进），**重读同一张帧**
+        val (x6, y6) = center(6)
+        h.actions.click(x6, y6, 180L)
+        val late = h.ocr.readLines(frame, listOf(sub0Rect))
+        assertEquals("格 2 的 sub0 必须随**格身份**走（夹具按页内格序造值：5.4+2×0.1）", listOf("暴击率+5.6%"), early)
+        assertEquals(
+            "重读同一张帧不得跟着后续点击平移（旧夹具取最后一次点击的 cellIdx ⇒ 这里会读成格 6 的 6.0%）",
+            early, late,
+        )
     }
 
     // ---- 入库去重（Q2 决策）：两页同件 → 第二次出现跳过 ----
@@ -1059,6 +1449,32 @@ class ScanEngineDryRunTest {
     }
 
     // ---- 健壮性：onZero 重进重试 / anchor 断言失败终止 ----
+
+    /**
+     * ★ #219：dup 参数在本轮**就是 flow 声明的值**（artifact = (3,1)、weapon = (3,1)）。
+     *
+     * 为什么钉"值"而不是钉"时机"：判据（`dupRollbackConfirmed`，每页只判一次、`dupPageDecided` 闩住）
+     * 是**在格循环里**读的，而各 flow 现在把登记写在 `pagedGridNative(...)` **前一行**（源码里可见），
+     * 时机由此在构造上成立；干跑里没有"第 0 格 visit 之前"的注入点可以采样，所以这里只能钉住
+     * "两条流程的声明值确实落到了引擎字段上"（配合 `stopWhenRegisterDuplicateStreak` 的同值静默守卫，
+     * 流程体内那次重复调用不会把它改回去）。若哪天有人删掉流程开头的登记，这条会红在"登记彻底消失"上，
+     * 而"登记晚了"仍只能靠读源码 —— 这条限制写在注释里，别当它覆盖了时机。
+     */
+    @Test
+    fun `artifact 与 weapon 轮的页级确认数等于 flow 声明值`() {
+        // ⚠️ 两条 flow 的夹具不同源：weapon 的入口锚点读「背包/武器」+「武器 n/n」计数行，
+        //    拿 artifact 的 pageLines 去驱动 weapon 会先在 assertAnchor 抛 ScanAbortedException
+        //    （首版就是这么红的），红在夹具上而不是 #219 上。
+        for ((flow, lines) in listOf("artifact" to pageLines("Lv.90"), "weapon" to weaponLines())) {
+            val (engine, _) = runEngine(
+                listOf(Page(syntheticFrame(5), lines, CELLS_PER_PAGE)),
+                nativeFlow = flow,
+                maxPages = 1,
+            )
+            assertEquals("$flow：页级确认数必须是流程声明的 1", 1, engine.dupPageConfirm)
+            assertEquals("$flow：连续重复阈值同样是流程声明值", 3, engine.charDupStreakLimit)
+        }
+    }
 
     /** readCount 读到 0 → 重跑入口链重进界面 → 再读一次 → total=1026。 */
     @Test

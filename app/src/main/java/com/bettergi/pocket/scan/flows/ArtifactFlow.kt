@@ -1,5 +1,6 @@
 package com.bettergi.pocket.scan.flows
 
+import com.bettergi.pocket.scan.ScanAbortedException
 import com.bettergi.pocket.scan.ScanEngine
 import com.bettergi.pocket.scan.assertScreen
 import com.bettergi.pocket.scan.dualStateButton
@@ -8,6 +9,7 @@ import com.bettergi.pocket.scan.filterReset
 import com.bettergi.pocket.scan.pagedGridNative
 import com.bettergi.pocket.scan.readCount
 import com.bettergi.pocket.scan.runVisitBody
+import com.bettergi.pocket.scan.setFilter
 import com.bettergi.pocket.scan.stopWhenRegisterDuplicateStreak
 import com.bettergi.pocket.scan.visitClick
 import com.bettergi.pocket.scan.visitEmit
@@ -125,22 +127,53 @@ internal object ArtifactFlow {
  * @param pageSkipExpr 页级 pageSkip 表达式（原 pagedGrid.pageSkip.expr；如
  *   `"pageMinLevel > max(plan.level)"`——core 内做 targetMaxLevel/targetMinRarity 文本替换；
  *   artifact_scan 原生（全量扫描）不声明，注入点供干跑/调试用）。
+ * @param setFilterStep 非空 ⇒ 在 filterReset 之后先按该 step 应用套装筛选（`artifact_scan_set`）。
  */
-internal suspend fun ScanEngine.runArtifactScanNative(pageSkipExpr: String? = null) {
+internal suspend fun ScanEngine.runArtifactScanNative(
+    pageSkipExpr: String? = null,
+    setFilterStep: JSONObject? = null,
+) {
     runPreamble()
-    runArtifactSteps(pageSkipExpr)
+    runArtifactSteps(pageSkipExpr, setFilterStep)
     runPostamble()
 }
 
 /** artifact_scan 步序主体（foreach 包装——resetScanPerItem 语义——与干跑夹具复用）。 */
-internal suspend fun ScanEngine.runArtifactSteps(pageSkipExpr: String? = null) {
+internal suspend fun ScanEngine.runArtifactSteps(
+    pageSkipExpr: String? = null,
+    setFilterStep: JSONObject? = null,
+) {
     nativeStep("enterScreen") { enterScreen(ArtifactFlow.ENTER_BAGPACK) }
     nativeStep("enterScreen") { enterScreen(ArtifactFlow.ENTER_ARTIFACT_TAB) }
     nativeStep("dualStateButton") { dualStateButton(ArtifactFlow.DUAL_PILL_OFF) }
     nativeStep("filterReset") { filterReset(ArtifactFlow.FILTER_RESET) }
+    // ★ 2026-10-14：套装筛选后扫描（artifact_scan_set）。筛选**未生效**时**中止整轮**，
+    //   绝不放行成全量扫描——否则"筛选后扫描"就静默退化成了全量扫（既慢又违背意图）。
+    //   位置与 LockFlow 同构：filterReset → setFilter → assertScreen（确认已回到背包）。
+    if (setFilterStep != null) {
+        var applied = false
+        nativeStep("setFilter") { applied = setFilter(setFilterStep) }
+        if (!applied) {
+            throw ScanAbortedException(
+                "artifact_scan_set: 套装筛选未生效（not_applied）⇒ 中止，不退化全量扫描",
+            )
+        }
+    }
     nativeStep("assertScreen") { assertScreen(ArtifactFlow.ASSERT_ARTIFACT) }
-    nativeStep("readCount") { readCount(ArtifactFlow.READ_COUNT) }
+    // ★ 2026-10-14：**筛选流程不读表头总数**。右上「圣遗物 974/2700」是**全量持有量**，
+    //   不随筛选变化（截图直证），而筛选后的网格只有本套装的 N 件 ⇒ 两者不是同一量纲。
+    //   读进来会让三处 total 判据全部误判：①`#234` 页 0 格数上界（拿 974 当本页格数）；
+    //   ②件数主判据 `collected >= total`（22 恒追不上 974，永不收尾）；③`run()` 的
+    //   「总数不符」告警（stopName 分支强制核对 ⇒ 筛选下**恒**报 974≠22 的假阳性）。
+    //   三处都以 `vars.total == null` 为「不启用」语义 ⇒ 这里不读即整体正确关闭。
+    if (setFilterStep == null) {
+        nativeStep("readCount") { readCount(ArtifactFlow.READ_COUNT) }
+    }
     nativeStep("pagedGrid") {
+        // ★ #219：dup 参数在**进 pagedGrid 之前**登记一次。判据（页级确认 dupPageConfirm）在
+        //   格循环里就被读，而流程体内的那次登记要到第 0 格 visit 才生效 ⇒ 从页 0 起算的值
+        //   才是流程真正声明的那个（流程体内保留同值登记，由守卫静默跳过）。
+        stopWhenRegisterDuplicateStreak(3, 1)
         pagedGridNative(ArtifactFlow.GRID, pageSkipExpr = pageSkipExpr) { col, row, idx, prof ->
             runVisitBody(ArtifactFlow.GRID, col, row, idx, prof, ArtifactFlow.EMIT, ArtifactFlow.STOP_DUP) { ctx ->
                 // ① 止扫登记（留在生产者；§12.1）

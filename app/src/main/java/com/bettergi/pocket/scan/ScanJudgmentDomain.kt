@@ -472,11 +472,15 @@ internal fun ScanEngine.lockVoteAny(frame: Mat): Boolean =
  *    现在改成 `当前态 == 目标态 才跳过`，两个方向都正确。
  * 2. **确定性选位**：目标**显式**给了 `elixirCrafted` 时直接按它选普通位/祝圣位
  *    （GOODScanner：`Lock toggles use the scanned piece's elixirCrafted to apply a 40px Y-shift`），
- *    省掉"先点普通位 → 回读 → 未生效再点祝圣位"的第二次点击；只有没给（手写最小计划）才退回试错。
+ *    省掉"先点普通位 → 回读 → 未生效再点祝圣位"的第二次点击。
  *
  * ★ 2026-09-27（#97）：未生效后的兜底改为 [followUpLockShift] —— 见那个函数的 KDoc。
  *   原来无条件"换另一侧 +zhushengShiftPx"，对**非祝圣件**那是个没标定过的坐标
  *   （同帧实测 gold=0/red=0）；对**祝圣件**则等于把刚点过的位置再点一次（净效果归零）。
+ *
+ * ★ 2026-10-14（#279）：计划**没给** `elixirCrafted` 时，选位改用**屏幕事实**（同预读帧的紫横幅投票），
+ *   不再盲猜普通位。实测（BS 2244×1080，task 缺失 elixirCrafted 的祝圣件）：旧行为首选 0 落空 ⇒
+ *   settle 烧满 90s/46 轮才走到兜底；改后首选即 +sh、一轮内收敛。判据不可用 ⇒ 退回普通位（旧行为）。
  */
 internal suspend fun ScanEngine.lockClickAdaptive(): Pair<Int, Int> {
     val obj = profile.zone("artifact.panel.lock")
@@ -491,17 +495,33 @@ internal suspend fun ScanEngine.lockClickAdaptive(): Pair<Int, Int> {
     vars.lockWriteAttempted = true
     // 目标态：来自 {lock,unlock} 清单归一出的项内 wantLock（缺省 true = 应锁定）
     val desired = vars.currentTask?.optBoolean(GoodPlan.KEY_WANT_LOCK, true) ?: true
-    // 确定性选位：显式给了 elixirCrafted 就不试错
+    // 计划里的 elixirCrafted：显式给了就采信，没给则用屏幕事实选位（见下）
     val wantElixir = vars.currentTask?.let {
         if (it.has("elixirCrafted")) it.optBoolean("elixirCrafted") else null
     }
+    // 同一帧取两个事实：当前锁态 + 屏幕祝圣态（紫横幅投票，与 [parseArtifactPanel] 的 crafted 同源）。
+    // ★ #279：屏幕祝圣态以前只在**补点兜底**里读，于是"计划没给 elixirCrafted"时首选位盲猜 0；
+    //   祝圣件得等 settle 预算烧完（实测 90s、46 轮）才走到兜底。这里提前读，选位直接用屏幕事实。
+    val f = freshFrame()
+    val pre: Boolean
+    val screenCrafted: Boolean?
+    try {
+        pre = lockVoteAny(f)
+        screenCrafted = runCatchingCancellable {
+            VoteJudges.panelZhusheng(f, profile).matched
+        }.getOrElse { e ->
+            Log.w(TAG, "lockClickAdaptive: 祝圣横幅判据不可用（${e.message}）⇒ 按计划/默认选位")
+            null
+        }
+    } finally {
+        f.release()
+    }
+    // 确定性选位：显式给了 elixirCrafted 就按它；没给就用**屏幕事实**（判据不可用 ⇒ 退回普通位）。
     val firstShift = when (wantElixir) {
         true -> sh
         false -> 0
-        null -> 0 // 未知 ⇒ 仍先试普通位（与旧行为一致）
+        null -> if (screenCrafted == true) sh else 0
     }
-    var f = freshFrame()
-    val pre = try { lockVoteAny(f) } finally { f.release() }
     // ★ 只有"当前态已等于目标态"才可跳过 —— 原来只看"已锁"⇒ 解锁方向被静默跳过
     if (pre == desired) {
         Log.i(TAG, "lockClickAdaptive: 已处于目标态（locked=$pre desired=$desired），跳过点击")
@@ -509,7 +529,8 @@ internal suspend fun ScanEngine.lockClickAdaptive(): Pair<Int, Int> {
     }
     Log.i(
         TAG,
-        "lockClickAdaptive: locked=$pre desired=$desired elixirCrafted=$wantElixir 首选位移=$firstShift",
+        "lockClickAdaptive: locked=$pre desired=$desired elixirCrafted=$wantElixir " +
+            "屏幕祝圣=$screenCrafted 首选位移=$firstShift",
     )
     // 原语取 `click`（2px 微滑 + 按压）。⚠️ **tap vs click 之争是伪命题**：
     //   09-18「真机 clickLocal accepted=true 但毫无反应」与 09-27「纯 tap 三轮全背包锁态零变化」
@@ -524,18 +545,8 @@ internal suspend fun ScanEngine.lockClickAdaptive(): Pair<Int, Int> {
     if (settleLockState(desired)) return rect.centerX to (rect.centerY + firstShift)
     // ★★ #97：首选位未生效时的兜底 —— **只点"屏幕上真的是锁钮"的那一侧，且绝不重复点同一坐标** ★★
     //   判据与完整理由见 [followUpLockShift]（纯函数、有单测）。
-    //   这里只负责把屏幕事实取出来：同帧紫横幅投票，与 [parseArtifactPanel] 的 crafted 同源。
-    val craftedOnScreen = runCatchingCancellable {
-        val f2 = freshFrame()
-        try {
-            VoteJudges.panelZhusheng(f2, profile).matched
-        } finally {
-            f2.release()
-        }
-    }.getOrElse { e ->
-        Log.w(TAG, "lockClickAdaptive: 祝圣横幅判据不可用（${e.message}）⇒ 不补点第二坐标")
-        null
-    }
+    //   屏幕祝圣态复用**预读帧**那次探测（点击不会改变横幅，不再另取帧）。
+    val craftedOnScreen = screenCrafted
     val followUp = followUpLockShift(firstShift, sh, craftedOnScreen)
     if (followUp == null) {
         Log.w(
@@ -893,6 +904,28 @@ internal suspend fun ScanEngine.filterPanelState(): FilterPanelState {
     return st
 }
 
+/**
+ * 轮询 [filterPanelState] 直到读到非 UNKNOWN，或预算耗尽（返回最后一次读数，可能仍是 UNKNOWN）。
+ *
+ * 为什么需要：设备端 OCR 对同一标题条**一次读对、一次读成乱码**是常态（见 [filterPanelState] KDoc
+ * 里 `ensureSetPanel` 轮询 6 次的同源教训）。#299 真机实测：`confirmFilter` 的收尾判定用**单发**
+ * `filterPanelState()`，一次撞 title='A' ⇒ UNKNOWN ⇒ 漏关主面板 ⇒ 头几格压面板静默丢件。
+ * 收尾/露出判定改走本函数，把"侥幸读到"变成"读到为止"。
+ */
+internal suspend fun ScanEngine.pollFilterPanelState(
+    tries: Int = 4,
+    gapMs: Long = FILTER_PANEL_POLL_MS,
+): FilterPanelState {
+    var last = filterPanelState()
+    var i = 1
+    while (last == FilterPanelState.UNKNOWN && i < tries) {
+        delay(gapMs)
+        last = filterPanelState()
+        i++
+    }
+    return last
+}
+
 /** 套装子面板的按钮中心（`profiles.grids.set_filter_popup.<key>`：okBtn / clearBtn / title）。 */
 internal fun ScanEngine.setPanelCenter(key: String): IntArray? {
     val g = profile.rawObject("grids.set_filter_popup") ?: return null
@@ -1192,15 +1225,53 @@ internal suspend fun ScanEngine.confirmFilter(step: JSONObject) {
     )
     clickAt(pt[0], pt[1])
     delay(FILTER_PANEL_STEP_MS)
-    // 子面板关掉后可能**露出主面板**（背包入口是两层）⇒ 复核并收尾，否则后面会站在主面板上跑。
-    when (filterPanelState()) {
-        FilterPanelState.MAIN_PANEL, FilterPanelState.SET_PANEL -> {
-            Log.i(TAG, "confirmFilter: 仍有面板残留 ⇒ BACK 收尾")
-            leaveFilterPanels("confirmFilter 收尾", homeHint = homeHintOf(step))
+    // 子面板关掉后会**露出主面板「圣遗物筛选」**（背包入口是两层：主面板 + 套装子面板）。
+    // 必须再点一次主面板「确认」把它关掉，否则流程会站在主面板上跑网格、头几格点击被面板吃掉
+    // ⇒ 详情面板不刷新 ⇒ 陈旧帧判重静默丢件（#299 真机实测：run1 丢 3 根羽毛，run2 因判态侥幸
+    //   读到 MAIN_PANEL 才走 BACK 收尾）。旧实现只在**单发** filterPanelState 命中 MAIN/SET_PANEL
+    //   时才收尾，撞一次 OCR 乱码（title='A' ⇒ UNKNOWN）就整个跳过 ⇒ 漏关。
+    // ⚠️ 只在**确读到面板**时才点主面板「确认」——UNKNOWN 时该坐标可能正压在网格上，盲点会误触格子
+    //   （用户硬约束"不能影响网格点击"）。轮询后仍 UNKNOWN ⇒ 退回 leaveFilterPanels 的 BACK 收尾
+    //   （BACK 是系统键，绝不压网格）。仅当从子面板进来（subPt!=null）才需要关露出的主面板；
+    //   回退路（subPt==null）第一下点的本就是主面板「确认」，不再重复点。
+    if (subPt != null) {
+        when (pollFilterPanelState()) {
+            FilterPanelState.MAIN_PANEL, FilterPanelState.SET_PANEL -> {
+                val mainPt = filterPanelCenter("ok")
+                if (mainPt != null) {
+                    Log.i(TAG, "confirmFilter: 露出主面板 ⇒ 再点主面板「确认」关闭=(${mainPt[0]},${mainPt[1]})")
+                    clickAt(mainPt[0], mainPt[1])
+                    delay(FILTER_PANEL_STEP_MS)
+                    when (pollFilterPanelState()) {
+                        FilterPanelState.MAIN_PANEL, FilterPanelState.SET_PANEL -> {
+                            Log.i(TAG, "confirmFilter: 点主面板确认后仍残留 ⇒ BACK 收尾")
+                            leaveFilterPanels("confirmFilter 收尾", homeHint = homeHintOf(step))
+                        }
+                        else -> Unit
+                    }
+                } else {
+                    Log.w(TAG, "confirmFilter: 主面板 ok 未标定 ⇒ 退回 BACK 收尾")
+                    leaveFilterPanels("confirmFilter 主面板未标定", homeHint = homeHintOf(step))
+                }
+            }
+            FilterPanelState.BACKPACK ->
+                Log.i(TAG, "confirmFilter: 子面板确认后已回到背包网格 ⇒ 无需再关")
+            FilterPanelState.UNKNOWN -> {
+                Log.w(TAG, "confirmFilter: 轮询后判态仍 UNKNOWN ⇒ 不盲点主面板确认（会压网格），交 BACK 收尾")
+                leaveFilterPanels("confirmFilter UNKNOWN", homeHint = homeHintOf(step))
+            }
         }
-        else -> Unit
+    } else {
+        // 回退路：pt 就是主面板「确认」，已点过一次；复核是否还残留（含 UNKNOWN 也交 BACK 兜）。
+        when (pollFilterPanelState()) {
+            FilterPanelState.MAIN_PANEL, FilterPanelState.SET_PANEL, FilterPanelState.UNKNOWN -> {
+                Log.i(TAG, "confirmFilter: 回退路复核 ⇒ BACK 收尾")
+                leaveFilterPanels("confirmFilter 回退收尾", homeHint = homeHintOf(step))
+            }
+            else -> Unit
+        }
     }
-    // 兼容旧配置的 tailGuard 语义已在上面被"判态 + BACK"取代，step 参数保留给日志/未来扩展
+    // 兼容旧配置的 tailGuard 语义已在上面被"判态 + 收尾"取代，step 参数保留给日志/未来扩展
     if (step.optString("tailGuard").isNotEmpty()) {
         Log.i(TAG, "confirmFilter: tailGuard='${step.optString("tailGuard").take(40)}' 已由判态收尾取代")
     }
@@ -1226,7 +1297,10 @@ internal suspend fun ScanEngine.verify(step: JSONObject) {
     } else expectRaw.toBoolean()
     // ★ 读判据前先清一次加锁确认弹框：它是全屏模态，盖住锁图标 ⇒ 否则恒读 false、假 FAILED
     // （只有锁定流程会用这条 verify；#93 起仍用 `actTried` 作闸是安全的 —— 该 zone 仅锁流程投）
-    if (zone == "artifact.panel.lock" && vars.actTried) dismissLockConfirm(1200L)
+    // #279：本设备已学会"不再弹确认框"时按 0 预算探一次即可，别白等 1.2s/格（与 [settleLockState] 同口径）。
+    if (zone == "artifact.panel.lock" && vars.actTried) {
+        dismissLockConfirm(if (lockConfirmAbsent) 0L else 1200L)
+    }
     val frame = freshFrame()
     val actual = try {
         when (zone) {
@@ -1333,6 +1407,17 @@ internal suspend fun ScanEngine.revisitFailedCells(
                 curCellCol = col
                 curCellIdx = idx
                 visitBody(this, col, row, idx, prof)
+                // ★ #270：管道臂必须**先 join 再取结果**，理由有三条，缺一条都会静默出错：
+                //   ① 本页的排干（`pipeDrainResults`）在格循环末尾就已经跑过了，重访 job 是那之后
+                //      才发出的 ⇒ 没有任何排水点会把它们交付进 `pageKeys`，唯一交付路径就是这里
+                //      直读 `lastCellKey`；不 join 就读到的是**上一格**的残值，把邻件身份写进本格槽位。
+                //   ② 下面紧跟着 `lastCellKey = null`：不 join 就可能在消费者**正要把本格结果写进
+                //      这两个字段**的时刻把它清空 ⇒ 那一格变成「未交付」，与 #257 同一类丢件。
+                //   ③ `recovered` 看的是 results 增量，而 results 只在消费者里增长 ⇒ 不 join 则
+                //      管道臂**恒为 0**（「定点重访 0/N 救回」在管道臂上是按构造成立的假现象）。
+                //   join 在 `curCellIdx = -1` **之前**（与空读格回读 [ScanGridDomain] 同序）：
+                //   emit 用活字段 `curCellIdx` 落 `curPageIds`，先复位会把救回件记到别的槽位。
+                if (TimingOverrides.pipeDepth > 0) pipeJoinPage()
                 curCellIdx = -1
                 val k = lastCellKey
                 val id = lastCellIdentity
@@ -1416,6 +1501,9 @@ internal suspend fun ScanEngine.vote(
                     //   直接 return ⇒ **BS 2244 实测 63 格全解析、0 件入库、`导出跳过：无已入库结果`**。
                     //   与下面那条回退分支注释担心的"整档导出 0 件"是同一个后果，只是换了触发路径。
                     sink.rarity = panelStars
+                    // ★ #265：同一份值留在生产者侧 —— 止扫判据在下一格第 ② 步读它，
+                    //   那时共享 vars 已被消费者装载成"落后 ≤pipeDepth 格"的那一格。
+                    lastVotedWeaponRarity = panelStars
                     Log.d(TAG, "weapon panel stars = $panelStars")
                 } else {
                     // ⚠️ 回退：profiles 未标定 `panels.weapon_backpack.starBand` 的分辨率档
@@ -1423,6 +1511,7 @@ internal suspend fun ScanEngine.vote(
                     //    parseWeaponPanel 直接 return（**整档导出 0 件**）。
                     val r = VoteJudges.weaponStarStrip(frame, prof, requireNotNull(gridKey), col, row)
                     sink.rarity = r.count
+                    lastVotedWeaponRarity = r.count
                     Log.d(TAG, "weapon panel stars unavailable → fallback card starStrip = ${r.count}")
                 }
             }
@@ -1442,9 +1531,16 @@ internal suspend fun ScanEngine.vote(
  * [stopWhen] 的 mode=duplicateStreak 分支与原生 visitBody 都走这里（单一事实源）。
  */
 internal fun ScanEngine.stopWhenRegisterDuplicateStreak(streak: Int, dupPageConfirm: Int) {
+    val confirm = dupPageConfirm.coerceIn(1, 5)
+    // ★ #219：同值重复登记**不打日志**。本函数在同步臂是**逐格**被 visit 体调用的
+    //   （`runVisitBody` 的 pipe 分支反而有 `if (changed)` 守卫）⇒ 不打这个补丁的话
+    //   真机日志里每格一行"stopWhen 登记"，把"值真的变了"这件事淹掉；而且流水线臂
+    //   现在也会在流程开头先登记一次（见各 flow 的 `pagedGridNative` 之前），
+    //   同一轮里出现两次同值登记是常态。
+    if (charDupStreakLimit == streak && this.dupPageConfirm == confirm) return
     charDupStreakLimit = streak
     // 页级确认页数（默认 2）：`1` = 恢复旧的「首次整页重复即停」行为
-    this.dupPageConfirm = dupPageConfirm.coerceIn(1, 5)
+    this.dupPageConfirm = confirm
     Log.i(
         TAG,
         "stopWhen 登记 mode=duplicateStreak streak=$charDupStreakLimit dupPageConfirm=${this.dupPageConfirm}" +
@@ -1457,18 +1553,27 @@ internal fun ScanEngine.stopWhenRegisterDuplicateStreak(streak: Int, dupPageConf
  * 的**原生式**（该条 Expr 退役）。语义与 stopWhen(expr) 逐位对应：
  * - 哨兵守卫：rarity<0（vote 未判定，如 3★ 蓝卡无金/紫 banner）跳过——否则 `<` 比较对 -1 恒真，
  *   会把"整页未判定"误判为"全部低星"而立即终止；
- * - `vars.rarity in 0..2` ⇒ stopRequested=true / stopReason="stopWhen"（scope=page 立即停；
+ * - `rarity in 0..2` ⇒ stopRequested=true / stopReason="stopWhen"（scope=page 立即停；
  *   原 flow 的 action="Stop+flush" 在引擎里**无消费者**——flush 就是扫描结束的自然导出）；
  * - 命中/未命中对 [ScanEngine.stopWhenCellStreak] 的记账与 Expr 路径同口径（该计数只被
  *   scope=cell 的连续确认消费，weapon 这条恒 page ⇒ 不改变行为，纯记账一致）。
+ *
+ * ★ #265：读的是 [ScanEngine.lastVotedWeaponRarity]（**生产者自己投的**），不是 `vars.rarity`。
+ *   本函数在 visit 步序第 ② 位求值，也就是**上一格**投出的星级（本格要到第 ⑤ 位才投票）——
+ *   同步臂下 `vars.rarity` 恰好就是那个值，所以以前看不出差别。管道臂下 `vars` 由消费者按它
+ *   自己的格装载 ⇒ 这里读到的是"落后 ≤pipeDepth 格"的星级 ⇒ **止扫点前移/后移**，
+ *   收尾那几件低星武器两臂收得不一样（导出差在尾部，`PAGES=3` 的验收跑**永远撞不到**，
+ *   因为那三页根本走不到列表末尾的素材区）。改成读生产者自持的那一份后两臂同值，
+ *   与同步臂旧行为逐位一致（同步臂下两者本来就相等）。
  */
 internal fun ScanEngine.stopWhenRarityAtMost2() {
+    val rarity = lastVotedWeaponRarity
     // 哨兵保护（与 Expr 路径同款）：rarity=-1 不得触发
-    if (vars.rarity < 0) {
+    if (rarity < 0) {
         Log.d(TAG, "stopWhen skipped: rarity not judged yet (-1 sentinel)")
         return
     }
-    if (vars.rarity in 0..2) {
+    if (rarity in 0..2) {
         stopWhenCellStreak++
         vars.stopRequested = true
         vars.stopReason = "stopWhen"
@@ -1522,25 +1627,15 @@ internal fun ScanEngine.stopWhen(step: JSONObject) {
         Log.d(TAG, "stopWhen skipped: rarity not judged yet (-1 sentinel)")
         return
     }
-    // §14 复核：character_scan 的 `name == roster[0]`（首名重现=遍历完）。
-    // Expr 仅支持数值、不支持下标/字符串比较，且 tokenize 遇 '[' 会抛 EvalException → 特判。
-    // 语义：当前角色草稿名 == 首个已入库角色名（且已入库 ≥1 条）→ 绕回起点，停止。
-    if (expr.contains("roster[0]")) {
-        val first = resultsCharacters.firstOrNull()?.name
-        // ⚠️ 取 charName.ifEmpty{lastCharName}：`emitCharacter` 末尾清空草稿，
-        //    而本步在 emit 之后 ⇒ 只看 charName 会恒为空、判据静默失效（2026-09-11 修）。
-        val cur = charName.ifEmpty { lastCharName }
-        // ⚠️⚠️ 必须要求**已入库 ≥2**：本步在 emit 之后求值时，`lastCharName` 就是刚入库那个，
-        //    只有 1 条时「首名 == 末名」恒成立 ⇒ 会在第 1 件就误判「绕回起点」而**立即停扫**
-        //    （2026-09-12 真机实测：`stopWhen (首名重现) 当前=YaeMiko 首名=YaeMiko 已入库=1`）。
-        //    character_scan 现已改用 `mode=duplicateStreak`，本分支仅为兼容旧 flow 而保留。
-        if (resultsCharacters.size >= 2 && !first.isNullOrEmpty() && cur == first) {
-            vars.stopRequested = true
-            vars.stopReason = "stopWhen"
-            Log.i(TAG, "stopWhen triggered (首名重现): 当前=$cur 首名=$first 已入库=${resultsCharacters.size}")
-        }
-        return
-    }
+    // ★ #233 单2④（2026-10-14 删）：这里原本有一条 `expr.contains("roster[0]")` 特判
+    //   （首名重现=遍历完），注释写着"仅为兼容旧 flow 而保留"。核过的结论是**它按构造走不到**：
+    //   `stopWhen(step)` 只有 `visitStopWhen`（EquipFlow / LockFlow）和 pipe 消费者两个调用方，
+    //   而 character_scan 不在 `PIPE_DEFAULT_BY_FLOW` 里、其原生体直接调 `stopWhenRegisterDuplicateStreak`；
+    //   Kotlin 与 dsl/json 双侧 grep 都没有任何地方再声明含 `roster[0]` 的表达式
+    //   （`rosterFind` 是另一个原语，别把它当这条判据的引用）。
+    //   留着它的代价不是性能，是**下一次诊断会被它骗**：看代码会以为角色轮有"回绕即停"这条路，
+    //   而实际收尾一直是 duplicateStreak / reachedEnd（2026-09-11 那次 10 角色就是 reachedEnd 收尾）。
+    //   判据失效的机制本身仍记在 CharDupJudge KDoc（`emit` 在 `stopWhen` 之前 ⇒ 读草稿名恒空）。
     val scope = step.optString("scope", "page")
     // 兜底：坏表达式（未定义变量/语法越界）不得炸掉整个流程——记 warn 后按未命中处理
     // ★ 2026-09-18：函数式写法（max(plan.level) / min(plan.rarity)）Expr 不支持 ⇒ 与 pageSkip

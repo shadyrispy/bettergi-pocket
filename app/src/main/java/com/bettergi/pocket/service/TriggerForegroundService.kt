@@ -92,6 +92,12 @@ class TriggerForegroundService : Service() {
     private var vpnConsentTimeout: Runnable? = null
     private var captureConsentTimeout: Runnable? = null
 
+    /**
+     * #250：投影授权「弹没弹出来」探针的延迟回调（与 [captureConsentTimeout] 各管一件事：
+     * 这条管"启动被 ROM 静默丢弃"，那条管"弹窗挂在那儿没人应答"）。
+     */
+    private var captureConsentProbe: Runnable? = null
+
     @Volatile
     private var shutDown = false
 
@@ -142,6 +148,10 @@ class TriggerForegroundService : Service() {
                 NoticeCenter.warn("屏幕共享已停止，可能被其他录制应用占用")
             }
         }
+        // ★ #183：面板那颗「共享屏幕」药丸显示**现状**，权威值只有本进程这个活的 controller 知道。
+        //   用探针而不是镜像：`isRunning()` 那三件（projection/virtualDisplay/imageReader）被系统单方面
+        //   收走时会立刻变 false，抄一份布尔迟早与真值分叉（#183 当年就是为躲这个才搁着的）。
+        settingsRepository.captureRunningProbe = { captureController.isRunning() }
         genshinLauncher = GenshinLauncher(applicationContext)
         // 「退出 / 开始导出」由无障碍进程经设置桥回调（METHOD_STOP / METHOD_SHARE_GOOD），
         // 因此这里不再需要 onExit / onShareGoodRequested 回调。
@@ -570,8 +580,22 @@ class TriggerForegroundService : Service() {
                 }
             }
             ACTION_DEBUG_SCAN_FLOW -> {
-                val flow = intent.getStringExtra(EXTRA_FLOW) ?: "artifact_scan"
-                val maxPages = intent.getIntExtra(EXTRA_MAX_PAGES, Int.MAX_VALUE)
+                // ★ 2026-10-14 套装筛选后扫描（adb 调试工具）：`--es sets HeartOfTheFurnace[,<key2>…]`
+                //   直接指定套装词典 key ⇒ 自动选 `artifact_scan_set` 流程并合成 `[{"setKey":"…"}]` 计划。
+                //   之所以传 **setKey**（而非 setName）：GOOD 导出项只有 setKey、没有 setName，且
+                //   `TaskMatch.targets` 比对的就是词典 key（失配回落原文）⇒ 传词典 key 恒可归一。
+                //   该 plan 只经 `filterTargets()` 决定 setFilter 的白名单目标集；artifact_scan 的
+                //   visit body 不读 plan ⇒ 无写副作用（不像 lock/equip 会改游戏内状态）。
+                val sets = intent.getStringExtra(EXTRA_SETS)
+                    ?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() }
+                    ?: emptyList()
+                val flow = intent.getStringExtra(EXTRA_FLOW)
+                    ?: if (sets.isNotEmpty()) "artifact_scan_set" else "artifact_scan"
+                // ★ 钳位与产线同口径（[maxPagesOrDefault]：0/负数 = 不限 → Int.MAX_VALUE）：
+                //   原先直传 EXTRA_MAX_PAGES 给 startScan，绕过了产线（settings.scanMaxPages）
+                //   必过的这道钳位 ⇒ 只有显式 `--ei maxPages 0` 会变成"扫 0 页"而不是"不限"。
+                //   改走同一函数后，调试入口仍可用 `--ei maxPages 0` 表达"不限"。
+                val maxPages = maxPagesOrDefault(intent.getIntExtra(EXTRA_MAX_PAGES, 0))
                 // ⚠️ 2026-09-17 默认改为 **false**：几何起点（x=638，两卡缝隙）实测让 BS 的滚动**被截断**
                 // （落地条带 L 仅 501~516px = **1.7 行**，而遍历 3 行 ⇒ 重叠 1.3 行 ⇒ 同件大量重复，
                 //  武器扫描"多 126"）；改用 profile 坐标（x=1614）后落地 **777~812px = 2.7 行** ✓ 稳定。
@@ -597,16 +621,27 @@ class TriggerForegroundService : Service() {
                 }
                 // 时序覆盖：交给 startScan 单入口 apply（其余入口传 null ⇒ 复位，防跨轮残留）
                 val timingSpec = intent.getStringExtra(EXTRA_TIMING)
+                // sets ⇒ 合成 plan（只对 `artifact_scan_set` 生效）。显式把 sets 配给别的 flow 是
+                // 误用：那些流程的 plan 项形状不同（如 lock 需要 mainStatKey/subStats 才能定位，
+                // 这里只给得出 setKey）⇒ 恒匹配不到、静默空跑，故不注入并 W 出声。
+                val setsPlan = when {
+                    sets.isEmpty() -> null
+                    flow == "artifact_scan_set" -> sets.map { key -> JSONObject().put("setKey", key) }
+                    else -> {
+                        Log.w(TAG, "debug scan flow: sets=$sets 配给了 flow=$flow（非 artifact_scan_set），已忽略")
+                        null
+                    }
+                }
                 // ★ 没给内联 plan 时**回落到用户在管理器里选好的输入**（与产线 `startFlowIfReady` 同源）。
                 //   原先这条调试通道只能靠 `planB64` 喂，`DEBUG_SET_GOOD` 导入的文件它根本不读 ⇒
                 //   起跑后 `foreach` 见 `$plan` 为空，整轮"跑完了但什么都没做"（07:46 实测：
                 //   returnToHome 8 次 + `foreach: 'plan' not available or empty` + cells=0）。
                 //   与 #94 的 geoAdvance 是同一条教训：**调试入口不能走产线不走的路径**。
                 //   内联 `plan/planB64` 仍然优先 —— 标定跑要用的是"临时改一条计划"，不是换数据源。
-                val planWithFallback = plan ?: GoodRepository.planFor(applicationContext, flow)?.also {
+                val planWithFallback = plan ?: setsPlan ?: GoodRepository.planFor(applicationContext, flow)?.also {
                     Log.i(TAG, "debug scan flow: plan 取自已导入输入（${it.size} 项，flow=$flow）")
                 }
-                Log.i(TAG, "debug scan flow: flow=$flow maxPages=$maxPages timing='${timingSpec ?: ""}'")
+                Log.i(TAG, "debug scan flow: flow=$flow maxPages=$maxPages timing='${timingSpec ?: ""}' sets=$sets")
                 if (captureController.isRunning()) {
                     scriptRunner.startScan(
                         flow, maxPages,
@@ -673,6 +708,9 @@ class TriggerForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        // #183：主进程还要活着（Provider 会被 :a11y 的读唤起来）时，探针必须换成"一律 false" ——
+        // 服务都没了就不该再回答"投影开着"，那是 #183 要治的同一个病。
+        settingsRepository.captureRunningProbe = { false }
         settingsRepository.removeListener(settingsListener)
         shutdown()
         super.onDestroy()
@@ -792,6 +830,7 @@ class TriggerForegroundService : Service() {
         scriptRunner.shutdown()
         clearVpnConsentTimeout()
         clearCaptureConsentTimeout()
+        clearCaptureConsentProbe()
         // 服务没了还留着 VPN = 白占设备唯一的隧道位、且再没人收数据（会话在本进程）。
         if (CaptureSession.isRunning()) Log.i(TAG, CaptureSession.stop(applicationContext))
         InputAccessibilityService.cancelRecoverCheck()
@@ -856,7 +895,10 @@ class TriggerForegroundService : Service() {
     private fun requestCapturePermission() {
         if (requestingCapturePermission) return
         requestingCapturePermission = true
-        armCaptureConsentTimeout()
+        // ★ #250：发起时刻**先**记下来（elapsedRealtime，与 CapturePermissionActivity 落的那笔同源），
+        //   两条兜底（1.2s 探针 / 60s 无人应答）都拿它判"这一次启动落没落地"。
+        val requestedAtElapsed = SystemClock.elapsedRealtime()
+        armCaptureConsentTimeout(requestedAtElapsed)
         try {
             // 悬浮窗点击 = 用户交互，且本应用 UID 持有可见窗口（无障碍进程里的悬浮窗）⇒
             // 命中「允许后台启动 Activity」的豁免，无需 SAW 也能直接拉起授权 activity
@@ -864,21 +906,91 @@ class TriggerForegroundService : Service() {
             val intent = Intent(this, CapturePermissionActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(intent)
+            // ★ #250：启动被 ROM **静默丢弃**时 startActivity 不抛异常（见 CapturePermissionActivity
+            //   的 launchedAtElapsed 注释）⇒ 光靠上面的 catch 兜不到，必须延迟主动问一次。
+            armCaptureConsentProbe(requestedAtElapsed)
         } catch (e: Exception) {
-            // 兜底：部分 ROM 收紧后台启动限制 → 拉 app 前台，MainActivity 前台内再发起（无通知依赖）
-            requestingCapturePermission = false
             Log.w(TAG, "direct capture launch failed, bringing app to front", e)
-            val intent = Intent(this, MainActivity::class.java)
-                .addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or
-                        Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
-                        Intent.FLAG_ACTIVITY_SINGLE_TOP,
-                )
-            // ★ A29：敏感中转不再走 extras（exported 的 MainActivity 可被任意 app putExtra 伪造），
-            //   改为进程内静态交接——服务与 MainActivity 同在主进程，先登记再拉前台。
-            PendingHandoff.post(PendingHandoff.Request.RequestCapture)
-            startActivity(intent)
+            bringAppToFrontForCapture()
         }
+    }
+
+    /**
+     * 投影授权的兜底通路（原 `requestCapturePermission` 的 catch 分支，一字未改语义）：
+     * 部分 ROM 收紧后台启动限制 ⇒ 拉 app 前台，由 MainActivity 在前台内重发起。
+     *
+     * #250 起有两个调用点：`startActivity` **抛异常**（原路径），以及探针**正面问到**授权页被
+     * 静默丢弃（[CaptureConsentProbe.Verdict.Swallowed]）。
+     */
+    private fun bringAppToFrontForCapture() {
+        requestingCapturePermission = false
+        val intent = Intent(this, MainActivity::class.java)
+            .addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            )
+        // ★ A29：敏感中转不再走 extras（exported 的 MainActivity 可被任意 app putExtra 伪造），
+        //   改为进程内静态交接——服务与 MainActivity 同在主进程，先登记再拉前台。
+        //   顺序也保证：就算下面的 startActivity 被 ROM 拦下（不抛、只是 no-op，见 #250 实测），
+        //   这笔登记还在 ⇒ 用户自己点开 app（通知栏 `openIntent` 也算）就能接着发起授权。
+        PendingHandoff.post(PendingHandoff.Request.RequestCapture)
+        // #250：本函数现在有三个调用点（catch / 1.2s 探针 / 60s 超时），后两个不在任何 try 里，
+        //   而后台 startActivity 在部分 ROM 上就是会抛 SecurityException/IllegalStateException
+        //   （A27 当年为同一个理由把 controller.start 改成"保证不抛"）。
+        try {
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "capture 前台兜底自身起不来（只剩 handoff 登记）：${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /**
+     * #250：发起授权后 [CaptureConsentProbe.PROBE_DELAY_MS]，**主动问一次**授权页到底弹没弹。
+     *
+     * 判据与常量见 [CaptureConsentProbe] 的类注释（依据 2026-10-13 华为 EML-AL00 实测量）。
+     * 与既有的 [armCaptureConsentTimeout]（60s 只复位标志）**并存**，不替换它：那条管的是
+     * 「页面上有人但没人应答」，这条管的是「页面根本没出来」。
+     */
+    private fun armCaptureConsentProbe(requestedAtElapsed: Long) {
+        captureConsentProbe?.let { mainHandler.removeCallbacks(it) }
+        val task = Runnable {
+            captureConsentProbe = null
+            // 标志已被结果回调放下 ⇒ 授权链路自己走完了（成功/被拒），没什么可问的
+            if (!requestingCapturePermission) return@Runnable
+            // 现问在 :a11y 主线程卡住时最长等 1s（liveActivePackage 的 latch），服务主线程等不起
+            // ⇒ 问在后台线程，判完只有需要兜底时才 post 回主线程。
+            Thread(
+                {
+                    val outcome = CaptureConsentProbe.ask(
+                        stillPending = { requestingCapturePermission },
+                        relayLaunched = { CapturePermissionActivity.launchedAtElapsed >= requestedAtElapsed },
+                        ownPackage = packageName,
+                        consentPackages = InputAccessibilityService.TRANSIENT_PACKAGES,
+                    ) { InputAccessibilityService.activeWindowPackage() }
+                    Log.i(TAG, "capture consent 探针: ${outcome.describe()}")
+                    if (outcome.verdict == CaptureConsentProbe.Verdict.Swallowed) {
+                        mainHandler.post { captureConsentSwallowed(outcome) }
+                    }
+                },
+                "capture-consent-probe",
+            ).start()
+        }
+        captureConsentProbe = task
+        mainHandler.postDelayed(task, CaptureConsentProbe.PROBE_DELAY_MS)
+    }
+
+    /**
+     * 探针判定「授权页被静默丢弃」：走与 catch 完全同一条兜底。
+     * 回主线程这段路上结果可能刚好到达（用户手快），所以再确认一次标志。
+     */
+    private fun captureConsentSwallowed(outcome: CaptureConsentProbe.Outcome) {
+        if (!requestingCapturePermission) {
+            Log.i(TAG, "capture consent 探针: ${outcome.describe()}⇒ 但结果已回，不动")
+            return
+        }
+        Log.w(TAG, "capture consent 探针: ${outcome.describe()}⇒ 走前台兜底")
+        bringAppToFrontForCapture()
     }
 
     /**
@@ -924,13 +1036,46 @@ class TriggerForegroundService : Service() {
         }.also { mainHandler.postDelayed(it, CONSENT_TIMEOUT_MS) }
     }
 
-    private fun armCaptureConsentTimeout() {
+    /**
+     * 60s「无人应答」兜底。#250 起它**分两种**，因为这两种的用户处境完全不同：
+     * - 中转页在这一次发起**之后被创建过** ⇒ 页面确实出来了、只是没人答 ⇒ 照旧只复位标志，
+     *   不去抢前台（用户可能正盯着弹窗）；
+     * - 中转页在这一次发起**之后从没被创建** ⇒ 这次 `startActivity` 就是没落地。
+     *   这时候现问也帮不上（被吞的典型成因就是 `:a11y` 不在，[CaptureConsentProbe] 只能报
+     *   `Unknown`），但**这一条判据不需要现问**：任何真启动在 1.2s 内就会创建本页
+     *   （实测 onCreate 距发起 84~461ms），60s 还没有就是没起来 ⇒ 走与 catch 同一条前台兜底。
+     *
+     * ⚠️ 只在"标志还挂着"时判（结果已回 ⇒ `requestingCapturePermission=false`，上面直接 return）。
+     */
+    private fun armCaptureConsentTimeout(requestedAtElapsed: Long) {
         captureConsentTimeout?.let { mainHandler.removeCallbacks(it) }
         captureConsentTimeout = Runnable {
             captureConsentTimeout = null
             if (!requestingCapturePermission) return@Runnable
-            requestingCapturePermission = false
-            Log.w(TAG, "capture consent 无人应答（${CONSENT_TIMEOUT_MS}ms）⇒ 复位发起标志")
+            val neverLaunched = CaptureConsentProbe.timedOutWithoutRelay(
+                requestedAtElapsed = requestedAtElapsed,
+                relayLaunched = CapturePermissionActivity.launchedAtElapsed >= requestedAtElapsed,
+            )
+            if (neverLaunched) {
+                Log.w(
+                    TAG,
+                    "capture consent 无人应答（${CONSENT_TIMEOUT_MS}ms）且中转页在这次发起后从未创建" +
+                        "⇒ 判这次启动没落地，走前台兜底",
+                )
+                bringAppToFrontForCapture()
+                // ★ 2026-10-13 21:24 华为实测：这个前台兜底**在同一次被拦的处境里也起不来**
+                //   （`START {…MainActivity} result: 102`，`mCurrentFocus` 一直停在桌面）——
+                //   被吞的成因就是整个 UID 没有前台凭据，兜底自己也是后台 startActivity。
+                //   唯一还通得了的通道是 FGS 常驻通知（`openIntent` → MainActivity →
+                //   `pendingCaptureRequest` 前台内重发起），所以这里必须把它明确指出来，
+                //   而不是留一个自顾自亮着的开关。
+                NoticeCenter.error(
+                    "屏幕共享授权页被系统拦下（后台启动受限）：请在本应用里关一次再开「屏幕共享」",
+                )
+            } else {
+                requestingCapturePermission = false
+                Log.w(TAG, "capture consent 无人应答（${CONSENT_TIMEOUT_MS}ms）⇒ 复位发起标志（页面已出，不抢前台）")
+            }
         }.also { mainHandler.postDelayed(it, CONSENT_TIMEOUT_MS) }
     }
 
@@ -942,6 +1087,12 @@ class TriggerForegroundService : Service() {
     private fun clearCaptureConsentTimeout() {
         captureConsentTimeout?.let { mainHandler.removeCallbacks(it) }
         captureConsentTimeout = null
+    }
+
+    /** #250：服务退出时把在途的授权探针一起撤掉（退出后不该再把任何页面顶到前台）。 */
+    private fun clearCaptureConsentProbe() {
+        captureConsentProbe?.let { mainHandler.removeCallbacks(it) }
+        captureConsentProbe = null
     }
 
     private fun startInForeground(sharing: Boolean) {
@@ -1184,6 +1335,12 @@ class TriggerForegroundService : Service() {
         const val EXTRA_SEGS = "segments"
         const val EXTRA_METHOD = "method"
         const val EXTRA_FLOW = "flow"
+        /**
+         * 2026-10-14 套装筛选后扫描（adb 调试工具）：逗号分隔的套装词典 key
+         * （`tools/mappings.json` 的 `artifactSets[].id`，如 `HeartOfTheFurnace`）。
+         * 给了它而没显式给 [EXTRA_FLOW] ⇒ 自动选 `artifact_scan_set` 并合成 setKey 计划。
+         */
+        const val EXTRA_SETS = "sets"
         const val EXTRA_MAX_PAGES = "maxPages"
         /** §14 P4：外部任务计划 JSON 数组（明文，adb shell 会吞双引号，标定用请走 planB64）。 */
         const val EXTRA_PLAN = "plan"
@@ -1213,5 +1370,184 @@ class TriggerForegroundService : Service() {
          * 划掉弹窗则永远没有回报 ⇒ 授权标志需要一个复位点，否则 `canAutoLaunch` 永久为假。
          */
         private const val CONSENT_TIMEOUT_MS = 60_000L
+    }
+}
+
+/**
+ * #250（2026-10-13）：投影授权「到底弹出来了没有」的**主动问** —— 把判据从「等异常」换成
+ * 「发起之后，正面问到授权链路落地了没有」。
+ * 纯 JVM（探针 / 睡眠 / 时钟全部注入，无 Android 依赖）⇒ `CaptureConsentProbeTest` 直接驱动桩探针。
+ *
+ * ### 缺陷形状（实测依据）
+ * 旧实现只在 `catch (e: Exception)` 里兜底，前提是「后台启动被 ROM 拦下会抛」。华为 EML-AL00
+ * （EMUI 13 / Android 10）上这条不成立：2026-10-11 量到 `startActivity` 正常返回、ATMS 只打
+ * `Background activity start … isBgStartWhitelisted: false` + `result: 102` 就把启动丢掉，
+ * app 侧唯一的痕迹是 60s 后那句「capture consent 无人应答」—— 兜底分支在**最需要它的时刻不可达**。
+ * ⇒ 判据必须是正向的：问到"落地了"就等着，问到"什么都没动"才兜底。
+ * ⚠️ 2026-10-13 本轮**没能再让它丢一次**：拆掉悬浮球（发起时没有任何自家可见窗口）也从
+ * `areBackgroundActivityStartsAllowed return false` 里被华为自己的分支救回来 ——
+ * `allow if the caller is bound by a UID that's currently foreground` + `…:com.bettergi.pocket:a11y
+ * is BackgroundActivityStartsAllowed` ⇒ 无障碍在位时整个 UID 被豁免。被吞最可能要求那条豁免也不成立
+ * （`:a11y` 不在 / 无障碍没连），本轮没验那条（要动用户的无障碍）。详见那份 docs 的 §2。
+ *
+ * ### 两条信号，AND 起来才判「被吞」（fail-safe 方向）
+ * 1. **本页被创建过**：`CapturePermissionActivity.launchedAtElapsed >= 发起时刻`。实测落地很快
+ *    （2026-10-13 三轮，都按"距服务那次 startActivity"计：窗口 `Making visible` +157ms、
+ *    onCreate 日志 +220ms、`:a11y` 收到本页 window-state +73~461ms），所以延迟到 [PROBE_DELAY_MS]
+ *    之后仍然没有这笔时间戳，就是真没落地。
+ * 2. **现问说前台还是外来包**：`InputAccessibilityService.activeWindowPackage()` 问到非 null，
+ *    且既不是自己也不在系统弹层名单里。
+ *
+ * 为什么**不能**只靠现问（本轮实测的关键一条）：授权页不是应用窗口！真弹出来时 `dumpsys window` 打
+ * `mCurrentFocus=Window{… com.android.systemui}`，而窗口记录是
+ * `ty=SYSTEM_ALERT appop=SYSTEM_ALERT_WINDOW package=com.android.systemui`。现问的第一条路
+ * `rootInActiveWindow` 在这种非应用窗上能不能落到值**没量过**（本轮不编译，没有调用点）；
+ * 而它写死的兜底路 `activePackageFromWindows` 只挑 `TYPE_APPLICATION` —— 按上面那条窗口记录，
+ * 这一条在弹窗正开着时只会把**游戏**当成活动应用窗读出来（代码直读可判，未实测）。
+ * 只凭现问判「被吞」就会在用户面前把 MainActivity 顶上去、把弹窗盖掉。
+ * 两条都成立才动手，任何一条说"落地了"就停手。
+ *
+ * ### 常量怎么定的（数值全部来自 2026-10-13 的实测量，见 dsl/docs/capture-consent-launch-20261013.md）
+ * - **延迟 [PROBE_DELAY_MS] = 1200ms**：必须在授权页落地之后再问。实测两种"起来了"的形态：
+ *   · 弹窗真弹（`cmd appops set … PROJECT_MEDIA ignore` 逼出来的）：下一个采样点（≤0.4s）
+ *     `mCurrentFocus` 就变成 com.android.systemui，并一直停在那儿（+1.2s 时仍在）。
+ *   · 秒授权快路（appops=allow，今天这台机最常见的形态）：发起 → onCreate +220ms →
+ *     结果回调 +200~474ms（`onCreate → result` 本身 136~254ms）⇒ **标志几百毫秒就被放下了**。
+ *     延迟必须显著大于这条，否则探针会在一条已经成功的路上读到"前台是游戏"。
+ *     1200ms 排在观测到最慢一次落地（systemui 页 `Displayed`，距发起 459ms）之后有余量，
+ *     又远早于 60s 的复位点。
+ * - **间隔 200ms / 至多 [ASK_ATTEMPTS_MAX]=2 次 / 总预算 [ASK_BUDGET_MS]=500ms**：与
+ *   `scan/ScriptRunner.StartGateLiveAsk` 逐字同参 —— 同一个现问原语、同一个「华为点 ▶ 那刻
+ *   rootInActiveWindow 恒 null（焦点切换中）」的 #197 实测（那边五次全空、已从 5 降到 2），
+ *   这里没有任何新证据支持给得更宽。问不到就是问不到（[Verdict.Unknown]），不硬判。
+ * - 现问全在**后台线程**上做：单次在 `:a11y` 主线程卡住时最长 1s（`liveActivePackage` 的 latch），
+ *   最坏 2×1s + 200ms 也不能压在服务主线程上。
+ */
+internal object CaptureConsentProbe {
+
+    /** 发起 startActivity 后多久开始问（ms）。见类注释「常量怎么定的」。 */
+    const val PROBE_DELAY_MS = 1200L
+
+    /** 现问最多问几次（含第一次）。 */
+    const val ASK_ATTEMPTS_MAX = 2
+
+    /** 两次现问之间的等待（ms）。 */
+    const val ASK_INTERVAL_MS = 200L
+
+    /** 整轮现问的**总耗时**上限（ms）：只管超时截断，不削减快失败路径的次数。 */
+    const val ASK_BUDGET_MS = 500L
+
+    /**
+     * 60s「无人应答」那半条判据 —— **不依赖现问**的"这次启动没落地"。
+     *
+     * 为什么要有它（2026-10-13 华为实测的推论，装机验见 dsl/docs/capture-consent-launch-20261013.md §8）：
+     * 被吞的典型成因就是 `:a11y` 不在，而 [ask] 的信号 2 恰恰要靠它 ⇒ 只能报 `Unknown` ⇒
+     * 探针这半边在最需要它的场景里是哑的。但信号 1 是进程内的、不受影响：
+     * 真启动时中转页 `onCreate` 距发起只 84~461ms（§1 实测量），60s 还没有就是没起来。
+     *
+     * @param requestedAtElapsed 本次发起的时刻（elapsedRealtime）；`<=0` = 没这笔记录 ⇒ 一律不判
+     * @param relayLaunched      中转页在这次发起之后有没有被创建过
+     */
+    fun timedOutWithoutRelay(requestedAtElapsed: Long, relayLaunched: Boolean): Boolean =
+        requestedAtElapsed > 0L && !relayLaunched
+
+    enum class Verdict {
+        /** 发起标志已放下 ⇒ 授权链路自己走完了（成功或被拒），无需判定也无需兜底。 */
+        Settled,
+
+        /** 有"落地了"的证据（本页创建过，或现问读到自家/系统弹层占着前台）⇒ 等着，别抢前台。 */
+        CameUp,
+
+        /** 本页从没被创建 **且** 现问正面读到外来包 ⇒ 这次启动被静默丢弃，该兜底了。 */
+        Swallowed,
+
+        /** 两条都没证据（无障碍没连 / 焦点切换中恒 null）⇒ 问不到，按不动处理。 */
+        Unknown,
+    }
+
+    /**
+     * @param verdict     结论
+     * @param pkg         最后一次问到的活动窗口包名（`Settled` / `Unknown` 时为 null）
+     * @param attempts    实际问了几次（Settled 可能是 0）
+     * @param elapsedMs   整轮耗时（含重试间隔）
+     * @param relayLaunched  本页「被创建过」那条信号当时是否为真
+     * @param budgetCut   true = 因总预算提前收手（没问满 [ASK_ATTEMPTS_MAX] 次）
+     */
+    data class Outcome(
+        val verdict: Verdict,
+        val pkg: String?,
+        val attempts: Int,
+        val elapsedMs: Long,
+        val relayLaunched: Boolean,
+        val budgetCut: Boolean = false,
+    ) {
+        /** 四种结局（没问 / 已落地 / 判被吞 / 问不到）与停手原因，日志里一眼可分。 */
+        fun describe(): String = when (verdict) {
+            Verdict.Settled -> "标志已复位⇒授权链路自己走完了，不必问(${elapsedMs}ms/${attempts}次)"
+            // pkg 为 null 的 CameUp 只可能是「本页创建过但现问读不到」，写清楚免得看成失败
+            Verdict.CameUp -> "判定已落地 问${attempts}次/${elapsedMs}ms（现问=${pkg ?: "读不到"} 本页创建=$relayLaunched）⇒ 等用户应答"
+            Verdict.Swallowed -> "判定被静默丢弃 问${attempts}次/${elapsedMs}ms（现问=$pkg 本页创建=false）"
+            Verdict.Unknown -> "${attempts}次都没问到(${elapsedMs}ms${if (budgetCut) "/预算截断" else ""})⇒ 不动"
+        }
+    }
+
+    /**
+     * 问一轮。任一条"落地了"的证据成立就立刻停手 ⇒ 重试只在"两条都还没证据"时发生，
+     * 绝不把"问到但不利"磨成"多问几次直到有利"（与 `scan/ScriptRunner` 里的 `StartGateLiveAsk` 同一条口径）。
+     *
+     * ⚠️ 探针放在**最后一个参数**：调用点是尾随 lambda，尾随 lambda 绑末位形参。
+     *
+     * @param stillPending   发起标志还在不在（结果回调一落地就该停手）
+     * @param relayLaunched  信号 1：`CapturePermissionActivity.onCreate` 在本次发起之后跑过
+     * @param ownPackage     自己包名（读前台的 Activity 也算"落地了"，不能据此抢前台）
+     * @param consentPackages 授权页可能占着前台的系统弹层包名（实测弹窗属 com.android.systemui）
+     * @param sleep          间隔实现（生产 = Thread.sleep，测试注入记录器）
+     * @param clockMs        耗时基准（生产 = System.currentTimeMillis，测试注入假钟）
+     * @param probe          信号 2：现问活动窗口包名（生产 = `InputAccessibilityService.activeWindowPackage()`）
+     */
+    fun ask(
+        stillPending: () -> Boolean,
+        relayLaunched: () -> Boolean,
+        ownPackage: String,
+        consentPackages: Set<String>,
+        attemptsMax: Int = ASK_ATTEMPTS_MAX,
+        intervalMs: Long = ASK_INTERVAL_MS,
+        budgetMs: Long = ASK_BUDGET_MS,
+        sleep: (Long) -> Unit = { Thread.sleep(it) },
+        clockMs: () -> Long = { System.currentTimeMillis() },
+        probe: () -> String?,
+    ): Outcome {
+        val t0 = clockMs()
+        var attempts = 0
+        while (true) {
+            if (!stillPending()) {
+                return Outcome(Verdict.Settled, null, attempts, clockMs() - t0, relayLaunched())
+            }
+            attempts++
+            val launched = relayLaunched()
+            val pkg = probe()
+            val elapsed = clockMs() - t0
+            // 「外来包」= 问到值了，且既不是自己也不是授权弹层可能占着前台的系统包。
+            // 注意 pkg == null 时 foreign 也是 false —— 那是「问不到」，不能当「落地了」用，
+            // 所以下面三条按 具体包名 → 本页创建 → 被吞 的顺序判，null 只能落到最后的重试。
+            val foreign = pkg != null && pkg != ownPackage && pkg !in consentPackages
+            if (pkg != null && !foreign) {
+                return Outcome(Verdict.CameUp, pkg, attempts, elapsed, launched)
+            }
+            if (launched) {
+                // 信号 1 成立就够了：前台现在是谁都不重要，这次启动没有被丢
+                return Outcome(Verdict.CameUp, pkg, attempts, elapsed, relayLaunched = true)
+            }
+            if (pkg != null) {
+                return Outcome(Verdict.Swallowed, pkg, attempts, elapsed, relayLaunched = false)
+            }
+            if (attempts >= attemptsMax) {
+                return Outcome(Verdict.Unknown, null, attempts, elapsed, relayLaunched = false)
+            }
+            if (elapsed + intervalMs > budgetMs) {
+                return Outcome(Verdict.Unknown, null, attempts, elapsed, relayLaunched = false, budgetCut = true)
+            }
+            sleep(intervalMs)
+        }
     }
 }
