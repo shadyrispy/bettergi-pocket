@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import com.bettergi.pocket.log.RecognitionLog
+import com.bettergi.pocket.settings.RunMode
 import com.bettergi.pocket.settings.SettingsGateway
 import com.bettergi.pocket.settings.SettingsWire
 import com.bettergi.pocket.settings.TriggerSettingsRepository
@@ -115,6 +116,8 @@ class SettingsBridgeProvider : ContentProvider() {
                 r.setScanEnabled(extras?.getBoolean(KEY_VALUE, false) == true)
             SettingsWire.F_SCAN_FLOW -> r.setScanFlow(extras?.getString(KEY_VALUE, "artifact_scan") ?: "artifact_scan")
             SettingsWire.F_SCAN_MAX_PAGES -> r.setScanMaxPages(extras?.getInt(KEY_VALUE, 0) ?: 0)
+            SettingsWire.F_RUN_MODE ->
+                r.setRunMode(RunMode.fromWire(extras?.getString(KEY_VALUE)))
             else -> return false
         }
         return true

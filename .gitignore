@@ -20,3 +20,5 @@ tmp-opencv-desktop.jar
 .kotlin
 # 标定/调试过程中抓的一次性探针截图（体积大且非交付物）
 /probe-test-screenshots
+# #310/M0 后台模式：内置 Shizuku 安装包不入库（assets/shizuku/README.md 有放置说明）
+/app/src/main/assets/shizuku/*.apk

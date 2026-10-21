@@ -25,6 +25,10 @@
         <package android:name="com.miHoYo.cloudgames.ys" />
         <package android:name="com.miHoYo.cloudgames.GenshinImpact" />
         <package android:name="com.miHoYo.ys.mi" />
+        <!-- ★ #310/M0 后台模式：Shizuku 授权四态机要判「已装未运行」，需要看到
+             Shizuku 应用本体（targetSdk 30+ 包可见性过滤，不声明则 getPackageInfo
+             恒 NameNotFoundException，状态机会永远卡在 NOT_INSTALLED）。 -->
+        <package android:name="moe.shizuku.privileged.api" />
         <package android:name="tv.danmaku.bili" />
         <package android:name="com.bilibili.app.in" />
         <package android:name="tv.danmaku.bilibilihd" />
@@ -146,6 +150,18 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- ★ #310/M0 后台模式：Shizuku binder 接收器（官方模板，dev.rikka.shizuku:provider）。
+             authority 固定为 ${applicationId}.shizuku；multiprocess=false 全局单实例；
+             exported=true + INTERACT_ACROSS_USERS_FULL 是 Shizuku 服务端回连的门槛
+             （该权限仅系统/Shell 持有，第三方 app 无法伪造请求）。 -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
         <activity
             android:name=".debug.BalProbeActivity"
             android:exported="false"

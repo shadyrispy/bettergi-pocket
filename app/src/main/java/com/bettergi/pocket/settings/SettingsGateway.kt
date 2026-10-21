@@ -47,6 +47,9 @@ interface SettingsGateway {
     fun setScanFlow(flow: String)
 
     fun setScanMaxPages(pages: Int)
+
+    /** ★ #310/M0：运行模式（前台/后台）。M0 无 UI 消费方，仅数据通道。 */
+    fun setRunMode(mode: RunMode)
 }
 
 /**
@@ -63,6 +66,7 @@ object SettingsWire {
     const val K_SCAN = "scanEnabled"
     const val K_SCAN_FLOW = "scanFlow"
     const val K_SCAN_MAX_PAGES = "scanMaxPages"
+    const val K_RUN_MODE = "runMode"
 
     // setter 字段名（call 的 arg 参数）
     const val F_SCREEN_SHARE = "screen_share"
@@ -73,6 +77,7 @@ object SettingsWire {
     const val F_SCAN = "scan"
     const val F_SCAN_FLOW = "scan_flow"
     const val F_SCAN_MAX_PAGES = "scan_max_pages"
+    const val F_RUN_MODE = "run_mode"
 
     fun toBundle(s: TriggerSettings): Bundle = Bundle().apply {
         putBoolean(K_SCREEN_SHARE, s.screenShareEnabled)
@@ -83,6 +88,7 @@ object SettingsWire {
         putBoolean(K_SCAN, s.scanEnabled)
         putString(K_SCAN_FLOW, s.scanFlow)
         putInt(K_SCAN_MAX_PAGES, s.scanMaxPages)
+        putString(K_RUN_MODE, s.runMode.wire)
     }
 
     fun fromBundle(b: Bundle): TriggerSettings = TriggerSettings(
@@ -94,6 +100,7 @@ object SettingsWire {
         scanEnabled = b.getBoolean(K_SCAN, false),
         scanFlow = b.getString(K_SCAN_FLOW, "artifact_scan") ?: "artifact_scan",
         scanMaxPages = b.getInt(K_SCAN_MAX_PAGES, 0),
+        runMode = RunMode.fromWire(b.getString(K_RUN_MODE)),
     )
 
     /** 无障碍进程尚未拿到权威值时的占位（与主进程 [TriggerSettingsRepository.readFromPrefs] 默认值一致）。 */
