@@ -91,20 +91,54 @@ object RollSolver {
      * @return null = 不可解（星级非 4/5、表未加载、数值不在档位表、或总强化次数凑不出）
      *         —— 调用方**保持原样导出**（宁缺不错）。
      */
-    fun solve(rarity: Int, level: Int, substats: List<In>): Solution? {
-        if (rarity != 4 && rarity != 5) return null
-        if (substats.isEmpty()) return null
-        val maxLevel = if (rarity == 5) 20 else 16
-        val maxInit = if (rarity == 5) 4 else 3
+    fun solve(rarity: Int, level: Int, substats: List<In>): Solution? =
+        solve(rarity, level, substats.map { listOf(it) })
 
-        // 等级候选：原值优先；再试 +10（OCR 常见「11 → 1」丢位）
-        val lv0 = level.coerceIn(0, maxLevel)
-        val candidates = LinkedHashSet<Int>().apply {
-            add(lv0)
+    /**
+     * ★ 2026-10-09（GS 对齐 P0-2）：**行候选列表**重载 —— 每行可带多个 OCR 候选（重裁/掩码重读
+     * 产出的替代读数），求解器**枚举每行的候选选择**（GOODScanner `roll_solver.rs` 的
+     * `selection` 组合循环同款）：任一组合能满足「行数=expected、键不重复、每条 roll 合法、
+     * 总 roll 恰好=init+upgrades」即采纳。
+     *
+     * 修复的现场：enerRech 5.8 被 OCR 读成 5.89（8→9 形近），单候选下 5.89 不在档位表 ⇒ 整件
+     * 无解（每轮 8~11 件 roll未解）；带第二候选（重裁重读出 5.8）后枚举选中正确读数 ⇒ 解出。
+     *
+     * 行内候选先去重（同 key 且值差 <0.01 视为同读数）。
+     */
+    @JvmName("solveWithLineCandidates")
+    fun solve(rarity: Int, level: Int, lines: List<List<In>>): Solution? {        if (rarity != 4 && rarity != 5) return null
+        val deduped = lines.map { line ->
+            line.distinctBy { it.key to Math.round(it.value * 100) }
+        }
+        if (deduped.any { it.isEmpty() }) return null
+        if (deduped.isEmpty()) return null
+        // 等级候选：原值优先；再试 +10（OCR 常见「11 → 1」丢位，与旧单候选路径同源）
+        val maxLevel = if (rarity == 5) 20 else 16
+        val levelCandidates = LinkedHashSet<Int>().apply {
+            add(level.coerceIn(0, maxLevel))
             if (level in 0 until 10 && level + 10 <= maxLevel) add(level + 10)
         }
-        for (lv in candidates) {
-            attempt(lv, rarity, maxLevel, maxInit, substats)?.let { return it }
+        // 枚举每行候选选择（候选数≤行数×行宽，行宽=1 时退化为旧路径）× 等级候选
+        val choices = deduped.map { it.size }
+        val total = choices.fold(1L) { a, b -> a * b }
+        for (lv in levelCandidates) {
+            for (n in 0 until total) {
+                var rem = n.toLong()
+                val combo = deduped.mapIndexed { li, cands ->
+                    val pick = (rem % choices[li]).toInt()
+                    rem /= choices[li]
+                    cands[pick]
+                }
+                // 同件不容两同名词条（与旧路径同判据）
+                if (combo.map { it.key }.toSet().size != combo.size) continue
+                attempt(
+                    lv,
+                    rarity,
+                    maxLevel = maxLevel,
+                    maxInit = if (rarity == 5) 4 else 3,
+                    subs = combo,
+                )?.let { return it }
+            }
         }
         return null
     }

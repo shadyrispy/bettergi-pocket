@@ -4,6 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.BeforeClass
 import org.junit.Test
@@ -255,5 +256,31 @@ class RollSolverTest {
         val solvedOriginal = RollSolver.solve(5, 19, subs)
         assertEquals(19, solvedOriginal!!.solvedLevel)
         assertEquals(8, solvedOriginal.totalRolls)
+    }
+
+    // ★ 2026-10-09（GS 对齐 P0-2）：行候选枚举 —— OCR 形近误读（5.8→5.89）单候选无解；
+    //   重裁重读产出正确第二候选后，枚举选中正确读数 ⇒ 解出。单候选行则与旧路径逐位等价。
+    @Test
+    fun `misread value rescued by second line candidate`() {
+        // 真机现场（BS 全量 roll未解=8 之一）：enerRech_ 5.8 误读 5.89（8→9 形近），
+        // 单候选下 5.89 不在档位表 ⇒ 整件无解。rolls 预算：atk_16.3∈{3,4}、critRate3.9=1、
+        // critDMG21=3、enerRech5.8=1 ⇒ 3+1+1+3=8 = init4+upgr5 ✓ 有解。
+        val misread = listOf(
+            RollSolver.In("atk_", 16.3),
+            RollSolver.In("enerRech_", 5.89),    // ✗ 不在表
+            RollSolver.In("critRate_", 3.9),
+            RollSolver.In("critDMG_", 21.0),
+        )
+        assertNull(RollSolver.solve(5, 20, misread))
+        // 重裁重读出正确值 ⇒ 第二候选 5.8 进行候选枚举 ⇒ 解出，且选中正确读数 5.8。
+        val rescued = listOf(
+            listOf(RollSolver.In("atk_", 16.3)),
+            listOf(RollSolver.In("enerRech_", 5.89), RollSolver.In("enerRech_", 5.8)),
+            listOf(RollSolver.In("critRate_", 3.9)),
+            listOf(RollSolver.In("critDMG_", 21.0)),
+        )
+        val solved = RollSolver.solve(5, 20, rescued)
+        assertNotNull(solved)
+        assertEquals(5.8, solved!!.substats.first { it.key == "enerRech_" }.value, 1e-9)
     }
 }

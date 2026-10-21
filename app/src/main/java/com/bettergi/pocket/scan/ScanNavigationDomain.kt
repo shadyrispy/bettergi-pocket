@@ -31,11 +31,40 @@ import com.bettergi.pocket.recognition.name.NameMatcher
  * Stage 3.3 步④：ScanNavigationDomain（do 原语按族拆分，扩展函数，函数体一字未改）。
  */
 
-internal fun ScanEngine.atHomeScreen(frame: Mat): Boolean? {
-    val rb = TemplateMatcher.match(frame, "home.bagpack", profile)
-    if (rb.score < 0) return null
-    return rb.matched || TemplateMatcher.match(frame, "home.character", profile).matched
-}
+    /**
+     * ★ 主界面判定（2026-10-08 定稿）：**派蒙钮 OpenCV 模板匹配**。
+     *
+     * 沿革（三步演进，前面两步的教训都写在这）：
+     * 1. 旧实现 = home.bagpack/character 模板 `||` 任一命中 —— 标题页/游戏中心右上角的
+     *    **白圈功能图标列**与模板纹理偶合 ⇒ 误判 true ⇒ 归位跳过 ⇒ enterScreen 点空气
+     *    （2026-10-08 华为/BS2244 两机同踩）。
+     * 2. 过渡版 = 派蒙钮固定点亮度/白度采样 —— 能分离，但**跨档图标尺寸不成比例**
+     *    （派蒙钮：2244 帧 68px、3200 帧 92px，比例 1.35 ≠ 分辨率比），每个分辨率都要
+     *    手工标一次坐标，不是通用解。
+     * 3. **定稿 = 模板匹配**（用户指正 + 双档实测）：模板**按档自裁**（`templateFiles` 覆盖，
+     *    见 TemplateMatcher），`templateRects` 给该档搜索 ROI。实测分离度：
+     *    3200 模板：大世界 **0.952** vs 背包页 0.589；2244 模板：大世界 **0.928** vs
+     *    背包页 0.568 / 标题页 0.535 —— 阈值 0.8 一刀切干净。
+     *    （跨档复用模板是错的：2244 模板打 3200 峰值仅 0.48——UI 图标不随分辨率等比缩放。）
+     *
+     * 返回 null = 帧不可用（沿用旧契约，调用方跳过归位）。
+     */
+    internal fun ScanEngine.atHomeScreen(frame: Mat): Boolean? {
+        if (frame.empty() || frame.cols() == 0 || frame.rows() == 0) return null
+        if (!TemplateMatcher.hasTemplate("home.paimon")) {
+            Log.w(TAG, "atHomeScreen: home.paimon 模板未注册，跳过归位判定")
+            return null
+        }
+        val r = TemplateMatcher.match(frame, "home.paimon", profile)
+        Log.d(
+            TAG,
+            "atHomeScreen 派蒙模板: score=${"%.3f".format(r.score)} matched=${r.matched} @(${r.x},${r.y})" +
+                " ⇒ ${if (r.matched) "主界面" else "非主界面"}",
+        )
+        // score < 0 = 模板不可用/尺寸不符（沿用旧 null 契约让调用方跳过归位）
+        if (r.score < 0) return null
+        return r.matched
+    }
 
 /** 返回钮落点 + 是否来自 `ui.return` 模板命中（false = 走兜底坐标，属**盲点**）。 */
 internal fun ScanEngine.returnButtonPoint(frame: Mat): Pair<FramePoint, Boolean> {
@@ -74,13 +103,14 @@ internal fun ScanEngine.returnButtonPoint(frame: Mat): Pair<FramePoint, Boolean>
  *    归位失败意味着后面每一步都在未知界面上点，**继续跑比停下来危险**。
  */
 internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTEMPTS) {
-    // 模板未注册（干跑单测/未下发模板）→ 无法判据，直接放弃（且不消耗帧，避免打乱帧序列）
-    if (!TemplateMatcher.hasTemplate("home.bagpack")) {
-        Log.w(TAG, "returnToHome: home.bagpack 模板未注册，跳过归位")
-        return
-    }
+    // ★ 2026-10-08：旧守卫 `hasTemplate("home.bagpack")` 已删除 —— 旧判定靠模板匹配，
+    //   新判定（atHomeScreen）走**派蒙钮亮度采样**（profile._common.paimonBtn），
+    //   不依赖模板注册。标定缺失/帧不可用时 atHomeScreen 返回 null，由循环内兜底（下方）。
+    //   干跑单测的"不消耗帧"语义不受影响：returnHome 默认 false（runPreamble），单测不进来。
     var attempt = 0
     var blindClicks = 0
+    /** 每层最多一次 BACK 退化（有进展即重置）；见无进展分支的注释。 */
+    var backFallbackUsed = false
     while (attempt++ < maxAttempts) {
         val frame = freshFrame()
         val atHome: Boolean?
@@ -90,9 +120,9 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
         try {
             atHome = atHomeScreen(frame)
             // 模板未注册/配置未加载时 match 返回 score=-1 → 无法判据，直接放弃归位
-            // （干跑单测与未下发模板的环境不应产生无意义点击）
+            // （干跑单测与未标定 paimonBtn 的环境不应产生无意义点击）
             if (atHome == null) {
-                Log.w(TAG, "returnToHome: home 模板不可用，跳过归位")
+                Log.w(TAG, "returnToHome: 派蒙判定不可用（paimonBtn 未标定/帧异常），跳过归位")
                 return
             }
             beforeThumb = VoteJudges.screenThumb(frame)
@@ -135,12 +165,29 @@ internal suspend fun ScanEngine.returnToHome(maxAttempts: Int = RETURN_HOME_ATTE
             null
         }
         if (reachedEnd(beforeThumb, afterThumb)) {
-            Log.e(TAG, "returnToHome: 点击后画面无变化 ⇒ 判定无进展，停手（点的位置不是返回钮）")
+            // ★ 2026-10-08：点返回钮无进展 ⇒ **退化为系统 BACK 一次**（GS 的 Escape 等价物），
+            //   而不是立刻停手。安全性依据：此刻 [atHome] 已判定**非主界面**（派蒙判定），
+            //   主世界不会因 BACK 弹「退出游戏」确认框；BACK 只在弹窗/子界面上关一层。
+            //   真机实测（BS3200 化种匣弹窗）：returnBtn 标定被弹窗挡住时 BACK 一次即关。
+            //   BACK 用后继续轮询（下一轮重新判派蒙 + 试返回钮）——不改变"无进展才退化"的语义。
+            if (!backFallbackUsed) {
+                backFallbackUsed = true
+                Log.w(
+                    TAG,
+                    "returnToHome: 点返回钮无进展（画面无变化）⇒ 退化为系统 BACK 一次" +
+                        "（非主界面状态，不会触发大世界退出框）",
+                )
+                actions.back()
+                delay(RETURN_HOME_SETTLE_MS)
+                continue
+            }
+            Log.e(TAG, "returnToHome: 返回钮与 BACK 均无进展 ⇒ 停手（不再盲点漂移）")
             NoticeCenter.error("自动归位点击后画面无变化，已停手（避免继续盲点漂移）")
             vars.stopRequested = true
             vars.stopReason = "returnHomeStuck"
             return
         }
+        backFallbackUsed = false // 有进展 ⇒ 重置退化机会（每层最多退一次）
     }
     Log.e(TAG, "returnToHome: $maxAttempts 次未达主界面 ⇒ 停手（首步 enterScreen 会再校验，但不会再盲点入口）")
     NoticeCenter.error("自动归位 $maxAttempts 次未达主界面，已停止点击")

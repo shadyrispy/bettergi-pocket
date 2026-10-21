@@ -25,7 +25,6 @@ data class GoodArtifact(
     val level: Int,
     val rarity: Int,
     val mainStatKey: String?,
-    val mainStatValue: Double,
     val substats: List<GoodSubStat>,
     val lock: Boolean,
     val favorited: Boolean?,

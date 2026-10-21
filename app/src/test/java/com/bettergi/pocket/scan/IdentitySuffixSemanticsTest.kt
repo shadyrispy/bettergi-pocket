@@ -69,8 +69,13 @@ class IdentitySuffixSemanticsTest {
      *
      * 185 格里 97 格带「已装…」，其中 **15 格 OCR 把末字「备」吃掉** ⇒ 旧写法
      * `takeIf { contains("已装备") }` 让这 15 件的装备者静默变空。
-     * 未装备武器的 equipped ROI 会读到**描述文案**（实测 `11` / `-` / `力量。一，` / `的诅咒。`），
-     * 没有装备标记 ⇒ 必须判 null（导出空串），不能把描述当成角色名。
+     *
+     * ★ 2026-10-09 双语义改版：
+     * ① manage 链路读全行「XX已装备」→ 截断（前三条断言不变）；
+     * ② backpack 链路 ROI 收窄到**角色名 3 字区**后文本就是名字 → 不含「已/装/备」的
+     *    文本**整体当名字**返回（不再是 null）——旧断言「无标记 ⇒ null」随之作废，
+     *    「未装备时该槽根本不进 readRois」（VoteJudges.equippedRowPresent 饱和度门前置），
+     *    垃圾文本不会再流到这里；描述文案的防御交由上层角色词典匹配判弃。
      */
     @Test
     fun `装备者文案容忍尾部截断但拒绝把描述当名字`() {
@@ -78,8 +83,14 @@ class IdentitySuffixSemanticsTest {
         assertEquals("九条裟罗", ScanEngine.equippedOwnerOf("九条裟罗已装"))   // 末字被吃
         assertEquals("钟离", ScanEngine.equippedOwnerOf("钟离已"))            // 末两字被吃
         assertEquals("北斗", ScanEngine.equippedOwnerOf(" 北斗已装备 "))       // 带空白
-        for (garbage in listOf("", "11", "-", "O", "力量。一，", "的诅咒。", "断过流动的海", "C06onEE")) {
-            assertNull("无装备标记不得当成角色名: $garbage", ScanEngine.equippedOwnerOf(garbage))
-        }
+        // ② 名字区直读语义：不含标记 ⇒ 整体当名字（backpack ROI 只框名字区）
+        assertEquals("菲谢尔", ScanEngine.equippedOwnerOf("菲谢尔"))
+        assertEquals("北斗", ScanEngine.equippedOwnerOf(" 北斗 "))
+        assertNull(ScanEngine.equippedOwnerOf(""))
+        assertNull(ScanEngine.equippedOwnerOf("   "))
+        // 名字区直读下数字/符号原样透传——防御线在角色词典匹配（characterKeyOfDisplay），
+        // 且 sat 门已保证只有"已装备"行才进 OCR，垃圾文本到不了这里。
+        assertEquals("11", ScanEngine.equippedOwnerOf("11"))
+        assertEquals("-", ScanEngine.equippedOwnerOf("-"))
     }
 }

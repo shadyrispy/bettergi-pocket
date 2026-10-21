@@ -83,6 +83,86 @@ object StatParser {
     data class ParsedStat(val key: String, val value: Double, val inactive: Boolean)
 
     /**
+     * 主词条名 → GOOD key（**只读名字**；mainValue 槽已删）。
+     *
+     * 名字槽文本**不含百分号**（% 在值槽），且同 slot 内 flat/percent 主词条名不碰撞
+     * （27750 行真机面板原文验证：时之沙「生命值」只有 hp_、生之花「生命值」只有 hp，
+     * (slot, 名字) → key 零歧义）⇒ flat/percent 由 [slotKey] 消歧，不需要读值。
+     *
+     * ROI 收窄到 3 字后 OCR 常见截断/尾字畸变（历史实读：'暴击伤'×288、'元素精'×212、
+     * '火元素伤害加质'×196、'元素充'×130、'治疗加'×58…），用**双向前缀匹配**消化；
+     * 元素伤害家族用**首字**定元素（'火元素伤害加质' 首字即判，7 字全名不必读出）。
+     * 前缀匹配有歧义时（'暴击' 撞 暴击率/暴击伤害）用 [slotKey] 兜不住——但 3 字宽读不出
+     * 2 字截断（OCR 按字块切割），历史 27696 样本该规则 0.00% 失败。
+     *
+     * @param text mainName 槽 OCR 原文（可能截断/带尾噪）
+     * @param slotKey 由单件名反查的部位（flower/plume/sands/goblet/circlet）；null 也能判
+     *        多数主词条，仅生之花/死之羽的固定主词条（hp/atk）依赖它
+     * @param names 词典（未用时走内置表）
+     */
+    fun mainKeyOf(text: String, slotKey: String?, names: GoodNames? = null): String? {
+        val t = clean(text)
+        if (t.isEmpty()) return null
+        // 生之花/死之羽主词条恒定（游戏规则），名字都不用读——但名字 miss 也别硬给：
+        // 名字读出且是词条名才走常量（防御横幅件/素材面板读到别的东西）。
+        val fixed = when (slotKey) {
+            "flower" -> "hp"
+            "plume" -> "atk"
+            else -> null
+        }
+        if (fixed != null) {
+            // 名字必须**像**一个词条名（前缀匹配任意一条）才信 slot 常量
+            if (prefixMatchName(t) != null || names?.stats?.any { it.zh.startsWith(t) || t.startsWith(it.zh) } == true) {
+                return fixed
+            }
+            return null
+        }
+        // 双向前缀唯一命中（'暴击伤'→暴击伤害；'元素精'→元素精通；'火元素伤害加质'→火元素伤害加成）
+        val hit = prefixMatchName(t)
+        if (hit != null) {
+            val entry = ENTRIES.firstOrNull { it.first == hit }?.second ?: return null
+            return when (entry) {
+                is KeyEntry.FlatPercent -> when (slotKey) {
+                    // flat 主词条只存在于生之花/死之羽（上面已处理）——其余部位全部是 percent 键
+                    else -> entry.percent ?: entry.key
+                }
+                is KeyEntry.Simple -> entry.key
+            }
+        }
+        // 词典通道（NameMatcher，容错更强）兜底
+        if (names != null) {
+            val table = names.stats.associate { it.zh to it.key }
+            NameMatcher.match(t, table)?.let { m ->
+                val entry = ENTRIES.firstOrNull { it.first == m.name }?.second ?: return null
+                return when (entry) {
+                    is KeyEntry.FlatPercent -> entry.percent ?: entry.key
+                    is KeyEntry.Simple -> entry.key
+                }
+            }
+        }
+        return null
+    }
+
+    /** mainName 双向前缀匹配：返回唯一命中的词条标准名；歧义/无命中返回 null。 */
+    private fun prefixMatchName(t: String): String? {
+        val hits = ENTRIES.map { it.first }.filter { zh -> zh.startsWith(t) || t.startsWith(zh) }
+        if (hits.size == 1) return hits[0]
+        // 元素伤害家族首字判别（'火元素…'/'火元…' ⇒ 火元素伤害加成）
+        if (t.isNotEmpty()) {
+            val byHead = ELEMENT_HEADS[t[0].toString()]
+            if (byHead != null && (t.contains("元素") || t.length <= 3)) return byHead
+        }
+        return null
+    }
+
+    /** 元素首字 → 伤害加成词条名（前缀判据的家族分支）。 */
+    private val ELEMENT_HEADS: Map<String, String> = mapOf(
+        "火" to "火元素伤害加成", "水" to "水元素伤害加成", "雷" to "雷元素伤害加成",
+        "草" to "草元素伤害加成", "风" to "风元素伤害加成", "岩" to "岩元素伤害加成",
+        "冰" to "冰元素伤害加成", "物" to "物理伤害加成",
+    )
+
+    /**
      * 部位名 → slotKey。
      * @param names 注入名称词典时优先走 [NameMatcher]（模糊容错）；否则回退内置表。
      */

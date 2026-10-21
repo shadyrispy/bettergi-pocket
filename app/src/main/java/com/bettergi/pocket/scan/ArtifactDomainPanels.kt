@@ -548,17 +548,17 @@ internal suspend fun ScanEngine.parseWeaponPanel(
     //    GOODScanner **不做跨页去重** ✓（靠"滚整页 ⇒ 零重叠"）；我方重叠由**跨页卡格指纹**处理 ✓
     // ★ 装备者（GOODScanner `equip` 槽语义）：「珐露珊已装备」⇒ 取「已装备」前的内容 ⇒ 匹配角色词典得 key；
     //   未装备时该区为空（或文案不含「已装备」）⇒ 置空串（GT 中 117/209 件为空 ✓）
+    // ★ 2026-10-09：词典 miss ⇒ **置空**（不再保留原文）。ROI 瘦身后 equipped 行区域在
+    //   未装备武器上会显示**描述文字片段**（真机实录：'中。距'/'，精巧'）——保留原文会把
+    //   这些片段导出成 location 污染 GOOD。昵称通道不受影响（ownerKeyOf 在词典之前）。
     val location = equipText
         ?.let { equippedOwnerOf(it) }
         ?.let { StatParser.clean(it) }
         ?.takeIf { it.isNotEmpty() }
         ?.let { raw ->
-            // ★ 2026-09-17：**旅行者的名字是玩家自定义**，GT 的装备者栏写作不带元素的 `Traveler`
-            //   （角色栏才写作 `TravelerCryo`），实测 `SkywardBlade` 我方读到"崽崽" ✗
-            //   ⇒ 认不出来时**不臆断**，保留原文 + 打日志。#105 起昵称由用户在管理器页填。
             val key = characterKeyOfDisplay(raw, dict)
-            if (key == null) Log.i(TAG, "weapon equip 未匹配角色词典: '$raw'（旅行者昵称等可在管理器页填）")
-            key ?: raw
+            if (key == null) Log.i(TAG, "weapon equip 未匹配角色词典: '$raw'（丢弃，不保留原文；昵称可在管理器页填）")
+            key
         }
         ?: ""
     // ★ 突破阶：面板不显示 ⇒ 由等级推导（表见 GoodWeapon.ascension 注释，GT 208/209 命中）
@@ -712,12 +712,14 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //      祝圣件的单件名会读成别的行 ⇒ 反推链直接断掉。**不要"顺手"给 name/slot/main 加 shift。**
     val yShift = if (vars.crafted) profile.zhushengShiftPx else 0
 
-    // 一次批量读全部文本槽（name/slot/mainName/mainValue/level/subStats×4）——单帧单调用，
-    // 返回与 rects 一一对应（blank 保留占位，按索引取回）
+    // 一次批量读全部文本槽（name/mainName/level/subStats×4 (+setName) (+equipped)）——单帧单调用，
+    // 返回与 rects 一一对应（blank 保留占位，按索引取回）。
+    // ★ 2026-10-09 ROI 瘦身（截图字块实测三档标定，见 profiles note）：slot/mainValue 两槽删除 ——
+    //   slot 由单件名经 artifactPieces 反查（305 件名→slot 零歧义）；mainValue 删除（GOOD v3 无
+    //   mainStatValue 字段，与 GOODScanner 导出口径对齐），主词条只读名字、flat/percent 由
+    //   (slot, mainName) 查表消歧（同 slot 内无歧义，见 StatParser.mainKeyOf）。
     val nameRect = sh(profile.rect("$base.name"))
-    val slotRect = sh(profile.rect("$base.slot"))
     val mainNameRect = sh(profile.rect("$base.mainName"))
-    val mainValueRect = sh(profile.rect("$base.mainValue"))
     val levelRect = sh(profile.rect("$base.level").shiftedBy(yShift))
     // ★ P3（2026-09-30）：`rawObject(base)!!` 裸断言改显式校验 —— null 时抛带 key 的明确错误，
     //   不再是难定位的 KotlinNullPointerException。
@@ -734,36 +736,40 @@ internal suspend fun ScanEngine.parseArtifactPanel(
             sh(profile.scaleRect(it.getInt(0), it.getInt(1), it.getInt(2), it.getInt(3)))
         }
     } else null
-    val setNameIdx = if (setNameRect != null) 5 + subRects.size else -1
+    val setNameIdx = if (setNameRect != null) 3 + subRects.size else -1
     // ★ 2026-10-05：装备者（location）原先是**同帧的第 2 次 OCR 调用**（单槽 readLines）⇒ 每格多跑
     //   一整条 rec 推理。并入同一次批量（武器面板早就是这么读的）。缺该 profile 键 ⇒ null ⇒
     //   下标越界取回空串，与旧 `runCatchingCancellable { ... }.getOrElse { "" }` 同语义。
-    val equippedRect =
+    // ★ 2026-10-09 懒识别：equipped 槽 93.8% 为空（31085 行真机原文统计），先走**饱和度门**
+    //   （未装备=面板底色 sat≈16 vs 已装备=黄条+头像 sat≈52，华为 2244 实测完美分离）——
+    //   未装备整槽免 rec（scaledW 534px，最贵槽之一）；且 ROI 已收窄到**角色名 3 字区**
+    //   （头像/「已装备」不入画面，三档截图字块实测）。
+    val equippedGate = runCatchingCancellable {
+        profile.rect("panels.$panelKey.equipped")
+    }.getOrNull()?.let { r -> VoteJudges.equippedRowPresent(frame, sh(r)) }
+    val equippedRect = if (equippedGate == true) {
         runCatchingCancellable { profile.rect("panels.$panelKey.equipped") }.getOrNull()?.let { sh(it) }
-    val equippedIdx = 5 + subRects.size + (if (setNameRect != null) 1 else 0)
+    } else null
+    val equippedIdx = 3 + subRects.size + (if (setNameRect != null) 1 else 0)
     val lines = ocr.readRois(
         frame,
-        listOf(nameRect, slotRect, mainNameRect, mainValueRect, levelRect) + subRects +
+        listOf(nameRect, mainNameRect, levelRect) + subRects +
             (if (setNameRect != null) listOf(setNameRect) else emptyList()) +
             (if (equippedRect != null) listOf(equippedRect) else emptyList()),
     )
 
-    // 件名 + 部位 + 主词条（blank → null，保持原单槽 readLines 语义）
+    // 件名 + 主词条（blank → null，保持原单槽 readLines 语义）
     val pieceName = lines.getOrNull(0)?.takeIf { it.isNotBlank() }?.let { StatParser.clean(it) }
-    val slotText = lines.getOrNull(1)?.takeIf { it.isNotBlank() }
-    val slotKey = slotText?.let { StatParser.slotKeyOf(it, names) }
-    val mainName = lines.getOrNull(2)?.takeIf { it.isNotBlank() }
-    val mainValueText = lines.getOrNull(3)?.takeIf { it.isNotBlank() }
-    val mainStat = mainName?.let { StatParser.parse(it + (mainValueText ?: ""), names) }
+    val mainNameText = lines.getOrNull(1)?.takeIf { it.isNotBlank() }
 
     // ★★ 面板原文 dump（诊断用，见 PANEL_RAW_DUMP）★★
-    //   打印该面板全部文本槽：name | slot | mainName | mainValue | level | subStats×4 (+setName) (+equipped)。
+    //   打印该面板全部文本槽：name | mainName | level | subStats×4 (+setName) (+equipped)。
     if (PANEL_RAW_DUMP) {
         Log.i(TAG, "面板原文: " + lines.joinToString(" | ") { it })
     }
 
-    // 等级（祝圣面板 yShift）
-    val levelText = lines.getOrNull(4)?.takeIf { it.isNotBlank() }
+    // 等级（祝圣面板 yShift）；下标 2 = name(0) 之后（slot/mainValue 槽已删）
+    val levelText = lines.getOrNull(2)?.takeIf { it.isNotBlank() }
     vars.level = levelText?.let { StatParser.extractValue(it)?.toInt() } ?: 0
 
     // 星带逐格（⚠️整带列投影 5★ 会合并，必须逐格；祝圣 yShift 不作用于星带——profiles zhusheng.fields 仅 level/subStats/lock/astral）
@@ -788,13 +794,34 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //   「（待激活）」标记 ⇒ 下游 StatParser/RollSolver/GoodExporter 语义零改动
     //   （拆分优先级①的标记来源从 OCR 换成颜色；ROI 收窄同时把 rec Σw 砍 ~27%）。
     val judgedSubLines = (0 until subRects.size).map { i ->
-        val t = lines.getOrNull(5 + i).orEmpty()
+        val t = lines.getOrNull(3 + i).orEmpty()
         if (t.isBlank()) t else when (VoteJudges.substatRowPending(frame, subRects[i])) {
             true -> if (t.contains("待激活")) t else "$t（待激活）"
             else -> t
         }
     } + (if (setNameIdx >= 0) listOf(lines.getOrNull(setNameIdx).orEmpty()) else emptyList())
     var substats = StatParser.parseBlock(judgedSubLines, names)
+
+    // set_name 反推（背包面板 set_name 被遮挡，用户定稿 2026-09-01）：单件名 → 套装 id
+    // 件名→套装反推的词典取自 flow 的 dict.name（artifact_scan 已声明 mappings.artifactPieces）
+    // ★ 2026-10-09：slot 槽删除后，slotKey 同样由单件名反推 —— artifactPieces 每条自带
+    //   slot 字段，305 件名→slot 实测**零歧义**（games 规则：同套五件件名互不相同）。
+    //   词典 miss 时 slotKey=null，与 setKey 一样交「未解析身份」路径。
+    //   （定义在止扫判断之前：3★ 纳入导出的日志要引用 slotKey/mainStatKey。）
+    val pieceDict = dict?.optString("name")?.takeIf { it.isNotEmpty() }
+    // ⚠️ 语义：pieces 表 = 件名→**setId**；pieceDetails 的键是**件名**。
+    //   dict 通道 lookupName 只回 key（=setId）拿不到标准件名 ⇒ 统一走 names.match 拿
+    //   MatchResult（name=标准件名，key=setId），两条通道才有同源的标准件名可查 slot。
+    //   （首版用 lookupName 的 key 当件名查 pieceDetails ⇒ 56 件 slotKey 全空，真机 10:55 对账抓到。）
+    val pieceMatch = pieceName?.let {
+        names?.match(it, GoodNames.Kind.PIECE)?.let { m -> m.name to m.key }
+    }
+    var setKey = pieceMatch?.second
+    // slotKey 反查：**标准件名**（=词典 key of pieces 表？不，pieces 键就是件名）→ pieceDetails[件名].slot
+    val slotKey = pieceMatch?.let { (norm, _) -> names?.pieceDetails?.get(norm)?.slot }
+    // 主词条 key：只靠 (slot, mainName 前缀文本) 查表（mainValue 槽已删）。miss ⇒ null，
+    // 与词典 miss 同路径（垃圾条拦截 + 空读回读兜底）。
+    val mainStatKey = mainNameText?.let { StatParser.mainKeyOf(it, slotKey, names) }
 
     // 仅保留止扫判定（3★/2★ 不解析）
     // ★★ 2026-09-16 修（新 GT 定标：账号 941 件全 4★/5★、无任何 3★，却有 13 件
@@ -823,7 +850,7 @@ internal suspend fun ScanEngine.parseArtifactPanel(
             Log.i(
                 TAG,
                 "parsePanel 3★ 纳入导出：piece=${pieceName ?: "?"} slot=${slotKey ?: "?"} " +
-                    "main=${mainStat?.key ?: "?"} 词条=${substats.size}条 starCount=$starCount",
+                    "main=${mainStatKey ?: "?"} 词条=${substats.size}条 starCount=$starCount",
             )
         } else {
             Log.w(
@@ -852,17 +879,6 @@ internal suspend fun ScanEngine.parseArtifactPanel(
         substats = snapSubstats(substats, rarity, subDict)
     }
 
-    // set_name 反推（背包面板 set_name 被遮挡，用户定稿 2026-09-01）
-    // set_name 反推（背包面板 set_name 被遮挡，用户定稿 2026-09-01）：单件名 → 套装 id
-    // 件名→套装反推的词典取自 flow 的 dict.name（artifact_scan 已声明 mappings.artifactPieces）
-    val pieceDict = dict?.optString("name")?.takeIf { it.isNotEmpty() }
-    var setKey = pieceName?.let {
-        if (pieceDict != null) {
-            lookupName(pieceDict, it)
-        } else {
-            names?.match(it, GoodNames.Kind.PIECE)?.key
-        }
-    }
     // ★ A1'（2026-09-16）：把单件名规范化为**词典标准名**，供去重键使用（见内容键注释）。
     //   只影响"入键用的名字"，不改变 setKey 反推本身；词典未命中/未注入词典时回落原始名。
     // §14 P2-C3：管理界面面板 set_name **可读直采**（背包面板被遮挡，只能单件名反推）。
@@ -889,10 +905,57 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //   不可解 ⇒ 原样导出（宁缺不错）；解出后 initialValue 只在唯一时写入。
     // ★ 2026-09-16：带「(待激活)」标记一起送进 solver —— lv0 时 init 由标记直接定
     //   （GOODScanner result_init = num_active − count(inactive)），不再靠猜；且待激活条
-    //   **不计入 totalRolls**、导出时单列 `unactivatedSubstats`（GT 894/894 件都有该字段）。
+    //   **不计入 totalRolls**、导出时单列 `unactivatedSubstats`（894/894 件都有该字段）。
+    // ★ 2026-10-09（GS 对齐 P0-2，scanner.rs Phase 3）：首轮单候选失败 ⇒ **重裁重读产第二候选**——
+    //   每行右缘裁 8%/16% 各重读一次，新解析值并入该行候选列表，交给行候选枚举 solver。
+    //   现场 motivating：enerRech 5.8 误读 5.89（8→9 形近），单候选无解；重裁后读出 5.8 ⇒ 解出。
+    //   只在失败后触发（≈1% 的件），正常件零开销。
     val rollIn = substats.map { RollSolver.In(it.key, it.value, it.inactive) }
-    val solved = RollSolver.solve(rarity, vars.level, rollIn)
-    if (solved == null && substats.isNotEmpty()) RollSolver.logMiss(rarity, vars.level, rollIn)
+    var solved = RollSolver.solve(rarity, vars.level, rollIn)
+    if (solved == null && substats.isNotEmpty()) {
+        // ⚠️ 行对应关系：rollIn[i] 对应 subRects 前 N 行（parseBlock 是"连续块"读取，压缩尾部空行），
+        //    候选列表必须按 rollIn 构建而非 subRects.indices（3★ 件 subRects=4 行、rollIn 可能只有 2 条
+        //    —— 22:36 真机 IndexOutOfBounds 即此错位）。
+        val candidates = rollIn.indices.map { i -> mutableListOf(rollIn[i]) }
+        val ocrGateway = ocr
+        if (ocrGateway == null) {
+            RollSolver.logMiss(rarity, vars.level, rollIn)
+        } else {
+            for (cropPct in intArrayOf(8, 16)) {
+                val retryRects = rollIn.indices.map { i ->
+                    val r = subRects[i]
+                    val w = (r.width * (100 - cropPct) / 100).coerceAtLeast(20)
+                    FrameRect(r.left, r.top, r.left + w, r.bottom)
+                }
+                val retryTexts = try {
+                    ocrGateway.readRois(frame, retryRects)
+                } catch (e: Exception) {
+                    null
+                } ?: continue
+                var anyNew = false
+                for (i in rollIn.indices) {
+                    val t = retryTexts.getOrNull(i).orEmpty()
+                    if (t.isBlank()) continue
+                    val line = if (VoteJudges.substatRowPending(frame, subRects[i]) == true && !t.contains("待激活")) "$t（待激活）" else t
+                    val parsed = StatParser.parse(line, names) ?: continue
+                    val cand = RollSolver.In(parsed.key, parsed.value, parsed.inactive)
+                    if (candidates[i].none { it.key == cand.key && Math.abs(it.value - cand.value) < 0.01 }) {
+                        candidates[i].add(cand)
+                        anyNew = true
+                    }
+                }
+                if (anyNew) {
+                    solved = RollSolver.solve(rarity, vars.level, candidates)
+                    if (solved != null) {
+                        Log.i(TAG, "roll 重裁抢救成功（-$cropPct%）: " +
+                            candidates.joinToString("|") { c -> c.joinToString(",") { "${it.key}=${it.value}" } })
+                        break
+                    }
+                }
+            }
+            if (solved == null) RollSolver.logMiss(rarity, vars.level, rollIn)
+        }
+    }
     // ★ 2026-09-16（GT 定案）：`+0` 件末尾那行「待激活」词条 **要保留** —— Irminsul/GT 把它
     //   **单列**到 `unactivatedSubstats`（894/894 件都有该字段），不是丢弃。
     //   拆分优先级：① OCR 显式「(待激活)」标记（最准）② 无标记但 solver 推断出末尾一条是待激活
@@ -934,13 +997,15 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //   再按角色词典归一成 GOOD key（旅行者昵称等匹配不到就保留原文，与武器路径一致）。
     //   2026-10-05：文本改从上面的批量结果按下标取（原来这里自己再发一次单槽 OCR）。
     val equippedText = lines.getOrNull(equippedIdx).orEmpty()
+    // ★ 2026-10-09：词典 miss ⇒ 置空（与武器路径同口径，见上）——sat 门放行的描述片段
+    //   （若发生）不得以原文混进 location。
     val location = equippedOwnerOf(equippedText)
         ?.let { StatParser.clean(it) }
         ?.takeIf { it.isNotEmpty() }
         ?.let { raw ->
             val key = characterKeyOfDisplay(raw, dict)
-            if (key == null) Log.i(TAG, "artifact equip 未匹配角色词典: '$raw'（旅行者昵称等可在管理器页填）")
-            key ?: raw
+            if (key == null) Log.i(TAG, "artifact equip 未匹配角色词典: '$raw'（丢弃，不保留原文；昵称可在管理器页填）")
+            key
         }
         ?: ""
     if (location.isNotEmpty()) Log.d(TAG, "artifact location: '$location'（原文 '$equippedText'）")
@@ -952,8 +1017,7 @@ internal suspend fun ScanEngine.parseArtifactPanel(
         //   不可解时回落 OCR 原值（totalRolls 也为 null，口径一致）。
         level = solved?.solvedLevel ?: vars.level,
         rarity = rarity,
-        mainStatKey = mainStat?.key,
-        mainStatValue = mainStat?.value ?: 0.0,
+        mainStatKey = mainStatKey,
         substats = activSubs,
         unactivatedSubstats = unactSubs,
         lock = vars.locked == true,
@@ -981,11 +1045,23 @@ internal suspend fun ScanEngine.parseArtifactPanel(
             //      （"两件副词条完全一样"在游戏里基本不可能 ⇒ 这正是最可靠的判重依据。）
             level.toString(),
             mainStatKey,
-            mainStatValue.toString(),
             "L$lock",
-            "F$favorited",
+            // ★ 2026-10-09：favorited **归一成 Boolean** —— vars.favorited 是 Boolean?，astral vote
+            //   步没跑到（或投票 miss 前）时为 null，读到的面板为 false。同一件两次读一次 null 一次
+            //   false ⇒ "Fnull" ≠ "Ffalse" ⇒ contentKey 不同 ⇒ dedupe 漏拦（BS 全量 16:26 轮实证：
+            //   NightOfTheSkysUnveiling|sands 同件入库两次，导出 favorited 字段都不写 ⇒ 对账等价性
+            //   掩盖了键差异）。导出口径里 null 与 false 同形（都"未收藏"），键里也必须同形。
+            "F${favorited == true}",
             // 内容身份含**全部**读到的行（含待激活那条：它也是该件的真实数据，GT 单列导出）
-        ).joinToString("|") + "|" + substats.joinToString("|") { "${it.key}:${it.value}" }
+        ).joinToString("|") + "|" +
+            // ★ 2026-10-09：substats 段**按 (key,value) 排序后 join** —— 修 BS 全量对账抓到的
+            //   「同件入库两次」：同一物理件被重叠带读到两次，两次 OCR **行序**可能不同
+            //   （滚动中面板的 det 框序抖动），parseBlock 行序跟着变 ⇒ 行序敏感的 join 造出
+            //   两个不同的 contentKey ⇒ dedupe（seenArtifactKeys）拦不住；而导出走 solver 归一，
+            //   两条又变回逐字段一致 —— 对账就成了「多 1 件」。（身份键 lastCellIdentity 一直是
+            //   排序口径，两者此处对齐。）
+            substats.sortedWith(compareBy({ it.key }, { it.value }))
+                .joinToString("|") { "${it.key}:${it.value}" }
     }
     lastCellKey = contentKey
     // ★ 2026-09-16（新 GT 对账定标）：**垃圾条拦截** —— 实测导出 22 件是 setKey/词条全空的空壳
@@ -1042,9 +1118,38 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     // ★ 连续重复件判据：身份键用**与 dedupe 相同的 contentKey**（件名+等级+词条），
     //   不能只用件名 —— 同件名的不同圣遗物会被秒判重复。
     noteDupAndMaybeStop(contentKey, seenArtifactKeys)
+    // ★ 2026-10-09 诊断：把每条入库的 contentKey 打出来（I 级，全量 ~958 行可接受）——
+    //   BS 四轮里每轮冒一对「导出等价却双双入库」的件，favors 三态修掉后又现一对 ⇒
+    //   还有未知键差异源；有这行日志，下次复现可直接 diff 两条 key。
+    Log.i(TAG, "emit contentKey: $contentKey")
     if (dedupe && !seenArtifactKeys.add(contentKey)) {
         Log.d(TAG, "duplicate artifact skipped: $pieceName")
         return
+    }
+    // ★ 2026-10-09 终兜底（**只对 5★**）：BS 四轮全量每轮随机冒 1 对「导出逐字段一致却双双入库」
+    //   的 5★ 件（NightOfTheSkysUnveiling/ObsidianCodex……），F 归一后仍偶发——键差异源未定位
+    //   （logcat 环形缓冲把 flower|20 的 emit 行刷掉，无法 diff）。这里在**导出口径**上兜底：
+    //   与既有 5★ 件 setKey/slotKey/level/mainStatKey/lock/substats(排序) 全等 ⇒ 丢弃本条。
+    //   先验依据：GT 958 件里 5★ **零**同键对（词池大）；4★/低星同键多件是常态（指挥的礼帽等
+    //   成对真件，17:33 轮过杀 340+ 实证）⇒ 绝不能扩到 4★。
+    if (rarity == 5) {
+        val exportedKey = artifact.run {
+            listOf(setKey ?: "", slotKey ?: "", level.toString(), mainStatKey ?: "", lock.toString()) +
+                substats.sortedWith(compareBy({ it.key }, { it.value })).map { "${it.key}:${it.value}" }
+        }.joinToString("|")
+        // ⚠️ 这里必须显式 r. 前缀：run{} 里同名局部变量（setKey/slotKey/mainStatKey）会遮蔽
+        //   receiver 成员，导致 r 的键被当前格的值替换 ⇒ 误杀所有同词条件（23:19 冒烟 18 格
+        //   只入 1 件即此因）。
+        val dupOf = results.any { r ->
+            (listOf(
+                r.setKey ?: "", r.slotKey ?: "", r.level.toString(), r.mainStatKey ?: "", r.lock.toString(),
+            ) + r.substats.sortedWith(compareBy({ it.key }, { it.value })).map { "${it.key}:${it.value}" })
+                .joinToString("|") == exportedKey
+        }
+        if (dupOf) {
+            Log.w(TAG, "5★ contentKey 漏拦兜底：与已入库件导出键全等 ⇒ 丢弃（piece=$pieceName）")
+            return
+        }
     }
     results.add(artifact)
     listener.onProgress("artifact", vars.snapshot() + ("piece" to pieceName) + ("idx" to results.size))
