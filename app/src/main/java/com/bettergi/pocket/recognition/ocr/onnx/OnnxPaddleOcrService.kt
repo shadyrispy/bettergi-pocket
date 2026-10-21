@@ -182,9 +182,13 @@ class OnnxPaddleOcrService(
     }
 
     /**
-     * 批量 rec-only：按 rois 顺序逐槽识别，返回与 rois 一一对应的结果（无文本则空串、score=0）。
+     * 批量 rec-only：按 rois 顺序识别，返回与 rois 一一对应的结果（无文本则空串、score=0）。
      * 相比接口默认实现（逐个建子图再 recognizeWithoutDetector），这里直接按绝对坐标做 rec，
      * 省掉子图 Mat 头的创建/释放，且返回的 rect 保持原图绝对坐标。
+     *
+     * ★ 2026-10-12 #251：**按 scaledW 最优分组合批**（[planRecGroups]），组内右侧 pad 到组内最宽。
+     *   与 09-12 那次被回退的"全部并一批"不是一件事，见下面那段历史记录——它否掉的是**不分宽度全并**。
+     *   单行组走 [recognizeLine] 原路，shape 与旧实现逐字相同。
      */
     override fun recognizeRois(mat: Mat, rois: List<IntRect>): List<OcrResultRegion> {
         if (!engine.ready || mat.empty()) return rois.map { OcrResultRegion(it, "", 0f) }
@@ -199,16 +203,160 @@ class OnnxPaddleOcrService(
         //   精度结论：批量与逐槽**逐字段完全等价**（武器 36 件 vs 改动前 golden、圣遗物 20 件
         //   批量 vs 逐槽，均 100% 一致）⇒ 纯性能取舍，故回退。
         //   （若再试：仅当各槽 scaledW 彼此接近时才可能有收益，必须单独实测，勿凭直觉重上。）
+        //   ⚠️ 上面那两条根因**只否掉"不分宽度全并"**：①在"只并宽度接近的槽"下 pad 项趋零；
+        //   ②已由 PreprocWorkspace 的 grow-only 缓冲消掉（不再逐次分配）。而它是在 BS 上测的，
+        //   BS 的每次调用固定项 ≈1ms ⇒ 合批无钱可省；华为实测 56ms/次 ⇒ 同一笔账符号相反。
         val ws = acquireWorkspace()
         try {
-            return rois.map { roi ->
-                if (roi.isEmpty()) return@map OcrResultRegion(roi, "", 0f)
-                val line = recognizeLine(ws, mat, roi)
-                if (line == null || line.text.isBlank()) OcrResultRegion(roi, "", 0f)
-                else OcrResultRegion(roi, line.text, line.score)
+            val results = arrayOfNulls<OcrResultRegion>(rois.size)
+            // 空 ROI 不进组（与旧实现同口径：直接空结果）
+            val members = ArrayList<Int>(rois.size)
+            val widths = ArrayList<Int>(rois.size)
+            for (i in rois.indices) {
+                val r = rois[i]
+                if (r.isEmpty()) {
+                    results[i] = OcrResultRegion(r, "", 0f)
+                } else {
+                    members += i
+                    widths += scaledWidthFor(r.width, r.height)
+                }
             }
+            val labels = RecInferenceDump.labels()
+            for (group in planRecGroups(widths, recBatchFixedMs)) {
+                val rects = group.map { rois[members[it]] }
+                // 标签必须按**原始 rect 下标**切：组内行号 0..n 与调用内下标不是一回事
+                // （真机实测错过一次：合批的 4 行副词条被贴上 name/mainName/level/sub0）
+                val groupLabels = group.map { labels?.getOrNull(it).orEmpty() }
+                val lines = runRecGroup(ws, mat, rects, group.map { widths[it] }, groupLabels)
+                for (k in group.indices) {
+                    val idx = members[group[k]]
+                    val line = lines[k]
+                    results[idx] = if (line == null || line.text.isBlank()) {
+                        OcrResultRegion(rects[k], "", 0f)
+                    } else {
+                        OcrResultRegion(rects[k], line.text, line.score)
+                    }
+                }
+            }
+            return results.map { it ?: OcrResultRegion(IntRect(0, 0, 0, 0), "", 0f) }
         } finally {
             releaseWorkspace(ws)
+        }
+    }
+
+    /**
+     * 跑一组（同宽优先）ROI。单行组直接走 [recognizeLine] ⇒ 与旧逐槽路径**逐字同一条码路**。
+     *
+     * 合批失败（ORT 返回 null）时**回退逐行**：一次批失败会连带整组读空，而旧语义是
+     * "单槽失败 ⇒ 该槽空串、其余照常"；不回落的话一格 5 个槽一起变空，面板解析会当成读不到。
+     */
+    private fun runRecGroup(
+        ws: PreprocWorkspace,
+        src: Mat,
+        rects: List<IntRect>,
+        widths: List<Int>,
+        labels: List<String> = List(rects.size) { "" },
+    ): List<Line?> {
+        if (rects.size == 1) return listOf(recognizeLine(ws, src, rects[0], 0, labels[0]))
+        val wmax = widths.max()
+        val perRow = 3 * REC_H * wmax
+        val need = rects.size * perRow
+        if (ws.batchIn.size < need) ws.batchIn = FloatArray(need)
+        val dst = ws.batchIn
+        val t0 = System.nanoTime()
+        for (r in rects.indices) {
+            if (!preprocessRecRow(ws, src, rects[r], dst, r * perRow, wmax)) {
+                // 某行预处理失败（越界/空）⇒ 整组退回逐行，语义与旧实现一致
+                return rects.mapIndexed { i, r -> recognizeLine(ws, src, r, i, labels[i]) }
+            }
+        }
+        val t1 = System.nanoTime()
+        val decoded = ArrayList<Line?>(rects.size)
+        val input = FloatBuffer.wrap(dst, 0, need)
+        val batch = rects.size
+        val done = engine.runRecInto(input, wmax, batch) { buf, n ->
+            val t2 = System.nanoTime()
+            RecInferenceDump.noteInferNs(t2 - t1)
+            if (n > 0 && n % (batch * MODEL_CLASS_COUNT) == 0) {
+                val steps = n / (batch * MODEL_CLASS_COUNT)
+                val rowLen = steps * MODEL_CLASS_COUNT
+                val view = buf.duplicate()
+                for (r in 0 until batch) {
+                    view.position(r * rowLen)
+                    val res = CtcDecoder.decode(view, steps, MODEL_CLASS_COUNT, dict, declaredOutput = recOutputType)
+                    decoded += Line(rects[r], res.text, res.confidence)
+                }
+                OcrStageProbe.addBatch(batch, wmax, t1 - t0, t2 - t1, System.nanoTime() - t2)
+            }
+            // 输出长度对不上 ⇒ 一个都不 append（也不记账），让下面的 size 校验把整组退回逐行
+            Unit
+        }
+        if (done == null || decoded.size != batch) {
+            val call = RecInferenceDump.newCall()
+            if (call >= 0) {
+                RecInferenceDump.noteInferNs(System.nanoTime() - t1)
+                val err = engine.takeLastRunFailure() ?: "batch_run_null_or_output_mismatch"
+                for (r in rects.indices) {
+                    RecInferenceDump.recordRow(
+                        call, r, labels[r], rects[r], widths[r], wmax, batch, null, 0f, err,
+                        dst, r * perRow, wmax,
+                    )
+                }
+            }
+            return rects.mapIndexed { i, r -> recognizeLine(ws, src, r, i, labels[i]) }
+        }
+        val call = RecInferenceDump.newCall()
+        if (call >= 0) {
+            for (r in rects.indices) {
+                val line = decoded[r]
+                RecInferenceDump.recordRow(
+                    call, r, labels[r], rects[r], widths[r], wmax, batch,
+                    line?.text.orEmpty(), line?.score ?: 0f, null,
+                    dst, r * perRow, wmax,
+                )
+            }
+        }
+        return decoded
+    }
+
+    /**
+     * 单行 rec 预处理，写进批张量的第 [base] 行（NCHW，行内通道主序、每通道 `REC_H × [wmax]`）。
+     * 与 [preprocessRec] 的**非 pad 区域逐位一致**（同一串 convertTo → split → 整块读 → arraycopy），
+     * 差别只有两点：① 行宽按 [wmax] 铺（真实宽右侧补 [REC_PAD_FILL]）；② 目标数组由调用方给。
+     */
+    private fun preprocessRecRow(ws: PreprocWorkspace, src: Mat, rect: IntRect, dst: FloatArray, base: Int, wmax: Int): Boolean {
+        val w = src.cols()
+        val h = src.rows()
+        if (w <= 0 || h <= 0) return false
+        val x = rect.x.coerceIn(0, w - 1)
+        val y = rect.y.coerceIn(0, h - 1)
+        val rw = rect.width.coerceIn(1, w - x)
+        val rh = rect.height.coerceIn(1, h - y)
+        val bgr = ensureBgr(src) ?: return false
+        val ownedBgr = bgr !== src
+        val crop = Mat(bgr, Rect(x, y, rw, rh))
+        try {
+            val scaledW = scaledWidthFor(rw, rh)
+            Imgproc.resize(crop, ws.resized, Size(scaledW.toDouble(), REC_H.toDouble()), 0.0, 0.0, Imgproc.INTER_LINEAR)
+            ws.resized.convertTo(ws.floatMat, CvType.CV_32FC3, 1.0 / 127.5, -1.0)
+            Core.split(ws.floatMat, ws.planes)
+            val stride = scaledW * REC_H
+            if (ws.tmp.size < stride) ws.tmp = FloatArray(stride)
+            val tmp = ws.tmp
+            for (ch in 0 until 3) {
+                ws.planes[2 - ch].get(0, 0, tmp) // 输出通道序 R,G,B（与 toNchw 同）
+                val planeBase = base + ch * REC_H * wmax
+                var srcOff = 0
+                for (row in 0 until REC_H) {
+                    System.arraycopy(tmp, srcOff, dst, planeBase + row * wmax, scaledW)
+                    java.util.Arrays.fill(dst, planeBase + row * wmax + scaledW, planeBase + (row + 1) * wmax, REC_PAD_FILL)
+                    srcOff += scaledW
+                }
+            }
+            return true
+        } finally {
+            crop.release()
+            if (ownedBgr) bgr.release()
         }
     }
 
@@ -280,7 +428,7 @@ class OnnxPaddleOcrService(
      *  GC P0（工单 B）：logits（9 槽一轮 ≈10MB）免物化——CtcDecoder 直接顺序读 ORT 输出
      *  FloatBuffer（在张量 close 前消费完）；解码结果 Result 是不可变值对象，块外使用安全。
      *  判据与旧实现同口径：空输出/步数为 0 ⇒ null。 */
-    private fun recognizeLine(ws: PreprocWorkspace, src: Mat, rect: IntRect): Line? {
+    private fun recognizeLine(ws: PreprocWorkspace, src: Mat, rect: IntRect, slot: Int = 0, label: String = ""): Line? {
         // ★ 2026-10-05（P0 分段探针）：把一次 rec 拆成 pre（crop+resize+convertTo+split+3×JNI+3×copy）
         //   / run（建张量 + ORT session.run）/ dec（CTC 逐元素扫）三段记账，纯计数不改时序。
         //   回调入口时刻即 run 的终点（`runRecInto` 的契约：张量 close 前调用），故 run 不含解码。
@@ -291,12 +439,29 @@ class OnnxPaddleOcrService(
         val t1 = System.nanoTime()
         val decoded = engine.runRecInto(input, width) { buf, n ->
             val t2 = System.nanoTime()
+            RecInferenceDump.noteInferNs(t2 - t1)
             val steps = n / MODEL_CLASS_COUNT
             val r = if (n == 0 || steps <= 0) null
             else CtcDecoder.decode(buf, steps, MODEL_CLASS_COUNT, dict, declaredOutput = recOutputType)
             OcrStageProbe.add(t1 - t0, t2 - t1, System.nanoTime() - t2, width)
             r
-        } ?: return null
+        }
+        if (decoded == null) {
+            val call = RecInferenceDump.newCall()
+            if (call >= 0) {
+                RecInferenceDump.noteInferNs(System.nanoTime() - t1)
+                RecInferenceDump.recordRow(
+                    call, slot, label, rect, width, width, 1, null, 0f,
+                    engine.takeLastRunFailure() ?: "run_null_or_empty_output",
+                    ws.out, 0, width,
+                )
+            }
+            return null
+        }
+        val call = RecInferenceDump.newCall()
+        if (call >= 0) {
+            RecInferenceDump.recordRow(call, slot, label, rect, width, width, 1, decoded.text, decoded.confidence, null, ws.out, 0, width)
+        }
         return Line(rect, decoded.text, decoded.confidence)
     }
 
@@ -329,6 +494,12 @@ class OnnxPaddleOcrService(
         var tmp: FloatArray = FloatArray(0)
         /** NCHW 输出（grow-only；det 恒 3×640×640，rec 随宽度变化取最大） */
         var out: FloatArray = FloatArray(0)
+        /**
+         * #251 合批输入张量（grow-only，永不收缩）：`batch × 3 × REC_H × Wmax` 个 float。
+         * 峰值按圣遗物最优分组算（5 行 @413）= **4.99MB**；工作区池上限 [WS_POOL_MAX]=2 ⇒ 常驻上限 ~10MB。
+         * 不新建第二套缓冲：`out`/`tmp` 仍是逐行路径在用，这块只在 batch>1 时被写。
+         */
+        var batchIn: FloatArray = FloatArray(0)
 
         fun release() {
             detCanvas.release()
@@ -586,5 +757,63 @@ class OnnxPaddleOcrService(
          */
         fun scaledWidthFor(w: Int, h: Int): Int =
             ((w * REC_H.toFloat() / h.coerceAtLeast(1)).roundToInt()).coerceIn(1, REC_W_MAX)
+
+        /**
+         * #251 合批单价（华为 EML-AL00 实测，2026-10-12，`DEBUG_PERF_PROBE` 零张量 runs=30、
+         * 游戏前台、扫描未跑）：`rec w=145→136ms / 220→165 / 405→269 / 684→434`
+         * ⇒ 线性拟合 **每次调用固定 56ms + 0.55ms/（scaledW）px**（四点回代误差 ≤7%）。
+         * 对账生产：arm C `7.41 次/格 × 56 + 0.55 × 2286px = 1672ms/格` vs 实测 `run/格 1506ms` ⇒ 吻合 11%。
+         * 正文与推导：`dsl/verify/_audit/OCR-REC-BATCH-20261012.md`。
+         *
+         * ⚠️ 这两个数是**空闲态**测的：扫描中真实固定项大概率更高（对合批是利好），但线性项可能同涨
+         * ⇒ 落地的收益要按扫描中重测的曲线核，别拿这里当实测结论。
+         * 置 0 = 关合批（[planRecGroups] 退化成全部单行，与 #251 之前逐字同一条码路）⇒ 设备 A/B 的"关"臂。
+         */
+        @Volatile
+        internal var recBatchFixedMs = 56.0
+
+        /**
+         * 每个输入像素（scaledW 口径）的边际成本 ms，与 [recBatchFixedMs] 同一次实测拟合。
+         * ⚠️ 现在只作**记账/文档口径**用：[planRecGroups] 只并等宽槽（pad 恒为 0），
+         * 不再需要拿它去权衡"要不要跨宽合并"——那条被实测否掉了，见 [planRecGroups] 的 cliff 数据。
+         */
+        internal const val REC_BATCH_PER_PX_MS = 0.55
+
+        /**
+         * 合批时行右侧 pad 的填充值。归一化式是 `v/127.5 − 1` ⇒ **-1 = 纯黑**，
+         * 与 det 画布的 pad 约定一致（`preprocessDet`：pad 区归一化后为 -1，低概率、不产框）。
+         * ⚠️ 改这个值必须重跑 `OnnxRecBatchEquivalenceTest`：pad 列会进卷积与 CRNN 的双向注意力，
+         * 等价性不是显然的（09-12 那次"批量与逐槽逐字段等价"没记下当时用的哪个值）。
+         */
+        private const val REC_PAD_FILL = -1f
+
+        /**
+         * 按 scaledW 分组（#251）：**只并 scaledW 完全相等的槽**。
+         *
+         * 为什么不按"pad 成本 < 省下的固定项"去跨宽合并（那是最初的 DP 方案）——
+         * 实测有一道 **cliff**（`OnnxRecBatchEquivalenceTest.置信度漂移随 pad 宽度的量级`，
+         * 同一行内容裁成两个宽度并批，与各自单跑比置信度）：
+         *
+         * | pad 列数 | 0 | 7 | 14 | 29 | 59 | 88 |
+         * |---|---|---|---|---|---|---|
+         * | Δ置信度 | **2.1e-6** | 4.4e-2 | 3.8e-2 | 3.7e-2 | 2.5e-2 | 1.7e-2 |
+         *
+         * ⇒ **补 1 列就够把输出打偏四个数量级**（pad 列进了卷积与 CRNN 的双向层，会回灌到真实列）。
+         * 等宽批的 2e-6 是 ORT 换 batch 后 kernel 分块的浮点求和次序噪声，不是语义变化。
+         * 用户给的前提是"推理产出结果不变" ⇒ 跨宽合批出局，哪怕它按算术更省。
+         *
+         * 等宽组内 pad 恒为 0 ⇒ 合并无条件省 `(n−1) × fixed`。
+         * [fixedMs] ≤ 0 = 关合批（全部单行，逐字回到 #251 之前的码路）⇒ 设备 A/B 的"关"臂。
+         *
+         * @param widths 各 ROI 的 scaledW（调用方已滤掉空 ROI）
+         * @return 分组，每组是**入参 widths 的下标**列表（组内按下标升序 ⇒ 保持 ROI 原顺序）
+         */
+        internal fun planRecGroups(widths: List<Int>, fixedMs: Double): List<List<Int>> {
+            if (widths.isEmpty()) return emptyList()
+            if (fixedMs <= 0.0) return widths.indices.map { listOf(it) }
+            val byWidth = LinkedHashMap<Int, MutableList<Int>>()
+            for (i in widths.indices) byWidth.getOrPut(widths[i]) { ArrayList(4) } += i
+            return byWidth.values.toList()
+        }
     }
 }

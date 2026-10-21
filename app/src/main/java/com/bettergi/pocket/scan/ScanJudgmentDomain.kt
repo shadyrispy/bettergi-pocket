@@ -1364,41 +1364,44 @@ internal suspend fun ScanEngine.vote(
     // 单格共享帧：panel vote 复用 click 轮询的收敛帧（card vote 在 click 前且 ctx 帧为空，仍自抓）
     val frame = ctx?.acquire { freshFrame() } ?: freshFrame()
     try {
-        val yShift = if (vars.crafted) profile.zhushengShiftPx else 0
+        // ★ #69（design-docs §14.5）：pipe>0 时投票位写**本格暂存**，不写共享 vars ——
+        //   消费者此刻正在按上一格的 vars.crafted 决定祝圣 yShift，覆写它就是串格。
+        val sink = if (pipeCellVotesStaged) pipePendingVars else vars
+        val yShift = if (sink.crafted) profile.zhushengShiftPx else 0
         when (zoneKey) {
             // 网格类判据：坐标随页面相位偏移（prof = 偏移视图）
             "artifact.card.lockBadge" -> {
                 val r = VoteJudges.cardLockBadge(frame, prof, requireNotNull(gridKey), col, row)
-                vars.gridLocked = r.matched
+                sink.gridLocked = r.matched
             }
             "weapon.card.starStrip" -> {
                 val r = VoteJudges.weaponStarStrip(frame, prof, requireNotNull(gridKey), col, row)
-                vars.rarity = r.count
+                sink.rarity = r.count
                 Log.d(TAG, "vote starStrip c$r.count col=$col row=$row (D 诊断)")
             }
             "weapon.card.lockBadge" -> {
                 val r = VoteJudges.cardLockBadgeByZone(frame, prof, requireNotNull(gridKey), "weapon.card.lockBadge", col, row)
-                vars.locked = r.matched
+                sink.locked = r.matched
             }
             // panel 类判据：详情面板固定位置，用原始 profile（不随网格相位偏移）
             "artifact.panel.zhusheng" -> {
                 val zr = VoteJudges.panelZhusheng(frame, profile)
                 // 诊断：命中数 + 三点采样（排查"祝圣件没被识别"用；GT 实测本账号 20 件 elixerCrafted）
                 Log.i(TAG, "vote zhusheng matched=${zr.matched} hits=${zr.count}（≥${VoteJudges.Thresholds.BANNER_POINTS_REQUIRED}/3 且紫占比>${VoteJudges.Thresholds.BANNER_PURPLE_RATIO}）col=$col row=$row")
-                vars.crafted = zr.matched
+                sink.crafted = zr.matched
             }
             "artifact.panel.lock" -> {
                 // 双区判定：同一单件名可普通(锁徽 y)/祝圣(锁徽 y+shift)两种面板（2560 实测 744 vs 808），
                 // 任一区 gold 达阈即已锁；artifact_lock flow 不投 zhusheng，故弃 vars.crafted 改自动。
-                vars.locked = VoteJudges.panelLock(frame, profile, 0).matched ||
+                sink.locked = VoteJudges.panelLock(frame, profile, 0).matched ||
                     VoteJudges.panelLock(frame, profile, profile.zhushengShiftPx).matched
-                if (step.optString("as") == "curLock") vars.curLock = vars.locked
+                if (step.optString("as") == "curLock") sink.curLock = sink.locked
             }
             "artifact.panel.astral" -> {
-                vars.favorited = VoteJudges.panelAstral(frame, profile, yShift).matched
+                sink.favorited = VoteJudges.panelAstral(frame, profile, yShift).matched
             }
             "artifact.rarity" -> {
-                vars.rarity = VoteJudges.rarityFromBanner(frame, profile)
+                sink.rarity = VoteJudges.rarityFromBanner(frame, profile)
             }
             // ★ 2026-09-11：武器星级改由**详情面板星行**逐格判定（对齐圣遗物 starBand），
             //   取代卡片 starStrip —— 后者在 3★/4★ 边界抖动（同件两次读出 3★/4★，36 件中 10 件）。
@@ -1406,14 +1409,20 @@ internal suspend fun ScanEngine.vote(
             "weapon.panel.starBand" -> {
                 val panelStars = countStars(frame, "weapon_backpack")
                 if (panelStars > 0) {
-                    vars.rarity = panelStars
+                    // ★ #259：必须写 **sink** 而不是 vars。`vote()` 其余分支都走 sink（pipe>0 时
+                    //   sink = 生产者自持的暂存 ScanVars，随 job 快照给消费者），只有这两行漏改 ⇒
+                    //   生产者把 rarity 写进共享 vars，而 `pipeSend` 从暂存取到的是 **-1 哨兵**，
+                    //   消费者开头 `applyTo(vars)` 又把 -1 **盖回** 真值 ⇒ parseWeaponPanel 见 rarity<0
+                    //   直接 return ⇒ **BS 2244 实测 63 格全解析、0 件入库、`导出跳过：无已入库结果`**。
+                    //   与下面那条回退分支注释担心的"整档导出 0 件"是同一个后果，只是换了触发路径。
+                    sink.rarity = panelStars
                     Log.d(TAG, "weapon panel stars = $panelStars")
                 } else {
                     // ⚠️ 回退：profiles 未标定 `panels.weapon_backpack.starBand` 的分辨率档
                     //    （3200/2560 目前没有）⇒ 走回旧的卡片星带判据，避免 rarity=0 让
                     //    parseWeaponPanel 直接 return（**整档导出 0 件**）。
                     val r = VoteJudges.weaponStarStrip(frame, prof, requireNotNull(gridKey), col, row)
-                    vars.rarity = r.count
+                    sink.rarity = r.count
                     Log.d(TAG, "weapon panel stars unavailable → fallback card starStrip = ${r.count}")
                 }
             }

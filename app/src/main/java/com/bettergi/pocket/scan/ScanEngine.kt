@@ -728,7 +728,15 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      */
     internal var dupPageStreak = 0
 
-    /** 断言回卷所需的连续整页零新增页数（flow `stopWhen.dupPageConfirm`，默认 2；=1 恢复旧的立即停行为）。 */
+    /**
+     * 断言回卷所需的连续整页零新增页数（flow `stopWhen.dupPageConfirm`，默认 2；=1 恢复旧的立即停行为）。
+     *
+     * ⚠️ #219：唯一赋值点是 [stopWhenRegisterDuplicateStreak]，由 [runVisitBody] 按 flow 的
+     * `stopWhen mode=duplicateStreak` 步登记（**本格判据求值之前**），五条 flow 都带该步 ⇒
+     * 逐格第一次求值起读到的就是 flow 的声明值。登记之前只有两处读它：pagedGrid 入口日志与
+     * page0 idx0 的格级门（后者要 `charDupStreak` 带满整页重复才走到，新建引擎不可能）。
+     * flow 未声明 `dupPageConfirm` 时保持本默认 2（`stopWhen` 的 `optInt(…, 2)`）。
+     */
     internal var dupPageConfirm = 2
 
     /** 本页是否已做过回卷判定（同一页 item 级 + 格级两处调用只记账一次）。每页开头复位。 */
@@ -814,6 +822,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         val stopStep: JSONObject?,   // ★ S2b：本格 stopWhen 步（逐格步，判据要读本格 vars ⇒ 必须随 job）
         val panelKey: String,
         val idx: Int,                // 本格在 pageKeys/pageIdentities 的槽位（页末排水用）
+        val votes: CellVotes,        // ★ #69：本格投票位快照（生产者写 vars 会与消费者串格，见 CellVotes）
     ) {
         val cellKey: String get() = "$gridKey:$col:$row"
         // 消费者解析完成后回填（单消费者顺序执行，下一 job 解析前必已被生产者读取）：
@@ -832,6 +841,51 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     /** ★ S2b：本格 stopWhen 步（逐格步；生产者在下一格前非阻塞查 stopRequested）。 */
     internal var pipeStopStep: JSONObject? = null
     internal var pipeCellJobSent = false
+    /**
+     * ★ #69：本格投票位是否暂存在 [pipePendingVars]（`pipe>0` 的格开头为真，见 [CellVotes]；
+     * 走了 [pipeAdoptVotesInline] 就转假）。
+     * 若某格最终**没走管道**（`panel=char_profile` 的同步解析支），生产者在解析前把暂存值
+     * 回写 vars —— 该流程从不 send job ⇒ 没有消费者并发写 vars ⇒ 回写安全；
+     * 若两者同时出现（消费者已在跑）则不回写并记 W，宁可慢不可串格。
+     */
+    internal var pipeCellVotesStaged = false
+    /**
+     * 生产者的**投票暂存载体**（整只 [ScanVars]，只为让 [com.bettergi.pocket.scan.vote] 的
+     * `sink.crafted = …` 与同步路径同型）。只有 [CellVotes] 里那六个逐格字段会被写，
+     * 会话字段（plan/total/…）一律不碰 —— 交回与快照都只搬那六位。
+     */
+    internal val pipePendingVars = ScanVars()
+
+    /**
+     * visit 开头（每格一次）：`pipe>0` ⇒ 本格投票位暂存到 [pipePendingVars]，
+     * 由 [pipeSend] 随 job 交付消费者。`pipe=0` ⇒ 沿用共享 vars（同步路径零变化）。
+     */
+    internal fun pipeBeginCell() {
+        pipeCellVotesStaged = TimingOverrides.pipeDepth > 0
+    }
+
+    /**
+     * 本格**不走管道**（同步解析支，如 `panel=char_profile`）时把暂存投票位交回 vars，
+     * 使后续 stopWhen/emit 读到的仍是本格的值。
+     *
+     * ⚠️ 只在"没有消费者在跑"时交回：character_scan 全程不发 job ⇒ [pipeChannel] 恒 null。
+     * 若一条 flow 同时有角色面板与管道面板，这里会有活跃消费者正按它自己的格写 vars ⇒
+     * 两者互写就是本缺陷的原始形状，所以宁可不交回并记 W（可见退化，绝不静默串格）。
+     */
+    internal fun pipeAdoptVotesInline(gridKey: String?, col: Int, row: Int) {
+        if (!pipeCellVotesStaged) return
+        if (pipeChannel != null) {
+            Log.w(TAG, "pipe 投票位交回跳过：消费者在跑 grid=$gridKey col=$col row=$row（本格同步解析将读到滞后投票位）")
+            return
+        }
+        CellVotes.of(pipePendingVars).applyTo(vars)
+        pipeCellVotesStaged = false
+    }
+
+    /** 本格投票位的当前真值来源：暂存中取 [pipePendingVars]，否则取共享 vars（`pipe=0` 同步路径）。 */
+    internal fun currentCellVotes(): CellVotes =
+        CellVotes.of(if (pipeCellVotesStaged) pipePendingVars else vars)
+
     /**
      * ★ safetyGuard 降频缓存（②，2026-10-10 用户拍板）：守卫读「退出确认框」要一整帧 + 一次 OCR，
      * auto_equip 一次导航序列里 clickAt 前要跑 ~9 次 ⇒ 光守卫就 9 帧 + 9 OCR。
@@ -908,6 +962,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             parseStep = parseStep, emitStep = pipeEmitStep, stopStep = pipeStopStep,
             panelKey = panelKey,
             idx = idx,
+            votes = currentCellVotes(),
         )
         synchronized(pipeLock) { pipeInFlight++ }
         pipeCellJobSent = true
@@ -949,6 +1004,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             return
         }
         try {
+            // ★ #69（§14.5 根因）：本格投票位随 job 进来 —— pipe>0 时生产者的 vote 写的是
+            //   暂存位（不是共享 vars），所以这里必须自己装载，否则读到的就是**上一格**的值。
+            //   华为实测：vars.crafted 串格 ⇒ 祝圣 yShift(47px@2244) 被错加/漏加在别的格上，
+            //   等级读成 0、首条副词条被顶掉、末行读到套装名 ⇒ 内容键变 ⇒ 去重当成新件。
+            job.votes.applyTo(vars)
             if (job.panelKey == "weapon_backpack") {
                 parseWeaponPanel(job.crop, gw, job.parseStep.optJSONObject("dict"), job.origin)
             } else {
@@ -1011,6 +1071,38 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             out
         }
 
+    /**
+     * ★ #253：锚点早到交付（有界停等）。
+     *
+     * pipe>0 时生产者侧 `pageIdentities` 写的是从共享 vars 读到的竞态残留 ⇒ 跨页身份锚定
+     * 按构造恒不命中（真机实测多做 6.5% 功）。锚点只要本页 idx1/idx2 的身份，而此刻生产者
+     * 至多发出过本页前 3 格的 job ⇒ join 到在途清零的代价被积压深度封顶，且**每页只发生一次**
+     * （不是逐格）。**不摘取结果** —— pageKeys/curPageIds 的交付仍归页末 [pipeDrainResults]。
+     * 超时 / 未交付 ⇒ 对应格按「身份为空」处理，调用侧退回照常访问，绝不无限等。
+     */
+    internal suspend fun pipeAwaitAnchorIdentities(
+        page: Int,
+        idxs: IntArray,
+        budgetMs: Long = PAGE_WATCHDOG_MS,
+    ): Map<Int, String> {
+        if (pipeChannel == null) return emptyMap()
+        val until = clock() + budgetMs
+        while (synchronized(pipeLock) { pipeInFlight } > 0) {
+            if (clock() >= until) {
+                Log.w(
+                    TAG,
+                    "pipe 锚点早到交付：${budgetMs}ms 内在途 job 仍未清零（page=${page}）⇒ 未交付格按空身份处理，" +
+                        "锚定退回「照常访问」（消费者已死或取消未排空）",
+                )
+                return emptyMap()
+            }
+            delay(2)
+        }
+        return synchronized(pipeDoneLock) {
+            pipeDoneResults.filter { it.page == page && it.idx in idxs }
+                .associate { it.idx to (it.resultIdentity ?: "") }
+        }
+    }
 
     /** 取消（§6.1）：close 后消费者把缓冲 job 只释放裁片，不 emit/不记账。 */
     internal fun pipeCancel() {
@@ -1747,6 +1839,12 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             "weapon_tab" to "screens.weapon_backpack.tab",
             // 武器扫描开局归零：网格右下角「↑↓」排序方向钮（点两下强制重排+回顶）；缺该 profile 键⇒无字面坐标⇒安全跳过
             "weaponSort" to "screens.weapon_backpack.sort",
+            // ★ #255 圣遗物背包的「1≡」排序钮：点开「排序方式」弹窗，再点 `sortPopupConfirm` ⇒ 游戏重排并把列表拉回顶部。
+            //   2026-10-12 BS 2244 现场验：弹窗里**没有选中项**时点确认**不改排序规则**，只把视图回到顶
+            //   （回顶后首格=生之花「熔铸者的揣度」，与确认前的顺序一致；确认钮实测胶囊 (126,966)-(773,1043)）。
+            //   ⚠️ 只标了 2244/2560 两档：3200 没有 artifact_backpack 截图可量 ⇒ 该档缺键 ⇒ 链项无字面坐标
+            //   ⇒ `clickChainEntry` 打 W 后跳过（不猜坐标），代价是那一档等于没回顶。上 3200 前必须补量。
+            "artifactSort" to "screens.artifact_backpack.sortBtn",
             "tian" to "screens.char_interface.tianBtn",
             // 角色选择弹层收起钮：⚠️ 田在弹层态被弹层底栏覆盖，不能当开关用 → 必须点这个
             "弹层收起" to "zones.char_popup.collapse.rect",

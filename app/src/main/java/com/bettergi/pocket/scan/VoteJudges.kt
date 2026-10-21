@@ -63,8 +63,16 @@ object VoteJudges {
     val RED_LOCK = RgbPredicate(140, 255, 30, 140, 30, 140)
 
     /** 武器面板锁判据：`GOLD ∪ RED_LOCK` 任一命中（阈值同 `PANEL_LOCK_GOLD`）。 */
-    fun weaponLock(frame: Mat, profile: ScreenProfile): Result {
-        val rect = profile.rect("panels.weapon_backpack.lock")
+    /**
+     * 面板锁徽判据。★ #261：[origin] 是**裁片原点** —— 管道把 parse 搬到消费者后喂进来的是
+     * `job.crop`，而 `panels.weapon_backpack.lock` 是**全帧坐标** ⇒ 不平移就是对着错位置的像素
+     * 数金的/红的，恒判未锁（BS 实测：同步臂 63 件全 `lock=true`、管道臂全 `false`，
+     * 键序列与顺序完全一致，只差这一个字段）。
+     * 默认 `(0,0)` = 全帧，既有调用点行为零变化。
+     */
+    fun weaponLock(frame: Mat, profile: ScreenProfile, origin: FramePoint = FramePoint(0, 0)): Result {
+        val rect0 = profile.rect("panels.weapon_backpack.lock")
+        val rect = if (origin.x == 0 && origin.y == 0) rect0 else rect0.shiftedBy(-origin.x, -origin.y)
         val gold = countMatches(frame, rect, GOLD)
         val red = countMatches(frame, rect, RED_LOCK)
         val best = maxOf(gold, red)
@@ -430,26 +438,34 @@ object VoteJudges {
     fun gridThumb(frame: Mat, profile: ScreenProfile, gridKey: String): ByteArray? {
         val roi = gridRoiBounds(frame, profile, gridKey) ?: return null
         val sub = frame.submat(roi[1], roi[3], roi[0], roi[2])
-        val thumb = Mat()
-        Imgproc.resize(sub, thumb, Size(24.0, 16.0), 0.0, 0.0, Imgproc.INTER_AREA)
-        sub.release()
-        val out = ByteArray(thumb.rows() * thumb.cols() * 3)
-        // ★ P3（2026-10-01）性能改：24×16=384 次逐点 `thumb.get(y,x,buf)` JNI（settle 轮询每 120ms 一次）
-        //   ⇒ 改为**整行**读（countMatches 同手法），BGR→RGB 量化口径不变 ⇒ 输出逐位一致。
-        val rowBuf = ByteArray(thumb.cols() * 3)
-        var i = 0
-        for (y in 0 until thumb.rows()) {
-            thumb.get(y, 0, rowBuf)
-            var o = 0
-            for (x in 0 until thumb.cols()) {
-                out[i++] = ((rowBuf[o + 2].toInt() and 0xFF) shr 4).toByte() // R
-                out[i++] = ((rowBuf[o + 1].toInt() and 0xFF) shr 4).toByte() // G
-                out[i++] = ((rowBuf[o].toInt() and 0xFF) shr 4).toByte() // B
-                o += 3
+        return try {
+            val thumb = Mat()
+            try {
+                Imgproc.resize(sub, thumb, Size(24.0, 16.0), 0.0, 0.0, Imgproc.INTER_AREA)
+                val out = ByteArray(thumb.rows() * thumb.cols() * 3)
+                // ★ P3（2026-10-01）性能改：24×16=384 次逐点 `thumb.get(y,x,buf)` JNI（settle 轮询每 120ms 一次）
+                //   ⇒ 改为**整行**读（countMatches 同手法），BGR→RGB 量化口径不变 ⇒ 输出逐位一致。
+                val rowBuf = ByteArray(thumb.cols() * 3)
+                var i = 0
+                for (y in 0 until thumb.rows()) {
+                    thumb.get(y, 0, rowBuf)
+                    var o = 0
+                    for (x in 0 until thumb.cols()) {
+                        out[i++] = ((rowBuf[o + 2].toInt() and 0xFF) shr 4).toByte() // R
+                        out[i++] = ((rowBuf[o + 1].toInt() and 0xFF) shr 4).toByte() // G
+                        out[i++] = ((rowBuf[o].toInt() and 0xFF) shr 4).toByte() // B
+                        o += 3
+                    }
+                }
+                out
+            } finally {
+                // #225：`resize` 抛 CvException 时原来连 `thumb` 都不会释放，
+                // 而这条在 settle 轮询里每 120ms 跑一次 ⇒ 一次故障就是一串泄漏。
+                thumb.release()
             }
+        } finally {
+            sub.release()
         }
-        thumb.release()
-        return out
     }
 
     /**
@@ -462,20 +478,28 @@ object VoteJudges {
      */
     fun screenThumb(frame: Mat): ByteArray? = runCatching {
         val thumb = Mat()
-        Imgproc.resize(frame, thumb, Size(32.0, 18.0), 0.0, 0.0, Imgproc.INTER_AREA)
-        val out = ByteArray(thumb.rows() * thumb.cols() * 3)
-        val buf = ByteArray(3)
-        var i = 0
-        for (y in 0 until thumb.rows()) {
-            for (x in 0 until thumb.cols()) {
-                thumb.get(y, x, buf)
-                out[i++] = ((buf[2].toInt() and 0xFF) shr 4).toByte() // R
-                out[i++] = ((buf[1].toInt() and 0xFF) shr 4).toByte() // G
-                out[i++] = ((buf[0].toInt() and 0xFF) shr 4).toByte() // B
+        try {
+            Imgproc.resize(frame, thumb, Size(32.0, 18.0), 0.0, 0.0, Imgproc.INTER_AREA)
+            val out = ByteArray(thumb.rows() * thumb.cols() * 3)
+            val buf = ByteArray(3)
+            var i = 0
+            for (y in 0 until thumb.rows()) {
+                for (x in 0 until thumb.cols()) {
+                    thumb.get(y, x, buf)
+                    out[i++] = ((buf[2].toInt() and 0xFF) shr 4).toByte() // R
+                    out[i++] = ((buf[1].toInt() and 0xFF) shr 4).toByte() // G
+                    out[i++] = ((buf[0].toInt() and 0xFF) shr 4).toByte() // B
+                }
             }
+            out
+        } finally {
+            // #225：release 原先在 runCatching 块内且**排在读循环之后** ⇒ 中途抛 CvException
+            // 就泄一个 native Mat，而调用方只看到一个 null（returnToHome 的"点击有没有进展"
+            // 判据）—— 泄漏和"画面真没变"在下游同形。
+            thumb.release()
         }
-        thumb.release()
-        out
+    }.onFailure {
+        Log.w("BetterGI.Vote", "screenThumb 读失败 ⇒ 进度判据按「无读数」处理（returnToHome 会退回盲点计数）", it)
     }.getOrNull()
 
 /**

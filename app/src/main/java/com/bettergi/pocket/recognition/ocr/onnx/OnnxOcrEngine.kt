@@ -121,6 +121,14 @@ class OnnxOcrEngine(
     /** 诊断/单测观测：慢推理（成功但超阈值）累计次数 —— 只记指标，不参与降档（A8）。 */
     internal val slowInferCountTotal: Int get() = slowInferCount.get()
 
+    /**
+     * 仅供 [RecInferenceDump] 取证标注：最近一次 run 异常文本，[takeLastRunFailure] 取走即清空
+     * （避免读到陈旧失败）。并发两线程下可能被对方取走 —— 调试路径，接受。
+     */
+    private val lastRunFailure = java.util.concurrent.atomic.AtomicReference<String?>()
+
+    internal fun takeLastRunFailure(): String? = lastRunFailure.getAndSet(null)
+
     /** rec 模型文件路径（仅并行度探针 [OcrParallelProbe] 用来另建 N 个会话）。 */
     val recModelPath: String get() = recModel.absolutePath
 
@@ -307,24 +315,33 @@ class OnnxOcrEngine(
     }
 
     /**
-     * rec 推理：输入 float32[1,3,48,width]（width 随文本宽高比动态）→ logits float32[1,T,C]。
-     * ⚠️ 2026-09-12：曾尝试 batch N>1（各 ROI 右侧 pad 到同宽拼一个 batch）→ 实测**负优化**
+     * rec 推理：输入 float32[batch,3,48,width]（width 随文本宽高比动态）→ logits float32[batch,T,width/8,C]。
+     * ⚠️ 2026-09-12：曾尝试 batch N>1（**所有** ROI 右侧 pad 到同宽拼一个 batch）→ 实测**负优化**
      *   （武器 +7%、圣遗物 +17%：槽宽异质致计算量 `n·Wmax/Σw = 1.59×`，且每次需分配最大 3.5MB）
      *   ⇒ 已回退为逐行（N=1）。详见 OnnxPaddleOcrService.recognizeRois 的实测记录。
+     *   ★ 2026-10-12 #251：`batch` 参数保留给**按宽度最优分组**的调用方 —— 09-12 那次否掉的是
+     *   "全部并一批"，不是合批本身；判据与实测单价见 `dsl/verify/_audit/OCR-REC-BATCH-20261012.md`。
+     *   `batch=1` 时 shape 与旧实现逐字相同。
      */
-    fun runRec(input: FloatBuffer, width: Int): FloatArray =
-        runRecInto(input, width) { b, n -> FloatArray(n).also { b.get(it) } } ?: FloatArray(0)
+    fun runRec(input: FloatBuffer, width: Int, batch: Int = 1): FloatArray =
+        runRecInto(input, width, batch) { b, n -> FloatArray(n).also { b.get(it) } } ?: FloatArray(0)
 
     /**
      * GC P0（工单 B）：rec 推理的**免物化**版本。每次 run 后 `FloatArray(b.remaining())`
      * 物化 logits 每格 9 槽 ≈10MB + det ~1.6MB，是 OCR 链路第二大 GC 源；CTC 解码对
      * logits 是纯顺序读（逐时间步 argmax），直接消费 FloatBuffer 可完全免物化。
      * [consume] 在张量 close 前执行（buffer 随 close 失效）；旧 [runRec] 保留委托语义。
+     *
+     * 输出契约（batch>1 时调用方要按行切）：`remaining = batch × steps × C`，
+     * 行主序 ⇒ 第 r 行的绝对起点 `r × steps × C`，`steps = remaining / batch / C`。
      */
-    fun <T> runRecInto(input: FloatBuffer, width: Int, consume: (FloatBuffer, Int) -> T): T? {
+    fun <T> runRecInto(input: FloatBuffer, width: Int, batch: Int = 1, consume: (FloatBuffer, Int) -> T): T? {
         val out = sessionLock.read {
             val s = recSession ?: return@read null
-            runSessionWith(s, recInputName, input, longArrayOf(1, 3, REC_H.toLong(), width.toLong()), consume)
+            runSessionWith(
+                s, recInputName, input,
+                longArrayOf(batch.toLong(), 3, REC_H.toLong(), width.toLong()), consume,
+            )
         }
         maybeDegradeAfterFailure()
         return out
@@ -374,6 +391,7 @@ class OnnxOcrEngine(
         } catch (e: Throwable) {
             // 不静默吞：NNAPI 在某些 ROM 上会中途崩，日志是唯一线索
             Log.e(TAG, "ORT run failed (tier=${tier.label}, input=$inputName, shape=${shape.toList()})", e)
+            lastRunFailure.set("${e.javaClass.simpleName}: ${e.message}")
             // 真失败（异常/无效输出）→ 唯一进入降档失败窗的入口（A8）
             consecutiveFailures.incrementAndGet()
             null

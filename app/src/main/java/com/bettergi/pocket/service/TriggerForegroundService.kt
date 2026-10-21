@@ -389,6 +389,28 @@ class TriggerForegroundService : Service() {
                     Log.i(TAG, "panel shots: OFF（已落 ${dir?.listFiles()?.count { it.name.endsWith(".jpg") } ?: 0} 张）")
                 }
             }
+            ACTION_DEBUG_SET_REC_DUMPS -> {
+                // 开：建一个带时间戳的空目录挂到 RecInferenceDump，之后每次真实 rec 推理逐行落
+                // 输入像素图 + manifest（含空读/失败/回退重试）。
+                // 关：摘掉引用。**历史运行目录一律不删不压**（原始扫描证据规约），时间戳名即运行身份。
+                val on = intent.getBooleanExtra(EXTRA_ENABLED, false)
+                if (on) {
+                    val dir = java.io.File(
+                        getExternalFilesDir(null) ?: filesDir,
+                        "recdumps_" + java.text.SimpleDateFormat("MMdd_HHmmss_SSS", java.util.Locale.US)
+                            .format(java.util.Date()),
+                    )
+                    runCatching { dir.mkdirs() }
+                    if (dir.isDirectory) {
+                        com.bettergi.pocket.recognition.ocr.onnx.RecInferenceDump.start(dir)
+                        Log.i(TAG, "rec dumps: ON -> ${dir.absolutePath}")
+                    } else {
+                        Log.w(TAG, "rec dumps: 目录创建失败 ${dir.absolutePath}")
+                    }
+                } else {
+                    com.bettergi.pocket.recognition.ocr.onnx.RecInferenceDump.stop()
+                }
+            }
             ACTION_DEBUG_DUMP_INPUT -> {
                 // 输入库在 filesDir/scripts/good/current.json —— 模拟器上 `run-as` 被拒
                 // （setegid(AID_PACKAGE_INFO) Operation not permitted），只能由本进程自己拷到外置目录再 pull。
@@ -1067,6 +1089,13 @@ class TriggerForegroundService : Service() {
          * 到底是游戏侧真没换面板，还是我方误识别 —— 见 ScanEngine.dumpPanelShot。
          */
         const val ACTION_DEBUG_SET_PANEL_SHOTS = "com.bettergi.pocket.action.DEBUG_SET_PANEL_SHOTS"
+        /**
+         * 调试：逐**推理行**落盘「模型实际看到的输入像素」（`--ez enabled true|false`）。
+         * 落点 `<外置files>/recdumps_<MMdd_HHmmss_SSS>/`，含 `manifest.jsonl`（panel/field、ROI、
+         * scaledW、组宽与 pad、空读、文本、置信度、推理时长、异常）。与 panelshots 的分工：
+         * 那个证「帧新旧」，这个证「OCR 边界读到了什么」——见 RecInferenceDump。
+         */
+        const val ACTION_DEBUG_SET_REC_DUMPS = "com.bettergi.pocket.action.DEBUG_SET_REC_DUMPS"
         /** 调试：把设备上的 GOOD/配装计划文件复制成当前输入（`--es src /sdcard/xxx.json`）。 */
         const val ACTION_DEBUG_SET_GOOD = "com.bettergi.pocket.action.DEBUG_SET_GOOD"
         const val EXTRA_GOOD_SRC = "src"

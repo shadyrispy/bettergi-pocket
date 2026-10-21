@@ -71,6 +71,9 @@ internal fun ScanEngine.noteDupAndMaybeStop(identity: String?, seen: Collection<
         //    "点完一整页无新增、再翻一页、第一行仍无新增"。确认链本身保留，因为**它是真兜底**：
         //    单测实测把终止权收归件数之后，`ScanEngineDryRunTest` 7 个用例全部 180s 超时
         //    （mock 计数器 1026 而唯一件只有 21~42 ⇒ 件数永不达标、页数上限要 54 页）。
+        //    ⚠️ #219：`dupPageConfirm` 只有 `stopWhenRegisterDuplicateStreak` 一个赋值点，而它在
+        //    **本格 visit 开头**（[runVisitBody]）才登记 ⇒ pagedGrid 入口那行日志、以及 page0 idx0
+        //    那次格级门（要走到它得先攒满整页重复，新建引擎不可能）读到的都是默认 2。
         if (dupLimitEffective <= 0 || dupRollbackConfirmed()) {
             vars.stopRequested = true
             vars.stopReason = "stopWhen"
@@ -827,6 +830,10 @@ internal typealias NativeVisitRunner =
  * @param pipeEmit pipe>0 时 job 携带的 emit 步（原生常量 JSON；null = 本 visit 无 emit 步）。
  * @param pipeStop pipe>0 时 job 携带的 stopWhen 步——**取 visit 里第一条 stopWhen**
  *   （与原 JSON 路径 `firstOrNull { do == "stopWhen" }` 逐字对应，含其幂等重登记语义）。
+ *   ★ #219：这同一条 JSON 也是 `mode=duplicateStreak` 两个属性（`streak` / `dupPageConfirm`）的
+ *   **运行时读取源** —— 登记在 body 之前，所以本格 body 里的任何判据都读得到 flow 的声明值
+ *   （pagedGrid 的格级门在本格 body 之前，见 [ScanEngine.dupPageConfirm] 的说明）。
+ *   此前同步路径（pipe=0）根本没人读它，flow 的声明值只由各家 visit 体手写的字面量决定。
  */
 internal suspend fun ScanEngine.runVisitBody(
     gridKey: String,
@@ -844,7 +851,21 @@ internal suspend fun ScanEngine.runVisitBody(
         visitSkipTail = false
         pipeEmitStep = pipeEmit
         pipeStopStep = pipeStop
+        // ★ #219：flow 声明的 duplicateStreak 两个属性（streak / dupPageConfirm）在**本格 body 求值之前**
+        //   按 stopWhen 步的 JSON 登记一次。`stopWhen(step)` 只在 pipe>0 的消费者里跑（pipe=0 时这份
+        //   JSON 一个读者都没有），所以 flow 改 `dupPageConfirm` 过去只影响管道臂，同步臂读到的仍是
+        //   visit 体里手写的字面量。五条 flow 的 STOP_DUP 与其字面量逐值相同 ⇒ 本行不改变现有取值。
+        //   值没变就不进：登记本身幂等，但它那条 `stopWhen 登记` 是逐格的真实 logcat 写。
+        pipeStop?.takeIf { it.optString("mode") == "duplicateStreak" }?.let { step ->
+            val streak = step.optInt("streak", 3)
+            val confirm = step.optInt("dupPageConfirm", 2)
+            if (charDupStreakLimit != streak || dupPageConfirm != confirm) {
+                stopWhenRegisterDuplicateStreak(streak, confirm)
+            }
+        }
         pipeCellJobSent = false
+        // ★ #69：本格投票位改暂存（生产者接着投下一格会覆写共享 vars，消费者正用本格做几何）
+        pipeBeginCell()
         // ★ ②safetyGuard 降频：跨格边界失效守卫缓存（与原 runVisit 同源）
         safetyGuardCacheValid = false
         body(ctx)
@@ -1156,6 +1177,8 @@ internal suspend fun ScanEngine.visitParsePanel(
         // ⚠️ 2026-09-10 修：角色 visit 在 click 与 parsePanel 之间有 navigate(属性) 复位步骤，
         // 而 ctx 缓存的是 **navigate 之前**的帧 → 复用会读到旧页（天赋页 → name ROI 读到天赋名）。
         // 故角色面板一律取新帧（每次多 1 次抓帧，代价可忽略）。
+        // ★ #69：本格不发 job ⇒ 暂存的投票位就地交回 vars，后随 stopWhen/emit 才读本格的值。
+        pipeAdoptVotesInline(gridKey, col, row)
         parseCharacterPanel(step, null)
     } else if (TimingOverrides.pipeDepth > 0) {
         // ★ S2b（#69）管道路径：parsePanel 的**头部段**（指纹闸/取证）在生产者完成，
@@ -1199,6 +1222,9 @@ internal suspend fun ScanEngine.visitStopWhen(step: JSONObject) {
     if (TimingOverrides.pipeDepth > 0 && pipeCellJobSent) {
         Log.d(TAG, "stopWhen: 由流水线消费者求值（本格 job）")
     } else {
+        if (TimingOverrides.pipeDepth > 0 && pipeCellVotesStaged) {
+            Log.d(TAG, "stopWhen: 在生产者求值（本格未发 job ⇒ 读消费者最后装载的投票位，滞后 ≤ pipeDepth 格）")
+        }
         stopWhen(step)
     }
 }

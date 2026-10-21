@@ -877,7 +877,16 @@ internal fun ScanEngine.looksLikeTravelerName(s: String): Boolean =
     s.length <= 4 && s.contains('旅') && s.contains('者')
 
 /** 角色概览面板：name/level/header(元素) —— panels.char_profile。 */
-internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanEngine.CellFrameContext?) {
+internal suspend fun ScanEngine.parseCharacterPanel(
+    step: JSONObject,
+    ctx: ScanEngine.CellFrameContext?,
+    /** ★ 2026-10-10 交替页签序：true = 反序格天赋页的**预读**（header 出名字供 dedupeSkip 判定）。
+     *  天赋页上 name/level 矩形读的是天赋名/天赋等级（脏值）⇒ 只判 key、**不写角色草案字段**、
+     *  不进重读循环；正式采集由随后的属性页 parse 完成。 */
+    headerOnly: Boolean = false,
+) {
+    // 步声明可覆盖（visitParsePanel 经 step 传入，无需改调用点签名）
+    val headerOnlyEffective = headerOnly || step.optBoolean("headerOnly", false)
     val gateway = ocr
     if (gateway == null) {
         Log.w(TAG, "parseCharacterPanel: OCR 未接入，跳过")
@@ -886,11 +895,25 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
     val frame = ctx?.acquire { freshFrame() } ?: freshFrame()
     val owned = ctx?.frame != null
     try {
-        val rects = listOf(
-            profile.rect("panels.char_profile.name"),
-            profile.rect("panels.char_profile.level"),
-            profile.rect("panels.char_profile.header"),
-        )
+        // ★★ 2026-10-10 headerOnly 预读（交替序反序格）：**只读 header 一个矩形**——天赋页上
+        //   name/level 矩形是天赋名/天赋等级（脏值），bottomBar/titleBar 是属性页判据（天赋页无意义）
+        //   ⇒ 4 个矩形全是浪费的推理宽度。预读只需要 header 出名字判重。
+        //   正常格读 5 矩形：[0]=name [1]=level [2]=header [3]=bottomBar [4]=titleBar。
+        val rects = if (headerOnlyEffective) {
+            listOf(profile.rect("panels.char_profile.header"))
+        } else {
+            listOf(
+                profile.rect("panels.char_profile.name"),
+                profile.rect("panels.char_profile.level"),
+                profile.rect("panels.char_profile.header"),
+                // ★ 2026-10-10（合并 assert 进同帧读，省 2 次 freshFrame+OCR）：原流程 parse 之前
+                //   有两个 assertScreen——各 freshFrame + 单矩形 OCR，且 header 与 parse 的 header **重复读**。
+                //   合并后一帧读 5 矩形：[3]=bottomBar(属性页判据"提升指南") [4]=titleBar(元素判据)。
+                //   判定内联（onFail=continue 语义不变：未命中只打 W）。
+                profile.rect("panels.char_profile.bottomBar"),
+                profile.rect("screens._common.titleBar"),
+            )
+        }
         var texts = gateway.readRois(frame, rects)
         // 2026-09-10 诊断日志：name/level 在 app 内读空（离线 paddleocr 同源 ROI 能读）→ 打印原始输出与实际 ROI
         fun logRaw(tt: List<String>) = Log.d(
@@ -899,6 +922,16 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
                 "hdr='${tt.getOrElse(2) { "" }}' | rects=${rects.joinToString { "(${it.left},${it.top},${it.right},${it.bottom})" }}",
         )
         logRaw(texts)
+
+        // ★ 2026-10-10 assert 内联（原 assertScreen×2 → 同帧判定）：onFail=continue 语义不变，
+        //   未命中只打 W（不打断流程——与原 assertScreen 的 retries 重试不同，这里同一帧内
+        //   不再重试：parse 的名称重读循环本身就会再拿新帧，届时 bottomBar/titleBar 一并重判）。
+        run {
+            val attrOk = Regex("提升指南|升指南").containsMatchIn(texts.getOrElse(3) { "" })
+            val elOk = Regex("元素").containsMatchIn(texts.getOrElse(4) { "" })
+            if (!attrOk) Log.w(TAG, "char: 属性页判据未命中（bottomBar='${texts.getOrElse(3) { "" }}'）⇒ 继续")
+            if (!elOk) Log.w(TAG, "char: 元素判据未命中（titleBar='${texts.getOrElse(4) { "" }}'）⇒ 继续")
+        }
 
         /**
          * 本帧的 name / level / ascension / element 解析（抽成本地函数，供「名称未命中 ⇒ 重读」复用）。
@@ -964,18 +997,37 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
                     ?.also { Log.i(TAG, "char: 显示名 '$rn' 未命中词典/昵称表（元素=$el lv=$lv）⇒ 判为旅行者 $it") }
         }
 
-        var parsed = parseFrame(texts)
-        var rawName = parsed.first
-        var level = parsed.second
-        var element = parsed.third
-        var key = resolveKey(rawName, level, element)
+        // ★ 2026-10-10 headerOnly 分支（交替序反序格预读）：texts 只有 1 个元素 = header。
+        //   从 header 剥「X元素/名字」出名字段（NameMatcher 反向子串层兜尾裁），直接 resolveKey。
+        //   不走 parseFrame（其 tt[0]/tt[1] 在单元素 texts 下会错位成 header 读数）。
+        var rawName: String
+        var level: Int
+        var element: String?
+        var key: String?
+        if (headerOnlyEffective) {
+            val headerText = StatParser.clean(texts.getOrElse(0) { "" })
+            val headerCjk = Regex("[\\u4e00-\\u9fa5/／]+").findAll(headerText).map { it.value }.joinToString("")
+            element = Regex("^(.+?)元素").find(headerCjk)?.groupValues?.getOrNull(1)
+            // 名字段 = 斜杠后段（「水元素/芭芭拉」⇒「芭芭拉」）；无斜杠 = 整段（防 OCR 丢斜杠）
+            rawName = headerCjk.substringAfter('/', headerCjk)
+            level = 0 // level 在天赋页读不到（level 矩形是属性页专属）——headerOnly 不采 level
+            key = resolveKey(rawName, level, element)
+            Log.i(TAG, "char: headerOnly 预读 header='$headerText' ⇒ name='$rawName' el=$element key=$key")
+        } else {
+            var parsed = parseFrame(texts)
+            rawName = parsed.first
+            level = parsed.second
+            element = parsed.third
+            key = resolveKey(rawName, level, element)
+        }
         // ★ 2026-09-17：**名称/等级未取到 ⇒ 重读**（时序性读失败；重读不改变已成功的解析结果）
         var nTry = 1
         // ★ 2026-09-17：把「等级读数可疑」也纳入重读条件 —— 实测 Yaoyao 的 `等级70/90` 被读成 `7`
         //   ⇒ lv=7 却 >0，旧条件（key==null || level<=0）不会重读 ✗。
         //   等级 OCR 只会**欠读**（丢末位/首位）⇒ 重读时**逐次取 max** 是安全合并律；
         //   `< CHAR_LEVEL_MIN_PLAUSIBLE` 仅作触发条件（不参与取值）。
-        while ((key == null || level <= 0 || level < CHAR_LEVEL_MIN_PLAUSIBLE) && nTry < CHAR_NAME_MAX_TRIES) {
+        while (!headerOnlyEffective &&
+            (key == null || level <= 0 || level < CHAR_LEVEL_MIN_PLAUSIBLE) && nTry < CHAR_NAME_MAX_TRIES) {
             nTry++
             delay(CHAR_NAME_REREAD_MS)
             val f2 = runCatchingCancellable { settleFrame() }.getOrNull() ?: break
@@ -990,10 +1042,10 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
             }
             if (t2 != null) { texts = t2; logRaw(t2) }
             f2.release()
-            parsed = parseFrame(texts)
-            rawName = parsed.first
-            if (parsed.second > level) level = parsed.second   // 欠读方向确定 ⇒ 取 max
-            element = parsed.third
+            val p2 = parseFrame(texts)
+            rawName = p2.first
+            if (p2.second > level) level = p2.second   // 欠读方向确定 ⇒ 取 max
+            element = p2.third
             key = resolveKey(rawName, level, element)
             Log.i(TAG, "char: key/lv 可疑 ⇒ 重读 #$nTry name='$rawName' lv=$level el=$element ⇒ key=$key")
         }
@@ -1002,15 +1054,29 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
             //   对账侧会把它报成「多出一条」——这是**故意的**：宁可显式多一条待办
             //   （去管理器页补昵称，#105），也不要静默少两件。
             Log.w(TAG, "char: 显示名 '$rawName' 三档解析全未命中 ⇒ 按原文入库（lv=$level el=$element），请补昵称表")
+        } else if (!headerOnlyEffective && level <= 0) {
+            // 名字命中词典却读不出等级 ⇒ 重读打满后 level=0 会和真低等级件同形；出声（不改值）。
+            Log.w(
+                TAG,
+                "char: 角色名 '$rawName' 已命中但等级重读 $nTry 次仍读不出 ⇒ 回退 0" +
+                    "（字段=level 原文=「${texts.getOrElse(1) { "" }}」）",
+            )
         }
-        charName = key ?: rawName
-        charKey = key
-        lastCharKey = key
-        charLevel = level
-        val elGood = exportElement(key, element)
-        charElement = elGood
-        vars.level = level
-        Log.i(TAG, "char: name=${key ?: rawName} lv=$level element=$elGood（页头 OCR='$element'）")
+        if (headerOnlyEffective) {
+            // 反序格预读：只暂存 key（dedupeSkip 判定用）；草案字段留给属性页 parse 覆写
+            charKey = key
+            lastCharKey = key
+            Log.i(TAG, "char: headerOnly 预读 key=$key（rawName='$rawName'）——草案字段待属性页 parse")
+        } else {
+            charName = key ?: rawName
+            charKey = key
+            lastCharKey = key
+            charLevel = level
+            val elGood = exportElement(key, element)
+            charElement = elGood
+            vars.level = level
+            Log.i(TAG, "char: name=${key ?: rawName} lv=$level element=$elGood（页头 OCR='$element'）")
+        }
     } catch (e: OcrUnavailableException) {
         // ★ A7/G：函数级 catch 会把「OCR 引擎未就绪」吞成「跳过该格」（静默错数据）。
         //   引擎不可用是 loud 失败，必须放行（轨 E 已在 OcrGatewayImpl 侧显式抛出）。
@@ -1027,8 +1093,14 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
  * 步长 3px 抽样，避免逐像素遍历大 ROI。
  */
 internal suspend fun ScanEngine.readConstellation() {
-    val obj = profile.rawObject("panels.char_constellation") ?: return
-    val nodes = obj.optJSONArray("nodes") ?: return
+    val obj = profile.rawObject("panels.char_constellation")
+    val nodes = obj?.optJSONArray("nodes")
+    if (obj == null || nodes == null) {
+        // 未标定就直接 return ⇒ charConstellation 停在 resetCharDraft 给的 0 ⇒ 导出看起来像「C0」，
+        // 而 C0 是合法真值，读不到标定与读到 C0 完全同形。必须出声。
+        Log.w(TAG, "char: 命座页未标定（panels.char_constellation/nodes 缺失）⇒ 命座按 c0 入库（角色=${lastCharKey ?: "?"}）")
+        return
+    }
     val roi = obj.optInt("roi", 55)
     // ★ 2026-09-30 #124：饱和度阈值是**档位量**，允许 profile 用 `satMin` 覆盖（未声明的档位沿用基准值）。
     //   判据形式（逐节点绝对阈值 + 稳定轮询取 min）不变，变的只是每档 own 的数值。
@@ -1059,7 +1131,8 @@ internal suspend fun ScanEngine.readConstellation() {
     }
     val frame = try {
         freshFrame()
-    } catch (e: CancellationException) { throw e } catch (_: Exception) {
+    } catch (e: CancellationException) { throw e } catch (e: Exception) {
+        Log.w(TAG, "char: 命座取帧失败 ⇒ 无法采样，按 c0 入库（page=$curPageNo r${curCellRow}c$curCellCol 角色=${lastCharKey ?: "?"}）: ${e.message}")
         return
     }
     var lit = 0
@@ -1080,14 +1153,19 @@ internal suspend fun ScanEngine.readConstellation() {
                 val half = Math.max(1, profile.scale(roi, profile.scaleY) / 2)
                 var satSum = 0
                 var total = 0
-                var y = cy - half
+                // ★ 2026-10-11 性能：逐像素 `f.get(y,x)` 是每像素一次 JNI 调用（6 节点 × ~340px ≈
+                //   2000 次/帧，轮询 2~8 帧 ⇒ 每角色 4k~17k 次）。改**整行批量读**（一次 JNI 取一行，
+                //   行内下标采样），与 VoteJudges.countMatches / TemplateMatcher 的整行改法同源。
+                val rowBuf = ByteArray(3 * f.cols())
+                var y = (cy - half).coerceAtLeast(0)
                 while (y <= cy + half && y < f.rows()) {
-                    var x = cx - half
+                    f.get(y, 0, rowBuf)
+                    var x = (cx - half).coerceAtLeast(0)
                     while (x <= cx + half && x < f.cols()) {
-                        val px = f.get(y, x)   // BGR
-                        val b = px[0].toInt() and 0xFF
-                        val g = px[1].toInt() and 0xFF
-                        val r = px[2].toInt() and 0xFF
+                        val o = x * 3
+                        val b = rowBuf[o].toInt() and 0xFF
+                        val g = rowBuf[o + 1].toInt() and 0xFF
+                        val r = rowBuf[o + 2].toInt() and 0xFF
                         // ★ 简易饱和度 = max−min（0~255）：彩色图标高、白/灰/暗底低 ✓
                         satSum += maxOf(r, g, b) - minOf(r, g, b)
                         total++
@@ -1148,7 +1226,8 @@ internal suspend fun ScanEngine.readConstellation() {
             if (sat >= th) lit++
             if (PANEL_RAW_DUMP) Log.i(TAG, "char.constellation node#$i sat=$sat th=$th lit=${sat >= th}")
         }
-    } catch (e: CancellationException) { throw e } catch (_: Exception) {
+    } catch (e: CancellationException) { throw e } catch (e: Exception) {
+        Log.w(TAG, "char: 命座采样异常 ⇒ 计数可能不完整，按已采 lit=$lit 入库（角色=${lastCharKey ?: "?"}）: ${e.message}")
     } finally {
         frame.release()
     }
@@ -1366,6 +1445,15 @@ internal suspend fun ScanEngine.readTalent() {
                 }
             }
         }
+    }
+    // 战斗天赋真值恒 ≥1（GT 最小 1）⇒ 重读打满后仍是 0 = 这一行根本没读到，不是读到 0 级。
+    // applyConstellationTalentBonus 对 0 行只跳不减，导出会带一个 0，与真低天赋同形，必须出声。
+    if (charTalents.any { it <= 0 }) {
+        Log.w(
+            TAG,
+            "char: 天赋重读 $attempts 次后仍有未读出行 ⇒ 该行按 0 入库" +
+                " ｜ 取值=${charTalents.toList()} ｜ 原文=${texts.take(3).map { "'" + it + "'" }}",
+        )
     }
     // ── ★ 2026-10-01 #155：命座天赋加成改**数据驱动**（GOODScanner `adjust_talents` 同法）──
     //   旧实现是一张 GT 监督反推的手表（51 角色 ×「本账号当时那一档命座」），换个命座档就查不到 ⇒

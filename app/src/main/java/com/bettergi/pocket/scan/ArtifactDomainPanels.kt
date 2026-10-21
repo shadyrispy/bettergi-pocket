@@ -30,6 +30,7 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.crossPageOverlap
 import com.bettergi.pocket.scan.ScanEngine.Companion.equippedOwnerOf
 import com.bettergi.pocket.scan.ScanEngine.Companion.panelShotDir
 import com.bettergi.pocket.recognition.name.GoodNames
+import com.bettergi.pocket.recognition.ocr.onnx.RecInferenceDump
 import kotlinx.coroutines.delay
 import org.opencv.imgcodecs.Imgcodecs
 
@@ -465,7 +466,7 @@ internal suspend fun ScanEngine.parseWeaponPanel(
         //   真机核对：`panels.weapon_backpack.equipped`=[2305,1163,2685,1217] 精确套住「珐露珊已装备」✓
         sh(profile.rect("$base.equipped")),
     )
-    val texts = ocr.readRois(frame, rects)
+    val texts = readRoisLabelled(ocr, frame, rects, "weapon_backpack", listOf("name", "level", "refine", "equipped"))
     fun at(i: Int): String? = texts.getOrNull(i)?.takeIf { it.isNotBlank() }
     val pieceName = at(0)?.let { StatParser.clean(it) }
     val levelText = at(1)
@@ -499,7 +500,16 @@ internal suspend fun ScanEngine.parseWeaponPanel(
             names?.match(it, GoodNames.Kind.WEAPON, dictFuzzyOf(dict))?.key
         }
     }
-    val level = levelText?.let { StatParser.extractValue(it)?.toInt() } ?: 0
+    val parsedLevel = levelText?.let { StatParser.extractValue(it)?.toInt() }
+    if (parsedLevel == null && key != null) {
+        // 名字命中词典（是真武器）却读不出等级 ⇒ level=0 会一路喂进 ascension/去重键，与真 0 级件同形。
+        Log.w(
+            TAG,
+            "weapon level 读不出 ⇒ 回退 0（page=$curPageNo r${curCellRow}c$curCellCol " +
+                "武器=${pieceName ?: "?"} 字段=level 原文=${levelText ?: "-"}）",
+        )
+    }
+    val level = parsedLevel ?: 0
     if (pieceName != null && key == null) {
         // #188 计数器：只数"**像一件武器**却查不到词典"的格。两个门槛都是结构性的，不靠名单：
         //   · rarity>=3 —— 见 [weaponDictMiss] 的 KDoc；
@@ -527,7 +537,17 @@ internal suspend fun ScanEngine.parseWeaponPanel(
     // ★ 2026-09-17 对齐 GT：**`refine` 读不到时视作 1**
     //   3★ 及以下武器**没有精炼机制** ⇒ 面板无「精炼N阶」⇒ OCR 读空 ⇒ null ✗
     //   而 GT 对这类写 `refinement: 1` ✓ ⇒ 否则键 `(DebateClub,1,null)` ≠ GT `(DebateClub,1,1)`
-    val refine = refineText?.let { StatParser.extractValue(it)?.toInt() } ?: 1
+    val parsedRefine = refineText?.let { StatParser.extractValue(it)?.toInt() }
+    // rarity>=4 才有精炼机制；这类读空回退 1 会把真 R5 静默降成 R1，必须出声。
+    // rarity<=3 无精炼栏（面板就没有「精炼N阶」），回退 1 是 GT 正解，不报。
+    if (parsedRefine == null && vars.rarity >= 4) {
+        Log.w(
+            TAG,
+            "weapon refine 读不出 且 rarity=${vars.rarity} ⇒ 回退 1（page=$curPageNo r${curCellRow}c$curCellCol " +
+                "武器=${pieceName ?: "?"} 字段=refine 原文=${refineText ?: "-"}）",
+        )
+    }
+    val refine = parsedRefine ?: 1
     val rarity = vars.rarity  // vote zone weapon.card.starStrip 已设
     if (rarity < 1 || rarity > 5) return
     if (key == null) return
@@ -659,7 +679,7 @@ internal suspend fun ScanEngine.parseWeaponPanel(
         level = level,
         rarity = rarity,
         refine = refine,
-        lock = VoteJudges.weaponLock(frame, profile).matched,
+        lock = VoteJudges.weaponLock(frame, profile, origin).matched,
         location = location,
         ascension = ascension,
     )
@@ -751,11 +771,17 @@ internal suspend fun ScanEngine.parseArtifactPanel(
         runCatchingCancellable { profile.rect("panels.$panelKey.equipped") }.getOrNull()?.let { sh(it) }
     } else null
     val equippedIdx = 3 + subRects.size + (if (setNameRect != null) 1 else 0)
-    val lines = ocr.readRois(
+    val parseRects = listOf(nameRect, mainNameRect, levelRect) + subRects +
+        (if (setNameRect != null) listOf(setNameRect) else emptyList()) +
+        (if (equippedRect != null) listOf(equippedRect) else emptyList())
+    val lines = readRoisLabelled(
+        ocr,
         frame,
-        listOf(nameRect, mainNameRect, levelRect) + subRects +
-            (if (setNameRect != null) listOf(setNameRect) else emptyList()) +
-            (if (equippedRect != null) listOf(equippedRect) else emptyList()),
+        parseRects,
+        panelKey,
+        listOf("name", "mainName", "level") + subRects.indices.map { "sub$it" } +
+            (if (setNameRect != null) listOf("setName") else emptyList()) +
+            (if (equippedRect != null) listOf("equipped") else emptyList()),
     )
 
     // 件名 + 主词条（blank → null，保持原单槽 readLines 语义）
@@ -770,7 +796,17 @@ internal suspend fun ScanEngine.parseArtifactPanel(
 
     // 等级（祝圣面板 yShift）；下标 2 = name(0) 之后（slot/mainValue 槽已删）
     val levelText = lines.getOrNull(2)?.takeIf { it.isNotBlank() }
-    vars.level = levelText?.let { StatParser.extractValue(it)?.toInt() } ?: 0
+    val parsedLevel = levelText?.let { StatParser.extractValue(it)?.toInt() }
+    if (parsedLevel == null && pieceName != null) {
+        // 有件名却读不出等级 ⇒ 和「读对一个 0 级件」在导出里长得一模一样（0 会一路喂进 RollSolver
+        // 的 vars.level），必须出声。只在件名非空时报，避免最后一夜半空格的空读格刷屏。
+        Log.w(
+            TAG,
+            "artifact level 读不出 ⇒ 回退 0（page=$curPageNo r${curCellRow}c$curCellCol " +
+                "件=${pieceName ?: "?"} 字段=level 原文=${levelText ?: "-"}）",
+        )
+    }
+    vars.level = parsedLevel ?: 0
 
     // 星带逐格（⚠️整带列投影 5★ 会合并，必须逐格；祝圣 yShift 不作用于星带——profiles zhusheng.fields 仅 level/subStats/lock/astral）
     val starCount = countStars(frame, panelKey, origin)
@@ -793,6 +829,10 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //   JPEG 有损下仍完美分离）。判得 pending ⇒ 给该行文本补上与 OCR 时代相同的
     //   「（待激活）」标记 ⇒ 下游 StatParser/RollSolver/GoodExporter 语义零改动
     //   （拆分优先级①的标记来源从 OCR 换成颜色；ROI 收窄同时把 rec Σw 砍 ~27%）。
+    // ★ 2026-10-10 #244：那次收窄把 2244 档推到 278 宽，正好把 6 字标签行「元素充能效率」的
+    //   % 裁在 ROI 外（华为 304 次读数 0 次带 % ⇒ #243 的 123 格解不出）。右缘已按 2560 基准
+    //   摆回，**长标签行的「（待」会重新进文本**：StatParser 要 contains(待激活) 整串才置位，
+    //   截断后缀既不污染数值也不与颜色判据冲突（2244 档短标签行一直如此，实测无害）。
     val judgedSubLines = (0 until subRects.size).map { i ->
         val t = lines.getOrNull(3 + i).orEmpty()
         if (t.isBlank()) t else when (VoteJudges.substatRowPending(frame, subRects[i])) {
@@ -917,43 +957,55 @@ internal suspend fun ScanEngine.parseArtifactPanel(
         //    候选列表必须按 rollIn 构建而非 subRects.indices（3★ 件 subRects=4 行、rollIn 可能只有 2 条
         //    —— 22:36 真机 IndexOutOfBounds 即此错位）。
         val candidates = rollIn.indices.map { i -> mutableListOf(rollIn[i]) }
-        val ocrGateway = ocr
-        if (ocrGateway == null) {
-            RollSolver.logMiss(rarity, vars.level, rollIn)
-        } else {
-            for (cropPct in intArrayOf(8, 16)) {
-                val retryRects = rollIn.indices.map { i ->
-                    val r = subRects[i]
-                    val w = (r.width * (100 - cropPct) / 100).coerceAtLeast(20)
-                    FrameRect(r.left, r.top, r.left + w, r.bottom)
-                }
-                val retryTexts = try {
-                    ocrGateway.readRois(frame, retryRects)
-                } catch (e: Exception) {
-                    null
-                } ?: continue
-                var anyNew = false
-                for (i in rollIn.indices) {
-                    val t = retryTexts.getOrNull(i).orEmpty()
-                    if (t.isBlank()) continue
-                    val line = if (VoteJudges.substatRowPending(frame, subRects[i]) == true && !t.contains("待激活")) "$t（待激活）" else t
-                    val parsed = StatParser.parse(line, names) ?: continue
-                    val cand = RollSolver.In(parsed.key, parsed.value, parsed.inactive)
-                    if (candidates[i].none { it.key == cand.key && Math.abs(it.value - cand.value) < 0.01 }) {
-                        candidates[i].add(cand)
-                        anyNew = true
-                    }
-                }
-                if (anyNew) {
-                    solved = RollSolver.solve(rarity, vars.level, candidates)
-                    if (solved != null) {
-                        Log.i(TAG, "roll 重裁抢救成功（-$cropPct%）: " +
-                            candidates.joinToString("|") { c -> c.joinToString(",") { "${it.key}=${it.value}" } })
-                        break
-                    }
+        var cropTried = 0
+        var newCands = 0
+        for (cropPct in intArrayOf(8, 16)) {
+            cropTried++
+            val retryRects = rollIn.indices.map { i ->
+                val r = subRects[i]
+                val w = (r.width * (100 - cropPct) / 100).coerceAtLeast(20)
+                FrameRect(r.left, r.top, r.left + w, r.bottom)
+            }
+            val retryTexts = try {
+                ocr.readRois(frame, retryRects)
+            } catch (e: Exception) {
+                Log.w(
+                    TAG,
+                    "roll 重裁抢救 裁法 -$cropPct% 重读异常 ⇒ 跳过该裁法" +
+                        "（page=$curPageNo r${curCellRow}c$curCellCol 件=${pieceName ?: "?"}）: ${e.message}",
+                )
+                null
+            } ?: continue
+            var anyNew = false
+            for (i in rollIn.indices) {
+                val t = retryTexts.getOrNull(i).orEmpty()
+                if (t.isBlank()) continue
+                val line = if (VoteJudges.substatRowPending(frame, subRects[i]) == true && !t.contains("待激活")) "$t（待激活）" else t
+                val parsed = StatParser.parse(line, names) ?: continue
+                val cand = RollSolver.In(parsed.key, parsed.value, parsed.inactive)
+                if (candidates[i].none { it.key == cand.key && Math.abs(it.value - cand.value) < 0.01 }) {
+                    candidates[i].add(cand)
+                    anyNew = true
+                    newCands++
                 }
             }
-            if (solved == null) RollSolver.logMiss(rarity, vars.level, rollIn)
+            if (anyNew) {
+                solved = RollSolver.solve(rarity, vars.level, candidates)
+                if (solved != null) {
+                    Log.i(TAG, "roll 重裁抢救成功（-$cropPct%）: " +
+                        candidates.joinToString("|") { c -> c.joinToString(",") { "${it.key}=${it.value}" } })
+                    break
+                }
+            }
+        }
+        if (solved == null) {
+            Log.w(
+                TAG,
+                "roll 重裁抢救失败（跑了 $cropTried 种裁法、新增候选 $newCands 个仍未解出）: " +
+                    "page=$curPageNo r${curCellRow}c$curCellCol 件=${pieceName ?: "?"} rarity=$rarity level=${vars.level} " +
+                    "候选=" + candidates.joinToString("|") { c -> c.joinToString(",") { "${it.key}=${it.value}" } },
+            )
+            RollSolver.logMiss(rarity, vars.level, rollIn)
         }
     }
     // ★ 2026-09-16（GT 定案）：`+0` 件末尾那行「待激活」词条 **要保留** —— Irminsul/GT 把它
@@ -1252,3 +1304,16 @@ internal fun ScanEngine.countStars(
     }
     return count
 }
+/**
+ * 带字段标签的批量读：**取证开关关着时一个标签表都不构造**（热路径零分配、零 ThreadLocal 写），
+ * 开着时才把 panel + 逐槽标签带到推理边界，让每行推理图/manifest 行带上「哪一格的哪个字段」。
+ */
+private suspend fun readRoisLabelled(
+    ocr: OcrGateway,
+    frame: Mat,
+    rects: List<FrameRect>,
+    panel: String,
+    labels: List<String>,
+): List<String> =
+    if (!RecInferenceDump.isOpen) ocr.readRois(frame, rects)
+    else RecInferenceDump.withFields(panel, labels) { ocr.readRois(frame, rects) }

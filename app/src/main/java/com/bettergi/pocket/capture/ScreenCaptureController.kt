@@ -53,7 +53,7 @@ class ScreenCaptureController(
 
     // ---- GC P0（工单 A）：poller 侧常驻转换缓冲 ----
 
-    /** poller 线程私有的 RGBA 4 通道中转 Mat（线程封闭，无并发；见 convertAndPublishFrame）。 */
+    /** RGBA 4 通道中转 Mat（惰性转换时使用，消费线程持有；见 acquireLatestBgr 惰性转换段）。 */
     private var pollStageRgba: Mat? = null
 
     /**
@@ -127,7 +127,6 @@ class ScreenCaptureController(
                             if (plane != null) {
                                 val rowBytes = w * plane.pixelStride
                                 val size = h * rowBytes
-                                var rgbaSnap: ByteArray? = null
                                 synchronized(lock) {
                                     if (cachedRgba.size != size) cachedRgba = ByteArray(size)
                                     MatOps.copyRgbaImage(image, cachedRgba)
@@ -137,16 +136,14 @@ class ScreenCaptureController(
                                     cachedTimestampNs = image.timestamp
                                     hasCachedFrame = true
                                     lastFrameElapsedMs = SystemClock.elapsedRealtime()
-                                    // GC P0（工单 A）：快照引用（poller 单线程写，转换段在锁外
-                                    // 读完之前不会有下一圈拷进来——顺序执行天然互斥）。
-                                    rgbaSnap = cachedRgba
+                                    // ★ 2026-10-11 惰性转换（方案 A）：poller **只拷 RGBA 快照**，
+                                    //   不再整帧 RGBA→BGR。原实现每产一帧转一次（8ms 轮询下
+                                    //   60-120 帧/s × 7.3MB 转换 ≈ 124% 小核 CPU），而消费端
+                                    //   （OCR/assert/settle）每秒只取 2-5 帧 ⇒ 转换量是消费量的
+                                    //   20-60 倍。现在转换挪到 [acquireLatestBgr]（消费时才转一次），
+                                    //   省下的 ~100% 小核配额直接给 OCR 推理。
+                                    pendingRgbaDirty = true
                                 }
-                                // GC P0（工单 A）：RGBA→BGR 转换移到**轮询线程自身**、锁外执行：
-                                // 每个新帧只转换一次（旧行为是每次 acquireLatestBgr 调用各转一次，
-                                // TriggerEngine 100ms tick + 扫描 settle 轮询叠加出每秒数十次），
-                                // 转换结果发布进小型 BGR 槽池，调用方按引用取走（见 acquireLatestBgr）。
-                                // 失败只丢本帧，不影响线程存活（与拷帧段同一 catch 兜底）。
-                                convertAndPublishFrame(w, h, image.timestamp, rgbaSnap)
                                 if (!firstFrameLogged) {
                                     firstFrameLogged = true
                                     Log.i(TAG, "first frame acquired ${w}x$h ts=${image.timestamp}")
@@ -346,7 +343,7 @@ class ScreenCaptureController(
      * - 旧 A28 的「快照 + 代数复核 + 重试」 dance 在这里**结构性消失**，原因（本工单的
      *   核心正确性论证）：旧路径的转换源是 poller 会原地覆写的 `cachedRgba`，快照读到一半
      *   可能被同尺寸新帧覆盖 ⇒ 必须靠时间戳复核排除撕裂帧。新路径转换源由 poller 独占
-     *   （见 [convertAndPublishFrame]），发布进池的 BGR 槽在「已发布」期间**绝不会被
+     *   （见 [acquireLatestBgr] 的惰性转换段），发布进池的 BGR 槽在「已发布」期间**绝不会被
      *   poller 写入**（poller 只取「非当前发布 + outstanding==0」的槽来写下一帧），调用方
      *   在持引用期间看到的是一帧完整、不可变的像素 ⇒ 单次临界区内取引用 + 计数已天然
      *   原子，无需复核重试。旧路径「复核打满放行未复核撕裂帧」的病态分支随之不复存在
@@ -362,6 +359,38 @@ class ScreenCaptureController(
         synchronized(lock) {
             ensureFramePollerLocked()
             maybeRecoverStalledReaderLocked()
+            // ★ 2026-10-11 惰性转换（方案 A）：消费时才把 RGBA 快照转成 BGR 入槽池。
+            //   转换在 [lock] 内（~3ms 整帧 memcpy；poller 拷帧同持锁，天然互斥），
+            //   poller 下一圈会覆写 cachedRgba——已转换完成的快照被覆写无害（dirty 已清）。
+            if (pendingRgbaDirty && hasCachedFrame) {
+                var slot: BgrSlot? = null
+                try {
+                    slot = takeFreeSlotLocked(cachedWidth, cachedHeight)
+                    var stage = pollStageRgba
+                    if (stage == null) {
+                        stage = Mat(cachedHeight, cachedWidth, CvType.CV_8UC4)
+                        pollStageRgba = stage
+                    }
+                    MatOps.rgbaToBgrInto(cachedWidth, cachedHeight, cachedRgba, slot.mat, stage)
+                    slot.timestampNs = cachedTimestampNs
+                    val old = publishedBgr
+                    publishedBgr = slot
+                    if (old != null && old !== slot) {
+                        if (old.outstanding == 0) {
+                            if (old.frameWidth == cachedWidth && old.frameHeight == cachedHeight && bgrPool.size < BGR_POOL_MAX) {
+                                bgrPool.addLast(old)
+                                old.inPool = true
+                            } else {
+                                old.mat.disposeNow()
+                            }
+                        }
+                    }
+                    pendingRgbaDirty = false
+                } catch (t: Throwable) {
+                    Log.w(TAG, "lazy convert failed, skipped", t)
+                    slot?.let { s2 -> synchronized(lock) { if (publishedBgr !== s2) s2.mat.disposeNow() } }
+                }
+            }
             val slot = publishedBgr
             if (slot == null || slot.mat.empty()) {
                 // 首帧发布前的极短窗口（拷帧元数据已就绪、首轮转换 ~2ms 未完成）：旧实现此时
@@ -433,6 +462,10 @@ class ScreenCaptureController(
     /** 当前发布的帧槽（null ⇔ hasCachedFrame=false 的旧语义，二者始终同临界区更新）。 */
     private var publishedBgr: BgrSlot? = null
 
+    /** ★ 2026-10-11 惰性转换：cachedRgba 有新快照未转 BGR 的标志（poller 置位，消费清位）。 */
+    @Volatile
+    private var pendingRgbaDirty = false
+
     /** poller 线程日志去重：尺寸失配重建只打一行。 */
     private var lastPoolResizeLogMs = 0L
 
@@ -446,49 +479,9 @@ class ScreenCaptureController(
      * - 目标槽选取：空闲池中按尺寸匹配取一（顺带清掉尺寸失配的空闲槽——旋转/resize
      *   场景的重建点）；池空则新建。新帧永远写进「非发布」槽，写完才原子换入发布位，
      *   旧发布槽 outstanding==0 直接入池、>0 则等 release 钩子归还（[onPooledBgrReleased]）。
-     * - RGBA 4 通道中转 Mat（[pollStageRgba]）为 poller 线程私有常驻：消掉旧路径每次
+     * - RGBA 4 通道中转 Mat（[pollStageRgba]）为惰性转换常驻缓冲（消费线程独占使用段）：
      *   转换的 10~17MB 临时分配；线程退出随 finalize 释放（poller 是唯一使用者）。
      */
-    private fun convertAndPublishFrame(width: Int, height: Int, ts: Long, rgbaBytes: ByteArray?) {
-        val snap = rgbaBytes ?: return
-        var slot: BgrSlot? = null
-        try {
-            var stage = pollStageRgba
-            if (stage == null) {
-                stage = Mat(height, width, CvType.CV_8UC4)
-                pollStageRgba = stage
-            }
-            synchronized(lock) {
-                slot = takeFreeSlotLocked(width, height)
-            }
-            MatOps.rgbaToBgrInto(width, height, snap, slot!!.mat, stage)
-                synchronized(lock) {
-                    slot!!.timestampNs = ts
-                    val old = publishedBgr
-                    publishedBgr = slot
-                    if (old != null && old !== slot) {
-                        if (old.outstanding == 0) {
-                            if (old.frameWidth == width && old.frameHeight == height && bgrPool.size < BGR_POOL_MAX) {
-                                bgrPool.addLast(old)
-                                old.inPool = true
-                            } else {
-                                old.mat.disposeNow()
-                            }
-                        }
-                    }
-                    // outstanding>0：在途槽由 release 钩子回收（见 onPooledBgrReleased）
-                }
-        } catch (t: Throwable) {
-            // 转换/发布失败只丢本帧（缓存 RGBA 元数据已发布，行为与旧「单帧异常跳过」一致）
-            Log.w(TAG, "frame convert failed, skipped", t)
-            slot?.let { s ->
-                synchronized(lock) {
-                    if (publishedBgr !== s) s.mat.disposeNow()
-                }
-            }
-        }
-    }
-
     /** 【持 [lock]】取一个尺寸匹配的空闲槽；顺带清掉失配/已空槽。池空/全失配 ⇒ 新建。 */
     private fun takeFreeSlotLocked(width: Int, height: Int): BgrSlot {
         if (bgrPool.isNotEmpty()) {
@@ -1062,7 +1055,9 @@ class ScreenCaptureController(
     private companion object {
         const val TAG = "BetterGI.Capture"
         const val IMAGE_READER_MAX_IMAGES = 2
-        const val FRAME_POLL_MS = 8L
+        // ★ 2026-10-11 8→33ms（30fps）：惰性转换后 poller 只拷快照，但游戏产帧率越高
+        //   轮询越密仍是纯拷贝开销；33ms 对判稳/assert/OCR 的"取最新帧"语义零影响。
+        const val FRAME_POLL_MS = 33L
         /**
          * A4：锁外 join 旧轮询线程的上限。正常路径 reader 已关，线程毫秒级自退；
          * 上限只兜 native 侧异常阻塞，绝不在调用线程（多为主线程）上无限等。

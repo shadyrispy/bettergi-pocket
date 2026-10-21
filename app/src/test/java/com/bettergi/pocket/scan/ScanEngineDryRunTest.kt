@@ -181,6 +181,20 @@ class ScanEngineDryRunTest {
          * 传 (0,0) = 不裁（同步路径现状）。
          */
         val cropOrigin: Pair<Int, Int> = 0 to 0,
+        /**
+         * ★ #69 回归夹具：**逐格祝圣横幅状态**。非 null 时按 `cellIdx` 决定这一格的面板有没有
+         * 祝圣紫横幅（false = 抹掉合成帧里的三个采样点）⇒ `vote(artifact.panel.zhusheng)`
+         * 逐格读出 crafted 交替，才能暴露"生产者替下一格投票覆写了 vars.crafted"。
+         * 周期必须是 4（不能是 2）：pipeDepth=2 时生产者的领先量正好是周期的一半，
+         * 周期 2 会让串格读到的值**碰巧相同** ⇒ 用例空跑。
+         */
+        val craftedByCell: ((Int) -> Boolean)? = null,
+        /**
+         * ★ #253 夹具：**(页号, 页内格序) → 全局件号**。非 null 时面板名与 sub0 都改按件号派生
+         * ⇒ 夹具能造出「页 2 前若干格 ≡ 页 1 尾若干格」这种**真重叠**（现状按点击坐标派生，
+         * 页间同坐标 ⇒ 前进量恒 0，身份锚定只会给出被整行哨兵拒绝的 d）。null = 现状（按坐标）。
+         */
+        val pieceOf: ((pageIndex: Int, cellIdx: Int) -> Int)? = null,
     ) {
         var pageIndex = 0
             private set
@@ -191,9 +205,9 @@ class ScanEngineDryRunTest {
         var finished: String? = null
 
         // 按格递增的唯一件名（模拟真实网格每件不同）；页切换时重置（模拟跨页同件重叠 → 去重测试）
-        private val NAME_RECT = FrameRect(2230, 220, 2462, 270)   // ★ 2026-10-09 ROI 瘦身同步（6字宽）
-        private val SUB0_RECT = FrameRect(2268, 794, 2660, 848)   // ★ 2026-10-09 ROI 瘦身同步（左缘收 6px）
-        private val SUB0_RECT_CRAFTED = FrameRect(2268, 857, 2660, 911)
+        private val NAME_RECT = FrameRect(2230, 220, 2462, 270)   // 2026-10-09 ROI 瘦身定稿：只装 6 字，尾部由 NameMatcher 反向子串补
+        private val SUB0_RECT = FrameRect(2264, 794, 2720, 848)   // ★ 2026-10-11 左缘裁到次字起点：= 2560 基准 [1744,2200]+520；行首圆点被裁、词条名完整保留
+        private val SUB0_RECT_CRAFTED = FrameRect(2264, 857, 2720, 911)
         // ★ A10：weapon_backpack 面板的 name/level ROI（profiles.json 3200 基坐标，calibrate 后不变）
         private val WEAPON_NAME_RECT = FrameRect(2231, 214, 2470, 273)
         private val WEAPON_LEVEL_RECT = FrameRect(2210, 709, 2455, 763)
@@ -223,10 +237,12 @@ class ScanEngineDryRunTest {
              *   与"每格 OCR 文本递增"的 mock 语义**自相矛盾**：真实里每张卡的面板就是不同的）。
              *   现在在面板指纹区域内画一个随点击数变化的红块 ⇒ 面板指纹闸门（PanelFingerprint）
              *   能正确区分"不同卡"；跨页重复格由**内容键**去重兜底（本 harness 的既有断言语义不变）。
-             *   位置 (2300..2328, 900..904) 落在指纹区（subStats x2230..2660 / y794..1040）内，
+             *   位置 (2300..2328, 900..904) 落在指纹区（subStats x2264..2720 / y794..1040）内，
              *   且避开全部像素判据区（锁 2811..2845、收藏 2900..2947、星带 y599..640、祝圣点 y703）。
              *   ⚠️ 2026-10-05 subStats ROI 收窄（2990→2660）后这里必须跟着挪：
              *   标记落在指纹区外 ⇒ 闸门永远等不到"面板已换"⇒ 本类 9 条用例各超时 180s。
+             *   2026-10-10 #244 按 2560 基准把本档 ROI 摆回 [2238,2720]；2026-10-11 左缘再裁到 [2264,2720]
+             *   ⇒ 标记仍在区内、也仍在锁/收藏区之外，无需再挪（标记左缘 2300 距 ROI 左缘 2264 有 36px）。
              */
             override suspend fun grabFresh(afterTimestampMs: Long, timeoutMs: Long): Mat {
                 // ★ A11：冻结服务 —— 第 k 格（k ∈ 1..freezeCells）visit 的第一次抓帧返回
@@ -247,6 +263,17 @@ class ScanEngineDryRunTest {
                 }
                 val m = pages[pageIndex].frame.clone()
                 val tick = clicks.size
+                // ★ #69 夹具：本格没有祝圣横幅 ⇒ 抹掉合成帧里的三个紫采样点（y703，
+                //   在面板指纹区 subStats(y794+) 之外 ⇒ 不影响闸门，只影响 panelZhusheng 判据）
+                if (craftedByCell != null && !craftedByCell(cellIdx)) {
+                    org.opencv.imgproc.Imgproc.rectangle(
+                        m,
+                        org.opencv.core.Point(2386.0, 699.0),
+                        org.opencv.core.Point(2414.0, 707.0),
+                        org.opencv.core.Scalar(255.0, 255.0, 255.0),
+                        -1,
+                    )
+                }
                 // ⚠️ harness 是**嵌套类**（非 inner）⇒ 拿不到外层测试类的 rect 辅助函数，直接调 Imgproc
                 org.opencv.imgproc.Imgproc.rectangle(
                     m,
@@ -299,7 +326,8 @@ class ScanEngineDryRunTest {
                 cellIdx = row * GRID_COLS + col
                 // #48：首格豁免夹具 —— 第一个格的点击**不**推进面板名（其余照旧）
                 if (firstCellNameStuck && clicks.size == entryClicks + 1) return true
-                lastNameCell = "晨光的明誓#${x * 10000 + y}"
+                lastNameCell = "晨光的明誓#" +
+                    (pieceOf?.invoke(pageIndex, cellIdx) ?: (x * 10000 + y))
                 return true
             }
 
@@ -334,7 +362,10 @@ class ScanEngineDryRunTest {
                     val st = frameOcrState[System.identityHashCode(frame)]
                     val stateCell = st?.first ?: cellIdx
                     val stateName = st?.second ?: lastNameCell
-                    val sub0 = "暴击率+%.1f%%".format(5.4 + stateCell * 0.1) // 每格一个不同值（$CELLS_PER_PAGE 格/页）
+                    // #253 夹具：pieceOf 模式下 sub0 跟着**件号**走（名字后缀即件号），
+                    // 同一件跨页读到同一身份；否则维持现状（按页内格序）。
+                    val sub0Idx = pieceOf?.let { stateName.substringAfterLast('#').toIntOrNull() } ?: stateCell
+                    val sub0 = "暴击率+%.1f%%".format(5.4 + sub0Idx * 0.1) // 每格一个不同值（$CELLS_PER_PAGE 格/页）
                     // ★ S1/S2b：裁片帧（宽 < 整帧）里的 rect 是**裁片坐标** ⇒ 平移回帧坐标再查表，
                     //   否则下面每一条具名 ROI 都匹配不上 ⇒ 全部读空（实测 pipe 轮 21 格 key 全 null）。
                     val rr = if (frame.cols() < fullFrameW) {
@@ -373,19 +404,21 @@ class ScanEngineDryRunTest {
         // ★ 2026-10-09 ROI 瘦身同步：rect 对齐 profiles.json 新标定（slot/mainValue 槽已删，
         //    slotKey 由「晨光的明誓」经 artifactPieces 反查，mainKey 由「生命值"+slot=plume」…）
         //    ⚠️ 夹具件名与 slot 的对应关系由词典决定：晨光的明誓 → circlet。
+        // ★ 2026-10-11 左缘裁到次字起点：subStats 八条 x0 2238→2264（夹具与 profile 是**逐字相等**匹配，
+        //    不改这里 ⇒ mock 返回空串）；name 槽保持 6 字定稿值不动。
         val base = mutableMapOf(
-            FrameRect(2230, 220, 2462, 270) to "晨光的明誓",            // name（6字宽）
+            FrameRect(2230, 220, 2462, 270) to "晨光的明誓",            // name（6字宽，定稿）
             FrameRect(2224, 444, 2340, 500) to "生命值",                // mainName（3字宽）
             FrameRect(2230, 716, 2340, 766) to levelText,              // level（未祝圣位置）
             FrameRect(2230, 779, 2340, 829) to levelText,              // level（crafted yShift+63 后）
-            FrameRect(2268, 794, 2660, 848) to "暴击率+5.8%",           // sub0（原位）
-            FrameRect(2268, 858, 2660, 912) to "生命值+717",            // sub1（原位）
-            FrameRect(2268, 922, 2660, 976) to "元素充能效率+12.4%",     // sub2（原位）
-            FrameRect(2268, 986, 2660, 1040) to "元素精通+23",           // sub3（原位）
-            FrameRect(2268, 857, 2660, 911) to "暴击率+5.8%",           // sub0（crafted yShift+63）
-            FrameRect(2268, 921, 2660, 975) to "生命值+717",            // sub1
-            FrameRect(2268, 985, 2660, 1039) to "元素充能效率+12.4%",    // sub2
-            FrameRect(2268, 1049, 2660, 1103) to "元素精通+23",          // sub3
+            FrameRect(2264, 794, 2720, 848) to "暴击率+5.8%",           // sub0（原位）
+            FrameRect(2264, 858, 2720, 912) to "生命值+717",            // sub1（原位）
+            FrameRect(2264, 922, 2720, 976) to "元素充能效率+12.4%",     // sub2（原位）
+            FrameRect(2264, 986, 2720, 1040) to "元素精通+23",           // sub3（原位）
+            FrameRect(2264, 857, 2720, 911) to "暴击率+5.8%",           // sub0（crafted yShift+63）
+            FrameRect(2264, 921, 2720, 975) to "生命值+717",            // sub1
+            FrameRect(2264, 985, 2720, 1039) to "元素充能效率+12.4%",    // sub2
+            FrameRect(2264, 1049, 2720, 1103) to "元素精通+23",          // sub3
         )
         if (withCountLine) base[FrameRect(2674, 63, 2874, 95)] = "圣遗物 1026/2400"
         // filterReset 的面板开合判据：标题「圣遗物筛选」位于 profiles.json 的
@@ -453,7 +486,7 @@ class ScanEngineDryRunTest {
         /**
          * #69 口径修正：让**同步基线也开裁片**。不开的话 `pipeDepth>0` 一侧被强制 `crop=1`、
          * 另一侧 `crop=0` ⇒ "同序同值"同时在比「同步 vs 管道」和「不裁 vs 裁」两件事，
-         * 失败无法归因（实际就误读过一次，见 design-docs/scan-pipeline-20261006.md §13.2）。
+         * 失败无法归因（实际就误读过一次，见 dsl/docs/scan-pipeline-20261006.md §13.2）。
          */
         forceCrop: Boolean = false,
         /**
@@ -466,6 +499,10 @@ class ScanEngineDryRunTest {
         nativePanelKey: String? = null,
         /** 原生 artifact 的 pageSkip 注入（对应 JSON 路径的 flowTransformer 注入 pageSkip）。 */
         nativePageSkipExpr: String? = null,
+        /** ★ #69 回归夹具：逐格祝圣横幅状态（见 [Harness.craftedByCell]）。 */
+        craftedByCell: ((Int) -> Boolean)? = null,
+        /** ★ #253 夹具：件号映射（见 [Harness.pieceOf]），造「页 2 前若干格 ≡ 页 1 尾若干格」的真重叠。 */
+        pieceOf: ((Int, Int) -> Int)? = null,
     ): RunResult {
         // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
@@ -496,6 +533,8 @@ class ScanEngineDryRunTest {
                 }
                 profile.panelCropRect(panelKey)?.let { it.left to it.top } ?: (0 to 0)
             },
+            craftedByCell = craftedByCell,
+            pieceOf = pieceOf,
         )
         numberScript.forEach { h.numberScript.addLast(it) }
         // dedupe=false：dry-run 的 21 格 mock OCR 文本相同（人工场景），全量入库便于断言；
@@ -569,7 +608,7 @@ class ScanEngineDryRunTest {
      * 各跑一轮，断言 results 逐件相等、finished 相同、页数相同。
      * ★ 两臂都开 `crop=1`（`forceCrop`）：`pipeDepth>0` 会强制开裁片，基线若不开，这条就在
      *   同时比「同步 vs 管道」和「不裁 vs 裁」两件事 —— #69 那次因此把夹具 bug 误读成
-     *   "页末排水时机"问题，白跑两轮（design-docs/scan-pipeline-20261006.md §13.2）。
+     *   "页末排水时机"问题，白跑两轮（dsl/docs/scan-pipeline-20261006.md §13.2）。
      *   判据①（epoch 丢弃负对照 / 消费失败）由下面那条盯。
      */
     @Test
@@ -587,6 +626,47 @@ class ScanEngineDryRunTest {
         assertEquals("同步 ${a.size} 件 vs 管道 ${b.size} 件", a.size, b.size)
         assertEquals("逐件内容（含顺序）必须一致", a, b)
         assertEquals(sync.harness.finished, piped.harness.finished)
+    }
+
+    /**
+     * ★ #69 §16 根因回归：**逐格投票位不得串格**。
+     *
+     * 上面那条同序同值用例在真机缺陷面前是**空跑**的：合成帧每一格都画了祝圣紫横幅
+     * ⇒ `vars.crafted` 恒 true ⇒ 生产者领先几格覆写的都是同一个值 ⇒ 两个臂照样相等。
+     * 华为 2026-10-12 实测的就是这个字段被邻格覆写（dsl/docs/scan-pipeline-20261006.md §16）：
+     * 消费者按上一格 `crafted=false` 却读到下一格的 true ⇒ 错加 47px 祝圣 yShift ⇒
+     * 等级槽读到第一条副词条（`攻击力+16.3%`→`·攻式`）、副词条整体下移一行、末行读到套装名
+     * ⇒ `level=0` + 少一条副词条 ⇒ 内容键变 ⇒ 去重当成新件（57 vs 56 件）。
+     *
+     * 夹具 [`Harness.craftedByCell`] 按**周期 4** 交替横幅（不是周期 2：pipeDepth=2 时生产者
+     * 正好领先半周期，周期 2 会碰巧同值 ⇒ 又是一次空跑）。
+     * 断言用 `crafted`/`favorited` 两个字段 —— 后随副词条文本在平移/非平移两处槽位都喂了同一份
+     * mock 行，串格在"值"上不可见，只在**几何 + 这两位**上可见。
+     */
+    @Test
+    fun `S2b 管道化不得把逐格投票位串到别的格`() {
+        val craftedAt = { cell: Int -> cell % 4 < 2 }
+        fun run(pipe: Int) = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
+            pipeDepth = pipe,
+            forceCrop = true,
+            nativeFlow = "artifact",
+            craftedByCell = craftedAt,
+        )
+        fun facts(r: RunResult) = r.engine.results.map { (it.elixerCrafted to it.favorited) to it.level }
+
+        val sync = facts(run(0))
+        val piped = facts(run(2))
+        // 正对照①：夹具确实让两种祝圣态都出现过（否则"两臂相等"恒真）
+        assertTrue(
+            "夹具应同时出现 crafted=true/false 两格，实际=$sync",
+            sync.any { it.first.first } && sync.any { !it.first.first },
+        )
+        // 正对照②：同步臂的格数与两态配比（21 格 ⇒ 周期 4 里 11 真 / 10 假）
+        assertEquals(CELLS_PER_PAGE, sync.size)
+        assertEquals("同步臂 crafted 配比", 11, sync.count { it.first.first })
+        // ★ 主断言：管道臂**逐格**同值（串格时这里会红：管道臂的 crafted 是邻格的）
+        assertEquals("pipe=2 与 pipe=0 的逐格投票位/等级必须一致", sync, piped)
     }
 
     /**
@@ -653,6 +733,56 @@ class ScanEngineDryRunTest {
             assertEquals("pipe=$pipe", ENTER_CHAIN_CLICKS + 10, h.clicks.size)
             assertTrue("pipe=$pipe 应正常收尾（非异常）", h.finished != null)
         }
+    }
+
+    /**
+     * ★ #253：pipe>0 时跨页重叠的**身份锚定**必须与同步臂一样命中。
+     *
+     * 缺陷形状：锚点读的生产者侧 `pageIdentities` 在 pipe>0 下按构造拿不到身份（解析在消费者里）
+     * ⇒ 恒打「身份为空」⇒ 重叠格全部重点（真机实测每页多击数格 = +6.5% 功）。
+     *
+     * 夹具用 [Harness.pieceOf] 造出**真重叠**：页 2 的前 7 格 ≡ 页 1 的末 7 格（前进量 14）
+     * ⇒ 锚点应命中 d=14 并**不点击**跳掉 idx3..6 共 4 格（idx0..2 是锚点本身，照常访问）。
+     * ⚠️ 绝对点击数那条防「两臂一样烂」的空跑：修复前两臂若都不锚定，只比相等是绿的。
+     * ⚠️ 每格真实挂钟 ~0.66s ⇒ 只跑 2 页、只断计数，不断言任何时序量。
+     */
+    @Test
+    fun `S2b 管道臂跨页身份锚定与同步臂跳同一批格`() {
+        val pieceOf = { page: Int, cell: Int ->
+            when {
+                page == 0 -> cell
+                cell < GRID_COLS -> CELLS_PER_PAGE - GRID_COLS + cell // 页 2 前 7 格 ≡ 页 1 末 7 格
+                else -> CELLS_PER_PAGE + cell - GRID_COLS
+            }
+        }
+        fun run(pipe: Int) = runEngine(
+            listOf(
+                Page(syntheticFrame(5), pageLines("Lv.90"), 1026),
+                Page(syntheticFrame(5, page = 1), pageLines("Lv.90"), 1026),
+            ),
+            pipeDepth = pipe,
+            forceCrop = true,
+            nativeFlow = "artifact",
+            maxPages = 2,
+            pieceOf = pieceOf,
+        )
+        val sync = run(0)
+        val piped = run(2)
+        val skipped = GRID_COLS - 3 // idx3..6：重叠带（7 格）扣掉锚点三格 ⇒ 4 格
+        val expectedClicks = ENTER_CHAIN_CLICKS + 2 * CELLS_PER_PAGE - skipped
+        assertEquals(
+            "夹具前提：同步臂必须锚定命中并跳 $skipped 格（否则本用例是空跑）",
+            expectedClicks, sync.harness.clicks.size,
+        )
+        assertEquals(
+            "pipe=2 的做功必须与同步臂相同（锚定恒不命中时会多击 $skipped 格）",
+            expectedClicks, piped.harness.clicks.size,
+        )
+        assertEquals("两臂必须跳掉同一批格（点击坐标逐格相同）", sync.harness.clicks, piped.harness.clicks)
+        val a = sync.engine.results.map { it.setKey to it.slotKey to it.substats.map { s -> s.key to s.value } }
+        val b = piped.engine.results.map { it.setKey to it.slotKey to it.substats.map { s -> s.key to s.value } }
+        assertEquals("两臂入库逐件同序同值", a, b)
+        assertEquals(sync.harness.finished, piped.harness.finished)
     }
 
     // ---- 入库去重（Q2 决策）：两页同件 → 第二次出现跳过 ----
@@ -1043,6 +1173,50 @@ class ScanEngineDryRunTest {
         assertTrue(
             "weapon_scan 正常收尾不得报 total_mismatch（stages=${h.progress.map { it.first }}）",
             h.progress.none { it.first == "total_mismatch" },
+        )
+    }
+
+    /**
+     * #259：武器轮的星级必须**随 job 交付**，不能留在生产者那侧。
+     *
+     * `vote()` 的 `weapon.panel.starBand` 分支原本写 `vars.rarity` 而不是 `sink.rarity`
+     * （其余分支都走 sink）⇒ `pipe>0` 时快照取到的是 -1 哨兵，消费者开头 `applyTo(vars)`
+     * 又把 -1 盖回真值 ⇒ `parseWeaponPanel` 见 `rarity<0` 直接 return ⇒
+     * **BS 2244 实测 63 格全解析、0 件入库、`导出跳过（normal）：无已入库结果`**，
+     * 并且连带把跨页锚点的身份读成空（身份是 parse 末尾才写的）。
+     *
+     * 这条用例与上一条同夹具，只多开 `pipeDepth=2` ⇒ 旧实现下 `resultsWeapons` 会是 **0**
+     * 而不是 21，红得直接；它同时是"管道臂与同步臂入库件数必须相等"这条口径的武器侧落点。
+     */
+    @Test
+    fun `S2b 管道臂武器轮必须与同步臂同样入库`() {
+        fun run(pipe: Int) = runEngine(
+            listOf(Page(syntheticFrame(5), weaponLines(), CELLS_PER_PAGE)),
+            nativeFlow = "weapon",
+            weaponNames = weaponDictNames(),
+            pipeDepth = pipe,
+        )
+        val (sync, h0) = run(0)
+        val (piped, h) = run(2)
+        assertEquals("同步臂口径", CELLS_PER_PAGE, sync.resultsWeapons.size)
+        assertEquals("管道臂武器入库数应与同步臂相同（整页）", CELLS_PER_PAGE, piped.resultsWeapons.size)
+        assertTrue("武器轮不得产出圣遗物", piped.results.isEmpty())
+        assertEquals("completed", h.finished)
+        // 星级没随行交付的形态就是"每格都提前 return"⇒ 一条都不该有，但反过来全有才是修好的样子
+        assertTrue(
+            "每件都该有真实星级（>0），出现 -1 哨兵说明星级又留在生产者那侧了：" +
+                piped.resultsWeapons.map { it.rarity },
+            piped.resultsWeapons.all { it.rarity > 0 },
+        )
+        // ★ #261：`lock` 是 parse 内部读**面板像素**算的（`weaponLock(frame, profile, origin)`）——
+        //   管道下 frame 是裁片，不走 origin 平移就恒 false（BS 实测一臂全 true、一臂全 false）。
+        //   这里比整条记录（键/等级/精炼/锁/位置），逐件同值才算过。
+        fun rec(w: com.bettergi.pocket.scan.GoodWeapon) =
+            listOf(w.key, w.level.toString(), w.refine.toString(), w.lock.toString(), w.location.orEmpty())
+        assertEquals(
+            "管道臂与同步臂的武器记录必须逐件相同（★ lock 曾是管道臂恒 false 的那一格）",
+            sync.resultsWeapons.map { rec(it) },
+            piped.resultsWeapons.map { rec(it) },
         )
     }
 

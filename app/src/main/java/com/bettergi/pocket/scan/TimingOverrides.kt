@@ -205,11 +205,15 @@ object TimingOverrides {
     var overlapSkip: Boolean = true
 
     /**
-     * P1（2026-10-06）：重复格（卡格指纹未变）**跳过面板指纹门等待**（对齐 GOODScanner
-     * backpack_scanner.rs:1417 的 is_duplicate ⇒ 不进面板等待）。默认**开**；
-     * `--es timing "dupskip=0"` 回退到旧的 100ms 短档（A/B 与回滚用）。
+     * P1（2026-10-06）：重复格（卡格指纹未变）跳过面板指纹门等待。对齐 GOODScanner
+     * backpack_scanner.rs:1417 的 is_duplicate ⇒ 不进面板等待。
+     * ★ 2026-10-10 默认改 **0（不跳过）**：BS 全量 A/B 实证同套装同部位同 lv0 的相邻两件
+     *   卡格指纹相同 ⇒ 跳过等待后抓到的是上一件的面板（渲染延迟）⇒ 读出上一件词条 ⇒
+     *   seen 判重 return ⇒ 第二件无痕丢失（每轮 ~0.1% 概率漏格，12:02/14:09 两轮各 1 件；
+     *   dupskip=0 轮 952/952 零漏零多）。成本 ~120ms/重复格，perCell 差 <5ms。
+     *   `--es timing "dupskip=1"` 回退到跳过档（A/B 与回滚用）。
      */
-    var duplicateCellSkipWait: Boolean = true
+    var duplicateCellSkipWait: Boolean = false
 
     /**
      * 入口幂等（开链前先短轮询锚点，命中即跳过入口链）。默认 **开**；
@@ -222,7 +226,7 @@ object TimingOverrides {
         phiApply = true
         anchorBudgetMs = 0L
         overlapSkip = true
-        duplicateCellSkipWait = true
+        duplicateCellSkipWait = false
         entryIdempotent = true
         panelSettleMs = 0L
         if (!spec.isNullOrBlank()) {

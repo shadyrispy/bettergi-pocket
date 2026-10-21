@@ -42,7 +42,7 @@ internal fun MainActivity.showScriptManager() {
     managerShown = true
     // ⚠️ 两屏共用一个 Activity 实例，而 onResume 按 `onboardingShown` 优先重绘引导页。
     //    不在这儿放下引导标志 ⇒ 进过管理器再回前台，renderOnboarding() 会在管理器布局里
-    //    找引导页的 id，findViewById 返回 null 直接 NPE（2026-10-03 _dev/ui_check_bs.sh 实测崩）。
+    //    找引导页的 id，findViewById 返回 null 直接 NPE（2026-10-03 dsl/dev/ui_check_bs.sh 实测崩）。
     onboardingShown = false
     setContentView(R.layout.activity_scripts)
     // ★ 2026-10-03（D2）：进管理器页先把悬浮面板收起。展开态面板占屏右 ~408px
