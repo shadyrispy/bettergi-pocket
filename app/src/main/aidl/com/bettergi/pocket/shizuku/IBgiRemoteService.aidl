@@ -42,7 +42,7 @@ interface IBgiRemoteService {
     long ping(long token) = 1;
 
     /**
-     * 服务端构建版本（BgiRemoteService.SERVICE_VERSION，当前 1）。
+     * 服务端构建版本（BgiRemoteService.SERVICE_VERSION，当前 3）。
      * 绑定方核对它来确认服务进程跑的是预期版本的代码。
      */
     String serviceVersion() = 2;
@@ -79,6 +79,25 @@ interface IBgiRemoteService {
 
     /** VD 上的线性插值滑动（DOWN→MOVE×n→UP）。 */
     boolean swipeOnDisplay(int displayId, int fromX, int fromY, int toX, int toY) = 8;
+
+    // ── ★ #310/M5：帧流与监视（version 3 追加，id 9..11 顺延）──
+
+    /**
+     * 服务进程把 VD 最新帧压成 JPEG 返回（长边 ≤1280、quality 70）。
+     * **帧缓存为空 / VD 未建 ⇒ 返回 null**，调用方按「预览不可用」处理。
+     */
+    byte[] capturePreviewJpeg() = 9;
+
+    /**
+     * 游戏主进程是否存活（服务进程内 `pidof com.miHoYo.Yuanshen`，输出非空即活）。
+     * **异常 / 超时按保守 true**（MAA 语义「宁可漏报不误杀」）。
+     */
+    boolean isGameAlive() = 10;
+
+    /**
+     * 服务端 fps 估计值（服务进程内 1s 采一次 frameGeneration 差分；未在采 = -1）。
+     */
+    int getGameFps() = 11;
 
     void destroy() = 16777114;
 }

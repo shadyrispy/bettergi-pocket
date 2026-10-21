@@ -100,6 +100,14 @@ class VirtualDisplayManager(
     @Volatile
     private var keepAlive: KeepAlive? = null
 
+    /**
+     * ★ #310/M5：fps 估计器随 create 挂上 KeepAlive 轮询（服务端 1s 一采的 frameGeneration
+     * 差分；BgiRemoteService.getGameFps 经它读值）。null = 未创建（getGameFps 返 -1）。
+     */
+    @Volatile
+    var fpsEstimator: FrameCountFpsEstimator? = null
+        private set
+
     /** [ensureAppOnDisplay]/[repin] 等共用的工作线程（注册回调要带 Looper）。 */
     private var worker: HandlerThread? = null
 
@@ -126,6 +134,8 @@ class VirtualDisplayManager(
         height: Int = DEFAULT_H,
         dpi: Int = DEFAULT_DPI,
         surface: Surface,
+        /** ★ #310/M5：帧源代数探针（fps 估计器采样用；null = 不挂估计器）。 */
+        frameSourceGenerationProbe: (() -> Long)? = null,
     ): Int {
         if (display != null) {
             Log.w(TAG, "create：已有虚拟显示器（displayId=$displayId），先 destroy 再建")
@@ -176,6 +186,19 @@ class VirtualDisplayManager(
             keepAlive = it
         }
 
+        // ★ #310/M5：fps 估计器挂到 KeepAlive 的 4s 拍上（采样间隔 1s ⇒ 每拍最多采 1~4 次，
+        //   够 UI 显示粒度；不新建线程——本帧源是 createDisplay 传入的 surface 拥有者，
+        //   代数从它读）。
+        val fsGen = frameSourceGenerationProbe
+        if (fsGen != null) {
+            fpsEstimator = FrameCountFpsEstimator().also { est ->
+                keepAlive?.addPeriodicObserver(
+                    observer = { wallMs -> est.sample(fsGen(), wallMs) },
+                    periodMs = est.sampleIntervalMs(),
+                )
+            }
+        }
+
         ensureWorker()
         Log.i(
             TAG,
@@ -197,6 +220,7 @@ class VirtualDisplayManager(
         display = null
         worker?.quitSafely()
         worker = null
+        fpsEstimator = null
         Log.i(TAG, "destroy：虚拟显示器已释放")
     }
 

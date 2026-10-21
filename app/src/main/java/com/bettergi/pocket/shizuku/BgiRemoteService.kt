@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import androidx.annotation.Keep
+import com.bettergi.pocket.genshin.GenshinPackages
 
 /**
  * ★ #310/M1b 后台模式（virtualdisplay 分支）：跑在 Shizuku UserService 进程里的**提权服务本体**。
@@ -91,11 +92,38 @@ class BgiRemoteService : IBgiRemoteService.Stub {
         }
     }
 
+    /** M3 createDisplay 建出的帧源（服务进程内持有：JPEG 预览 / 黑帧 Guard / fps 估计共用）。 */
+    @Volatile
+    var vdFrameSource: com.bettergi.pocket.vd.VirtualDisplayFrameSource? = null
+        private set
+
+    /** M5 黑帧 Guard（VD 停更自守；createDisplay 时起，destroy 时停）。 */
+    @Volatile
+    private var frameGuard: com.bettergi.pocket.vd.VdBlackFrameGuard? = null
+
     override fun createDisplay(): Int {
         val fs = com.bettergi.pocket.vd.VirtualDisplayFrameSource(
             displayId = -1, width = 1280, height = 720,
         ).also { it.start() }
-        val id = vd().create(1280, 720, 160, fs.surface())
+        vdFrameSource = fs
+        // frameSourceGenerationProbe：fps 估计器经它读代数（KeepAlive 轮询 → estimator）
+        val id = vd().create(1280, 720, 160, fs.surface()) { fs.frameGeneration() }
+        // M5：VD 建成后起黑帧 Guard（服务进程内自守——MAA StaleFrameGuard 机制）。
+        // create 失败（id<0）也要起 Guard：它内部靠 isAppOnDisplay 判不出即保守不动作，
+        // 等 repin/重建把显示救回来后自然恢复观测。
+        if (frameGuard == null) {
+            frameGuard = com.bettergi.pocket.vd.VdBlackFrameGuard(
+                frameSourceProvider = { vdFrameSource },
+                isAppOnDisplay = {
+                    GenshinPackages.CANDIDATES.any { pkg -> vd().isAppOnDisplay(pkg) == true }
+                },
+                isGameAlive = { gameAliveByPidof() },
+                publishBlackFrame = { vdFrameSource?.publishBlackFrame() ?: false },
+            ).also {
+                it.start()
+                Log.i(TAG, "VdBlackFrameGuard 已启动（服务进程内自守）")
+            }
+        }
         Log.i(TAG, "createDisplay -> $id（帧源已起，surface 已接）")
         return id
     }
@@ -138,6 +166,95 @@ class BgiRemoteService : IBgiRemoteService.Stub {
             .getOrDefault(false)
     }
 
+    // ── ★ #310/M5：帧流与监视（version 3）──────────────────────────
+
+    /**
+     * VD 最新帧 → JPEG（app 进程经 AIDL 取预览）。
+     * 帧缓存为空 / VD 未建 ⇒ null（调用方按「预览不可用」处理）；压缩失败也 null。
+     * bitmap 全部在调用栈内回收（createBitmap 出来的复制品，recycle 不影响帧源缓存）。
+     */
+    override fun capturePreviewJpeg(): ByteArray? {
+        val src = vdFrameSource ?: return null
+        return runCatching {
+            val snap = src.latestRgbaSnapshot() ?: return@runCatching null
+            val bmp = snapshotToBitmap(snap) ?: return@runCatching null
+            try {
+                val longEdge = maxOf(bmp.width, bmp.height)
+                val scale = if (longEdge > PREVIEW_MAX_EDGE) {
+                    PREVIEW_MAX_EDGE.toFloat() / longEdge
+                } else 1f
+                val out = if (scale < 1f) {
+                    android.graphics.Bitmap.createScaledBitmap(
+                        bmp,
+                        (bmp.width * scale).toInt().coerceAtLeast(1),
+                        (bmp.height * scale).toInt().coerceAtLeast(1),
+                        true,
+                    )
+                } else bmp
+                try {
+                    val bos = java.io.ByteArrayOutputStream()
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, PREVIEW_JPEG_QUALITY, bos)
+                    bos.toByteArray()
+                } finally {
+                    if (out !== bmp) out.recycle()
+                }
+            } finally {
+                bmp.recycle()
+            }
+        }.onFailure { Log.w(TAG, "capturePreviewJpeg failed: ${it.message}") }
+            .getOrNull()
+    }
+
+    /** 快照 → Bitmap（RGBA_8888 内存布局直拷，处理 rowStride > w*4 的行对齐填充）。 */
+    private fun snapshotToBitmap(s: com.bettergi.pocket.vd.VirtualDisplayFrameSource.Snapshot): android.graphics.Bitmap? {
+        if (s.rgba.size < s.rowStride * (s.height - 1) + s.width * 4) return null
+        val bmp = android.graphics.Bitmap.createBitmap(s.width, s.height, android.graphics.Bitmap.Config.ARGB_8888)
+        val row = java.nio.ByteBuffer.allocate(s.width * 4)
+        val packed = java.nio.ByteBuffer.allocate(s.width * s.height * 4)
+        for (y in 0 until s.height) {
+            row.clear()
+            row.put(s.rgba, y * s.rowStride, s.width * 4)
+            row.rewind()
+            packed.put(row)
+        }
+        packed.rewind()
+        bmp.copyPixelsFromBuffer(packed)
+        return bmp
+    }
+
+    override fun isGameAlive(): Boolean = gameAliveByPidof()
+
+    override fun getGameFps(): Int {
+        val e = vd().fpsEstimator ?: return -1
+        val v = e.lastFps()
+        return if (v < 0) -1 else v.toInt()
+    }
+
+    /**
+     * `pidof com.miHoYo.Yuanshen`（服务进程 ProcessBuilder）——只认与包名同名的主进程
+     * （pidof <pkg> 的输出天然不含 :pushcore 等以包名**开头**的子进程名？不——`pidof` 按
+     * 进程名精确匹配，而 Android 子进程名是 `com.miHoYo.Yuanshen:pushcore`，与主进程名
+     * 不相等，所以不会命中）。输出非空即活；异常/超时按保守 true（MAA"宁可漏报不误杀"）。
+     */
+    private fun gameAliveByPidof(): Boolean {
+        return runCatching {
+            val p = ProcessBuilder("pidof", GAME_ALIVE_PACKAGE)
+                .redirectErrorStream(true)
+                .start()
+            val finished = p.waitFor(PIDOF_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            if (!finished) {
+                Log.w(TAG, "pidof 超时（${PIDOF_TIMEOUT_MS}ms）⇒ 按保守 true")
+                p.destroy()
+                return true
+            }
+            val out = p.inputStream.bufferedReader().readText().trim()
+            out.isNotEmpty()
+        }.getOrElse {
+            Log.w(TAG, "pidof 执行失败（${it.message}）⇒ 按保守 true")
+            true
+        }
+    }
+
     /**
      * 官方销毁约定：server 经 transact 16777115（AIDL 声明值 16777114）触发，
      * FLAG_ONEWAY —— 本方法跑在服务进程的 binder 线程，exit 后不再返回。
@@ -145,6 +262,8 @@ class BgiRemoteService : IBgiRemoteService.Stub {
      */
     override fun destroy() {
         Log.i(TAG, "destroy()：server 触发销毁（version 更新或 unbind remove），exit")
+        runCatching { frameGuard?.stop() }
+        runCatching { vdFrameSource?.stop() }
         System.exit(0)
     }
 
@@ -160,12 +279,24 @@ class BgiRemoteService : IBgiRemoteService.Stub {
     companion object {
         private const val TAG = "BetterGI.BgiRemote"
 
+        /** pidof 超时（ms）——超时按保守 true。 */
+        private const val PIDOF_TIMEOUT_MS = 1_500L
+
+        /** 活性检查的包名（M5 硬编码国服原神，与 M4 的 BG_GAME_PACKAGE 同源语义）。 */
+        private const val GAME_ALIVE_PACKAGE = "com.miHoYo.Yuanshen"
+
+        /** 预览 JPEG 长边上限（MAA 同款 1280；VD 本身就是 1280 宽，多数帧走"不缩放"路径）。 */
+        private const val PREVIEW_MAX_EDGE = 1280
+
+        /** 预览 JPEG 压缩质量（MAA 同款 70）。 */
+        private const val PREVIEW_JPEG_QUALITY = 70
+
         /**
          * 服务构建版本：**每次改动服务实现（含 AIDL 接口加方法）必须 ++，
          * 并与 [BgiRemoteManager] 传入 UserServiceArgs.version 的值保持同步** ——
          * server 发现 version 不匹配会自动拉新进程、调旧进程的 destroy()。
-         * M1b 骨架首版 = 1。
+         * M1b 骨架首版 = 1；M3（VD/注入）= 2；M5（帧流/监视）= 3。
          */
-        const val SERVICE_VERSION: Int = 2
+        const val SERVICE_VERSION: Int = 3
     }
 }

@@ -267,6 +267,11 @@ class BgiRemoteStateTest {
         override fun swipeOnDisplay(displayId: Int, fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean =
             error("not used in tests")
 
+        // ★ #310/M5 AIDL v3 追加方法：同上，测试里不可达，恒 fail-fast
+        override fun capturePreviewJpeg(): ByteArray? = error("not used in tests")
+        override fun isGameAlive(): Boolean = error("not used in tests")
+        override fun getGameFps(): Int = error("not used in tests")
+
         // IBinder 面：单测只打「翻译后的接口」，不会真走 binder，返回 null 即可
         override fun asBinder(): IBinder = null!!
     }
