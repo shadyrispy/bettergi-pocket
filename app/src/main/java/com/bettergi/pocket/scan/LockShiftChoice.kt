@@ -16,6 +16,8 @@ package com.bettergi.pocket.scan
  * ① **对非祝圣件，`+shift` 那个位置根本没有锁钮**。同帧双掩码实测（见 `probeLockPixels`）：
  *    `零位 gold=871 red=900 | +63 gold=0 red=0` —— `+63` 处既不是金锁也不是红锁，像素计数全 0，
  *    是面板上的**另一个控件**。盲点它就是在一个没标定过的坐标上乱点。
+ *    （上述 gold/red 数字是 2560 旧色域实测；2026-10-21 起锁判据为 `WARM_LOCK`，probe 现同时打
+ *    warm 与旧域，判决只看 warm。）
  * ② **"换另一侧"在祝圣件上也是错的**：计划里写了 `elixirCrafted` 的项，`TaskMatch` 把它当**硬匹配
  *    字段**，能绑定上就说明该值成立 ⇒ `firstShift` **本就是正确的一侧**。真正需要换侧的情形只有
  *    「计划没给 `elixirCrafted`」这一种。

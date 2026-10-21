@@ -1601,7 +1601,7 @@
     2332,
     772
    ],
-   "judge": "gold>=40=已锁; gold==0 且 dark>400=未锁",
+   "judge": "WARM_LOCK(R≥150,R−G>45,R−B>45)≥阈值=已锁；灰开锁不命中（旧 gold/dark 描述已废弃）",
    "note": "2560 实测：普通面板锁徽 rect[2286,724,2332,764] center(2309,744)（p5_open/after_x 双重 cv2 实证，gold=1098）。⚠️ 祝圣面板整栏 yShift+64（锁徽 808）：2560 实测天之美赐(祝圣之霜类)面板锁徽在 (2309,808)，普通面板在 (2309,744)；烬城勇者绘卷等普通套装走本键，祝圣件需 yShift。此前误改 808 致普通件点击落空。 ｜ 2026-09-10 复核（背包面板·祝圣之霜定义件 2560_artifact_backpack_locked_fav_zhusheng.png）：实测红锁 x[2289,2327] y[776,824]（1207px）→ 中心 (2308,800)。按 yShift+63 预测 (2309,807) → 偏差 7px（ROI 高 40 可容）。**祝圣位移实测 ≈ +56 ~ +64**（不同件/词条行数会差几 px）→ 建议 ROI 高由 40 放宽到 48 以吸收。"
   },
   "artifact.panel.astral": {
@@ -1663,7 +1663,7 @@
       2332,
       764
      ],
-     "judge": "gold>=40=已锁; gold==0 且 dark>400=未锁",
+     "judge": "WARM_LOCK(R≥150,R−G>45,R−B>45)≥阈值=已锁；灰开锁不命中（旧 gold/dark 描述已废弃）",
      "note": "2560 实测：普通面板锁徽 rect[2286,724,2332,764] center(2309,744)；与 flat 键 zones[\"artifact.panel.lock\"] 保持一致。祝圣面板 yShift+64（锁徽 808），由 vars.crafted 走 zhushengShiftPx。"
     }
    }

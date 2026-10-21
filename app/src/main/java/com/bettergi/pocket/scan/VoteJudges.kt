@@ -24,11 +24,13 @@ object VoteJudges {
         val bMin: Int, val bMax: Int,
         val requireRB: Int = 0,  // 0=无跨通道约束；>0=R-B > requireRB
         val requireBG: Int = 0,  // 0=无跨通道约束；>0=B-G > requireBG（紫横幅用，见 PURPLE_BANNER）
+        val requireRG: Int = 0,  // 0=无跨通道约束；>0=R-G > requireRG（暖色锁体用，见 WARM_LOCK）
     ) {
         fun matches(r: Int, g: Int, b: Int): Boolean =
             r in rMin..rMax && g in gMin..gMax && b in bMin..bMax &&
                 (requireRB == 0 || r - b > requireRB) &&
-                (requireBG == 0 || b - g > requireBG)
+                (requireBG == 0 || b - g > requireBG) &&
+                (requireRG == 0 || r - g > requireRG)
     }
 
     // ---- 色域常量（profiles.json zones judge 逐字固化）----
@@ -62,21 +64,30 @@ object VoteJudges {
     /** **武器**面板锁图标色域（真机抓图：红/橙实心锁，**与圣遗物金色不同** ✗）。 */
     val RED_LOCK = RgbPredicate(140, 255, 30, 140, 30, 140)
 
-    /** 武器面板锁判据：`GOLD ∪ RED_LOCK` 任一命中（阈值同 `PANEL_LOCK_GOLD`）。 */
+    /**
+     * 面板锁徽的**暖色锁体**：红/橙闭锁（R≥150 且 R−G、R−B 均 >45）。
+     *
+     * 2026-10-21 华为后台全量取证（1054 帧）：灰开锁按钮是中性灰蓝（R≈G≈B≈170），
+     * 但其抗锯齿暗边会漏进 [RED_LOCK]（小档 countScale=0.25 后门槛仅 10，实测 52 命中）
+     * ⇒ 未锁件误判已锁（a3/a5/a6 每轮 2 件、位置轮换）。闭锁锁体实测 201–312 命中、
+     * 未锁 0 命中（base ∪ zhusheng 移位两区，805 件对 GT 零错）。金锁同样落本域（R−G≈50）。
+     */
+    val WARM_LOCK = RgbPredicate(150, 255, 0, 255, 0, 255, requireRG = 45, requireRB = 45)
+
+    /** 武器面板锁判据：暖色锁体 [WARM_LOCK]（阈值同 `PANEL_LOCK_GOLD`）。 */
     /**
      * 面板锁徽判据。★ #261：[origin] 是**裁片原点** —— 管道把 parse 搬到消费者后喂进来的是
      * `job.crop`，而 `panels.weapon_backpack.lock` 是**全帧坐标** ⇒ 不平移就是对着错位置的像素
-     * 数金的/红的，恒判未锁（BS 实测：同步臂 63 件全 `lock=true`、管道臂全 `false`，
+     * 数锁色像素，恒判未锁（BS 实测：同步臂 63 件全 `lock=true`、管道臂全 `false`，
      * 键序列与顺序完全一致，只差这一个字段）。
      * 默认 `(0,0)` = 全帧，既有调用点行为零变化。
      */
     fun weaponLock(frame: Mat, profile: ScreenProfile, origin: FramePoint = FramePoint(0, 0)): Result {
         val rect0 = profile.rect("panels.weapon_backpack.lock")
         val rect = if (origin.x == 0 && origin.y == 0) rect0 else rect0.shiftedBy(-origin.x, -origin.y)
-        val gold = countMatches(frame, rect, GOLD)
-        val red = countMatches(frame, rect, RED_LOCK)
-        val best = maxOf(gold, red)
-        return Result(best >= profile.countThreshold(Thresholds.PANEL_LOCK_GOLD), best)
+        // 2026-10-21：与 panelLock 同口径 —— 暖色锁体，灰开锁/白色星标不计（见 [WARM_LOCK]）。
+        val warm = countMatches(frame, rect, WARM_LOCK)
+        return Result(warm >= profile.countThreshold(Thresholds.PANEL_LOCK_GOLD), warm)
     }
 
     object Thresholds {
@@ -85,8 +96,9 @@ object VoteJudges {
         //   `profile.countThreshold(...)`（见 ScreenProfile.countScale），否则小档上恒判不中。
         //   比例类（BANNER_*）与强度类（EQUIPPED_SAT_*）不受影响，直接比较即可。
         const val CARD_LOCK_PINK = 60      // pink>60=已锁
-        const val PANEL_LOCK_GOLD = 40     // gold>=40=已锁
-        const val PANEL_LOCK_DARK = 400    // 未锁兜底：gold==0 且 dark>400
+        // 圣遗物/武器面板锁的像素门槛（名字沿用旧 gold 谓词；判据现已换成 WARM_LOCK，
+        // 3200 档=40，1280 档 countScale=0.25 ⇒ 10；实测已锁 201–312@1280、未锁 0）。
+        const val PANEL_LOCK_GOLD = 40
         const val ASTRAL_GOLD = 400        // gold>=400=已收藏
         const val BANNER_PURPLE_RATIO = 0.6
         const val BANNER_POINTS_REQUIRED = 2 // ≥2/3 点
@@ -277,23 +289,39 @@ object VoteJudges {
         return Result(count > Thresholds.CARD_LOCK_PINK, count)
     }
 
-    /** 面板锁定 chip vote（zone artifact.panel.lock，[yShiftFrame] 为祝圣帧坐标下移量）。 */
-    fun panelLock(frame: Mat, profile: ScreenProfile, yShiftFrame: Int = 0): Result {
+    /**
+     * 面板锁定 chip vote（zone artifact.panel.lock，[yShiftFrame] 为祝圣帧坐标下移量）。
+     * [origin] = 裁片左上角的整帧坐标（pipe>0 时 frame 是面板裁片，必须减掉它）。
+     */
+    fun panelLock(
+        frame: Mat,
+        profile: ScreenProfile,
+        yShiftFrame: Int = 0,
+        origin: FramePoint = FramePoint(0, 0),
+    ): Result {
         val obj = profile.zone("artifact.panel.lock") ?: return Result(false, 0)
         val r = obj.getJSONArray("rect")
         val rect = profile.scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3))
-        val gold = countMatches(frame, rect.shiftedBy(yShiftFrame), GOLD)
-        if (gold >= profile.countThreshold(Thresholds.PANEL_LOCK_GOLD)) return Result(true, gold)
-        // 未锁判定：gold==0 且暗像素>400（深灰图形）——简化为 gold 低即未锁，dark 兜底 P1-b 补
-        return Result(false, gold)
+            .shiftedBy(-origin.x, yShiftFrame - origin.y)
+        // ★ 2026-10-21：锁体只数**暖色**（红/金闭锁）。灰开锁的中性色在 RED_LOCK 上会漏进
+        //   几十个抗锯齿像素（小档门槛 10）⇒ 未锁误判已锁，见 [WARM_LOCK] 的取证注释。
+        val warm = countMatches(frame, rect, WARM_LOCK)
+        if (warm >= profile.countThreshold(Thresholds.PANEL_LOCK_GOLD)) return Result(true, warm)
+        return Result(false, warm)
     }
 
-    /** 面板收藏 chip vote（zone artifact.panel.astral）。 */
-    fun panelAstral(frame: Mat, profile: ScreenProfile, yShiftFrame: Int = 0): Result {
+    /** 面板收藏 chip vote（zone artifact.panel.astral）；[origin] 语义同 [panelLock]。 */
+    fun panelAstral(
+        frame: Mat,
+        profile: ScreenProfile,
+        yShiftFrame: Int = 0,
+        origin: FramePoint = FramePoint(0, 0),
+    ): Result {
         val obj = profile.zone("artifact.panel.astral") ?: return Result(false, 0)
         val r = obj.getJSONArray("rect")
         val rect = profile.scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3))
-        val gold = countMatches(frame, rect.shiftedBy(yShiftFrame), GOLD)
+            .shiftedBy(-origin.x, yShiftFrame - origin.y)
+        val gold = countMatches(frame, rect, GOLD)
         return Result(gold >= profile.countThreshold(Thresholds.ASTRAL_GOLD), gold)
     }
 
@@ -791,10 +819,20 @@ object VoteJudges {
      * [landingShift] 结果（2026-09-14）：Ok=有效读数；Reject=不可测。
      * Reject.reason 供设备侧打点定位「为何测不到」（score 不足 / 孪生歧义 / 几何不符）——
      * C1 验收（swipe-landing-acceptance.md）曾因 null 三不可辨而阻塞。
+     *
+     * ★ 2026-10-21：Reject 追加**屏蔽前最佳候选**（[bestDy]/[bestScore]，先验窗裁剪前的全局最大）。
+     * 调用方用它区分「拒测可能藏着过冲」（dy 大）与「欠滚/滑空」（dy 小或未知）——
+     * 前者才值得回退一行做缺口校验，后者回退会把仅有的推进抵消成 0（华为尾部漏件根因）。
+     * 无先验窗（expectedPx/priorHalf 未给）或无读数时为 null。
      */
     sealed class LandingResult {
         class Ok(val shift: LandingShift) : LandingResult()
-        class Reject(val reason: String) : LandingResult()
+        class Reject(
+            val reason: String,
+            /** 屏蔽前（先验窗裁剪前）全局最佳候选的位移（px，正=列表推进）。 */
+            val bestDy: Int? = null,
+            val bestScore: Double? = null,
+        ) : LandingResult()
     }
 
     /**
@@ -887,11 +925,15 @@ object VoteJudges {
             //   而先验窗只覆盖 L∈[advTarget±0.85·rowPitch]；若某次滑动被吞掉一部分（L 偏小）
             //   则真峰必在窗外 ⇒ 必然 Reject，只看现有日志分不出是哪种。
             val preMask = if (expectedPx > 0 && priorHalf > 0) Core.minMaxLoc(res) else null
-            val preMaskNote = preMask?.let {
-                "；屏蔽前最佳 dy=%d sc=%.2f".format(
-                    bandTopInSearch - Math.round(it.maxLoc.y).toInt(), it.maxVal,
-                )
-            } ?: ""
+            // ★ 2026-10-21：屏蔽前最佳的 dy/分数先落变量 —— 既拼进 Reject.reason（既有打点格式不变），
+            //   也作为 Reject.bestDy/bestScore 交给调用方判「回退一行」是否还有意义（见 LandingResult.Reject）。
+            val preMaskDy = preMask?.let { bandTopInSearch - Math.round(it.maxLoc.y).toInt() }
+            val preMaskScore = preMask?.maxVal
+            val preMaskNote = if (preMaskDy != null && preMaskScore != null) {
+                "；屏蔽前最佳 dy=%d sc=%.2f".format(preMaskDy, preMaskScore)
+            } else {
+                ""
+            }
             // ★ 期望落点先验（见 LANDING_PRIOR_HALF_RATIO）：窗外峰一律屏蔽 ⇒ 排除 ±1 行孪生峰。
             //   先验只**收窄搜索区**、不放宽任何门限；真峰若在窗外 ⇒ score 门自然拒（安全方向）。
             var priorNote = ""
@@ -910,7 +952,11 @@ object VoteJudges {
             }
             val mm = Core.minMaxLoc(res)
             if (mm.maxVal < LANDING_MIN_SCORE) {
-                return LandingResult.Reject("score<%.2f(=%.2f)".format(LANDING_MIN_SCORE, mm.maxVal) + priorNote + preMaskNote)
+                return LandingResult.Reject(
+                    "score<%.2f(=%.2f)".format(LANDING_MIN_SCORE, mm.maxVal) + priorNote + preMaskNote,
+                    bestDy = preMaskDy,
+                    bestScore = preMaskScore,
+                )
             }
             // 次峰：抑制主峰±[LANDING_SUPPRESS_HALF] 后取最大（不吞相邻周期，孪生卡才能暴露）
             val peakY = Math.round(mm.maxLoc.y).toInt()
@@ -931,6 +977,8 @@ object VoteJudges {
                     "peakGap<%.2f(=%.2f;主峰dy=%d 次峰dy=%d sc=%.2f)".format(
                         LANDING_MIN_PEAK_GAP, gap, bandTopInSearch - peakY, secondDy, second.maxVal,
                     ) + priorNote + preMaskNote,
+                    bestDy = preMaskDy,
+                    bestScore = preMaskScore,
                 )
             }
             LandingResult.Ok(LandingShift(bandTopInSearch - peakY, mm.maxVal, gap))

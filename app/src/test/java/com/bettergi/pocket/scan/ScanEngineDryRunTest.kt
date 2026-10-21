@@ -102,7 +102,9 @@ class ScanEngineDryRunTest {
     private fun assetsDir(): File = dslDir()
 
     // BGR 标量（profiles 色域按 RGB 描述，此处直接给 BGR 顺序）
-    private val GOLD = Scalar(100.0, 180.0, 200.0)     // R200 G180 B100：金谓词命中
+    // R225 G160 B70：金谓词命中，同时满足面板锁的**暖色锁体**（R−G=65、R−B=155）——
+    // 原 R200/G180 的 R−G 只有 20，是不存在于游戏锁徽上的低饱和金，会把锁票喂成未锁。
+    private val GOLD = Scalar(70.0, 160.0, 225.0)
     private val PINK = Scalar(140.0, 150.0, 220.0)     // R220 G150 B140：粉锁徽命中
     private val PURPLE = Scalar(230.0, 120.0, 180.0)   // R180 G120 B230：祝圣紫命中
     private val ORANGE = Scalar(100.0, 150.0, 240.0)   // R240 B100：5★ 橙
@@ -209,6 +211,14 @@ class ScanEngineDryRunTest {
 
         val clicks = ArrayList<Pair<Int, Int>>()
         val swipes = ArrayList<Pair<Pair<Int, Int>, Pair<Int, Int>>>()
+        /**
+         * ★ 2026-10-20：**真正推进页的 swipe**（只含“格点击之后的翻页滑”）。
+         * `swipeGridToTop` 的 3 次回顶 swipe（#258：两轮 + 反向探针）发生在格点击之前，
+         * 列进 [swipes] 供观察，但**不算翻页**、也不推进 mock 的页 —— 否则合成页会整体前移
+         * （5★ 页读成 3★、42→21、首 swipe 方向反转那 8 条旧红）。断言翻页请用本表。
+         */
+        val advanceSwipes = ArrayList<Pair<Pair<Int, Int>, Pair<Int, Int>>>()
+        private var gridClicked = false
         val progress = ArrayList<Pair<String, Map<String, Any?>>>()
         var finished: String? = null
 
@@ -482,6 +492,11 @@ class ScanEngineDryRunTest {
                 val col = ((x - CARD_ORIGIN[0]) / CARD_PITCH[0]).coerceIn(0, GRID_COLS - 1)
                 val row = ((y - CARD_ORIGIN[1]) / CARD_PITCH[1]).coerceIn(0, GRID_TRAVERSE_ROWS - 1)
                 cellIdx = row * GRID_COLS + col
+                // ★ 2026-10-20：区分「入口链点击」与「网格格点击」——只有后者之后的 swipe 才算翻页。
+                //   回顶（swipeGridToTop）发生在格点击之前 ⇒ 不推进 mock 的 pageIndex。
+                val inGrid = x in CARD_ORIGIN[0] until (CARD_ORIGIN[0] + GRID_COLS * CARD_PITCH[0]) &&
+                    y in CARD_ORIGIN[1] until (CARD_ORIGIN[1] + GRID_TRAVERSE_ROWS * CARD_PITCH[1])
+                if (inGrid) gridClicked = true
                 // #48：首格豁免夹具 —— 第一个格的点击**不**推进面板名（其余照旧）
                 if (firstCellNameStuck && clicks.size == entryClicks + 1) return true
                 lastNameCell = "晨光的明誓#" +
@@ -491,8 +506,15 @@ class ScanEngineDryRunTest {
 
             override fun swipe(fromX: Int, fromY: Int, toX: Int, toY: Int): Boolean {
                 swipes += (fromX to fromY) to (toX to toY)
-                // 滑动后画面切到下一页（模拟翻页后的新内容；末页保持不变 → 指纹判到底）
-                if (pageIndex < pages.size - 1) pageIndex++
+                // ★ 2026-10-20：只有**格点击之后**的 swipe 才翻页（回顶的 3 次 swipe 在格点击之前）。
+                //   滑动后画面切到下一页（模拟翻页后的新内容；末页保持不变 → 指纹判到底）
+                if (gridClicked) {
+                    advanceSwipes += (fromX to fromY) to (toX to toY)
+                    // ★ 不回零：跳页页没有格点击，但它的“前进一页”仍是真翻页；
+                    //   回零会让连续 skip 页的后续 swipe 不计（consecutive 用例 4→2）。
+                    //   `gridClicked` 语义 = 本次扫描已经开始点格（回顶 swipe 全在其之前）。
+                    if (pageIndex < pages.size - 1) pageIndex++
+                }
                 return true
             }
         }
@@ -689,6 +711,12 @@ class ScanEngineDryRunTest {
         /** ★ #260 后半：把 (页, 页内格序) = [slowReadAt] 的第一次 OCR 挂慢 [slowReadMs] 毫秒。null/0 = 不注入。 */
         slowReadMs: Long = 0L,
         slowReadAt: Pair<Int, Int>? = null,
+        /**
+         * ★ 2026-10-20：默认把等待压到语义最小（干跑不依赖墙钟）。
+         * 只有**依赖帧新鲜度/时序**的用例才传 true（frozen panel、S2b 锚点停等、strayClick）。
+         * 只改等待，不改任何判据/坐标。
+         */
+        realTiming: Boolean = false,
     ): RunResult {
         // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
@@ -696,6 +724,26 @@ class ScanEngineDryRunTest {
         //    此处直接调 `engine.run()`，不经过 `ScriptRunner.startScan`。
         // ★ 2026-09-19：**关掉入口幂等**——合成帧会让锚点直接命中 ⇒ 入口链点击被跳过 ⇒
         //   下面所有"点击数"断言（ENTER_CHAIN_CLICKS + 21 …）都会失配。夹具要的是"完整走一遍入口链"。
+        // ★ 2026-10-20 干跑提速：语义用例不依赖墙钟，默认把等待压到 1ms/0。
+        //   单页 21 格原来 ~21s 全花在 nav/pstable/spoll/sstable/prefresh 上；压后同一批断言不变。
+        //   realTiming=true 的用例保留生产时序（帧新鲜度/管道进度那几条）。
+        val prevNav = TimingOverrides.navSettleMs
+        val prevPstable = TimingOverrides.panelStableFallbackMs
+        val prevSpoll = TimingOverrides.settlePollMs
+        val prevSstable = TimingOverrides.settleStableMs
+        val prevSigpoll = TimingOverrides.panelSigPollMs
+        val prevPrefresh = TimingOverrides.panelRefreshMs
+        val prevPanelSettle = TimingOverrides.panelSettleMs
+        val prevEntryIdem = TimingOverrides.entryIdempotent
+        if (!realTiming) {
+            TimingOverrides.navSettleMs = 1L
+            TimingOverrides.panelStableFallbackMs = 1L
+            TimingOverrides.settlePollMs = 1L
+            TimingOverrides.settleStableMs = 1L
+            TimingOverrides.panelSigPollMs = 1L
+            TimingOverrides.panelRefreshMs = 0L
+            TimingOverrides.panelSettleMs = 0L
+        }
         TimingOverrides.entryIdempotent = false
         val profile = ScreenProfile(JSONObject(File(assetsDir(), "profiles.json").readText()))
         profile.calibrate(3200, 1440)
@@ -740,7 +788,7 @@ class ScanEngineDryRunTest {
             dedupe = dedupe,
             clock = { System.nanoTime() / 1_000_000 },
             // 合成帧不随点击变化：clickDelay 注入短值，避免每格白等固定延时
-            clickDelayMs = 10L,
+            clickDelayMs = if (realTiming) 10L else 0L,
             // 2026-09-26：翻页重发回路删除后，`dedupe=false` 的用例不再有"指纹不变⇒收尾"这条出口
             // （去重链永不命中、计数器 1026 也达不到）⇒ 需要显式页数的用例用 maxPages 钉住。
             maxPages = maxPages,
@@ -753,6 +801,9 @@ class ScanEngineDryRunTest {
         val prevPipe = TimingOverrides.pipeDepth
         val prevCrop = TimingOverrides.panelCrop
         val prevExplicit = TimingOverrides.pipeExplicit
+        val prevPrb = TimingOverrides.previewRowBackfill
+        // 夹具只合成 3 行（18 格），没有第 4 行可补读；这一路径用真机全量轮次验收。
+        TimingOverrides.previewRowBackfill = false
         TimingOverrides.pipeDepth = pipeDepth
         // ★ A③（#69 流程默认）：`ScanEngine.run()` 现在会按 flowName 给 artifact/weapon 填默认深度，
         //   把手就是 `pipeExplicit`。干跑里本用例集比的正是**传进来的那两档**（0 vs 2），
@@ -797,6 +848,15 @@ class ScanEngineDryRunTest {
             TimingOverrides.pipeDepth = prevPipe
             TimingOverrides.panelCrop = prevCrop
             TimingOverrides.pipeExplicit = prevExplicit
+            TimingOverrides.previewRowBackfill = prevPrb
+            TimingOverrides.navSettleMs = prevNav
+            TimingOverrides.panelStableFallbackMs = prevPstable
+            TimingOverrides.settlePollMs = prevSpoll
+            TimingOverrides.settleStableMs = prevSstable
+            TimingOverrides.panelSigPollMs = prevSigpoll
+            TimingOverrides.panelRefreshMs = prevPrefresh
+            TimingOverrides.panelSettleMs = prevPanelSettle
+            TimingOverrides.entryIdempotent = prevEntryIdem
         }
         return RunResult(engine, h)
 
@@ -1193,7 +1253,7 @@ class ScanEngineDryRunTest {
         //   —— 实测短推进会让重复计数跨页凑满阈值，导致 933 件的全量扫描在第 8 页误停；
         //   见 ScanEngine.dupRollbackConfirmed 的 KDoc 与 _audit/PIPELINE-FEASIBILITY.md §14.20）
         assertEquals(CELLS_PER_PAGE, engine.results.size)
-        assertEquals(2, h.swipes.size)
+        assertEquals(2, h.advanceSwipes.size)
         assertEquals("stopWhen", h.finished)
     }
 
@@ -1264,7 +1324,7 @@ class ScanEngineDryRunTest {
         //    计数器=一页件数 ⇒ 本页点完即「已入库 ≥ 计数器」，收尾判据在**发翻页滑动之前**就成立。
         //    旧断言是 4（1 正式翻页 + 3 次「指纹没变⇒重发」确认）—— 那条重发回路正是 09-26 小米 15 上
         //    静默跳页（一页滑两次 ⇒ 每次丢约 21 件）的源头，已删除；一次翻页有且只滑一次。
-        assertEquals(0, h.swipes.size)
+        assertEquals(0, h.advanceSwipes.size)
     }
 
     /**
@@ -1286,7 +1346,7 @@ class ScanEngineDryRunTest {
         )
         assertEquals(6, engine.results.size)
         assertEquals(ENTER_CHAIN_CLICKS + 6, h.clicks.size)
-        assertEquals(0, h.swipes.size)
+        assertEquals(0, h.advanceSwipes.size)
     }
 
     /**
@@ -1417,7 +1477,7 @@ class ScanEngineDryRunTest {
         //   pageDrift=0 ⇒ cmd = min(876, maxCmd=1090) 再封顶 target = 876 ⇒ 终点 = 1150−876 = 274，
         //   与"照抄 from/to"逐像素相同 ⇒ 本断言钉的是**统一后仍等价**这条不变量。
         //   （`advance.extra`/`dist` 只挂在几何距离上，字面起点下会被忽略并打 warn。）
-        assertEquals((1614 to 1150) to (1614 to 274), h.swipes[0])
+        assertEquals((1614 to 1150) to (1614 to 274), h.advanceSwipes[0])
     }
 
     @Test
@@ -1698,7 +1758,7 @@ class ScanEngineDryRunTest {
         assertEquals(
             "页 0/1/2/3 各一次主滑，第 3 个连续 skip 页在页首抢帧前收尾（不再滑）",
             4,
-            h.swipes.size,
+            h.advanceSwipes.size,
         )
     }
 }

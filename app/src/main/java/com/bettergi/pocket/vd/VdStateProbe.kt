@@ -42,6 +42,12 @@ class VdStateProbe(
             val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return null
             return runCatching {
                 val tasks = am.getRunningTasks(100)
+                // ★ 2026-10-19 华为 API29 诊断：列出拿到的 task 数与各 displayId ——
+                //   EMUI 上该 API 可能只返回调用者自己的 task（VD 的原神看不到）⇒ 误判 Empty。
+                val dump = tasks.joinToString(";") { t ->
+                    "${t.topActivity?.packageName}@${taskDisplayId(t) ?: "?"}"
+                }
+                Log.i(TAG, "topTaskOnDisplay: n=${tasks.size} want=$displayId ⇒ [$dump]")
                 val onVd = tasks.mapNotNull { t -> taskDisplayId(t)?.let { t to it } }
                     .firstOrNull { it.second == displayId }?.first ?: return Pair(null, null)
                 // topActivity 是 public 字段（ComponentName）

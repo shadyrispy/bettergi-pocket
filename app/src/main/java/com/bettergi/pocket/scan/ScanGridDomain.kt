@@ -154,6 +154,10 @@ internal suspend fun ScanEngine.pagedGridCore(
     }
     GridAlign.resetBaseline(gridKey)
     var capturedBaseline = false
+    // ★ 2026-10-20：本列是否出现过**可信落地条带读数**。缺口校验（见 advance 的「回退一行」）
+    //   只在条带曾经可用时启用：整块网格/机型若根本没有可用条带（合成帧、未登记 profile），
+    //   每页都回退一行会把推进量系统性降成 2 行，等于用双倍页数换一个测不到的风险。
+    var fpbandEverAccepted = false
     // §14 A4 pageSkip 状态：页序号 + 上一页最低等级（背包按等级降序 → 末格即本页最低）
     var pageNo = 0
     var pageMinLevel: Int? = null
@@ -170,6 +174,12 @@ internal suspend fun ScanEngine.pagedGridCore(
     //     · 相位有可信读数时**以相位为准覆盖**——落地测量已反映真实结果，再叠余额会重复补偿；
     //     · fpband 不可测 / 未送达 ⇒ 保留兜底值，下一页按它补偿。
     var pageDrift = 0
+    // ★ 2026-10-20（后台武器提前收尾）：**已覆盖件数**（位置判据用）。与 `rowCheckGlobalStart`
+    //   的区别：后者是"本页首格的全局序号"，永远比已覆盖量少**一页**（第 0 页没有上一页可比，
+    //   第一次记账发生在第 1 页末）。收尾判据要的是"点过的列表区间有多长" ⇒ 第 0 页记满页
+    //   格数，之后逐页累加实测前进量（`GridRowCheck` 的内容重叠，重复入库不影响它）。
+    //   SKIP（锚点找不到）按一页格数计 —— 是**下界**：本页整体都是新内容时真实前进 ≥ 一页。
+    var rowCheckCovered = 0
     // 回卷阈值 = **一页卡片数 + 一行**（用户定稿 2026-09-26：不写死 21，随网格尺寸推）。
     //   语义 = "点完一整页无新增、再翻一页、第一行仍无新增" ⇒ 判到尾；配套要求计数**跨翻页累积**
     //   （见下方"不再开页清零"）与 flow 的 `dupPageConfirm`（artifact/weapon 已置 1 = 一次命中即停）。
@@ -294,9 +304,13 @@ internal suspend fun ScanEngine.pagedGridCore(
         // ★ 2026-10-04 华为 EML-AL00：看门狗量的是「**距上一次走完一格**」，不是「本页累计耗时」。
         //   起点与 `pageWall0` 重合（本页第一格之前没有进度可言）。
         var lastProgressAt = pageWall0
-        // ★ 翻页后**清空面板指纹快照**（GOODScanner `reset_panel_fingerprint`）★
-        //   保证**新页第一格必被当作"新的"** ⇒ 必然等待面板变化 ⇒ 不会解析到上一页遗留的面板 ✓
-        //   （此前只在 pageNo==0 清 ⇒ 页首格容易读到上一页遗留 ✗，实测页首格重复现象支持这一点）
+        // ★★ 2026-10-20 修（后台页首格整件漏）：翻页后**保留**面板指纹快照 ★★
+        //   旧注释说"清空 ⇒ 首格必等面板变化"，与闸门的实际实现**相反**：快照为 null 时
+        //   `parsePanel` 的闸门走 `else if (fp0 != null)` 分支**立即放行**，解析到的就是
+        //   上一页遗留的面板 ⇒ contentKey 与末格相同 ⇒ 被去重静默吃掉（0 多、真首格漏 1）。
+        //   后台 a1/a2/a3 各页首重复（p11/p33/p52、p25/p41、p44）全部是这一形态。
+        //   保留快照 ⇒ 页首格必须看到"面板 ≠ 上一页末格"才解析（GOODScanner 的语义是
+        //   "快照非空且相同 ⇒ 等"，不是"清空 ⇒ 等"）。
         curPageNo = pageNo
         curCols = cols
         curTraverseRows = traverseRows
@@ -306,7 +320,6 @@ internal suspend fun ScanEngine.pagedGridCore(
         // ★ #292：本页前进量未定 ⇒ 跨页判据 fail-open；本页武器入库下标表清空（锚点后追认用）。
         curAdvanceRows = -1
         curPageWeaponEmit.clear()
-        panelFpSnapshot = null
         if (pageNo == 0) {
             rowCheckGlobalStart = 0
             panelFpSnapshot = null // 新一轮扫描：清指纹（避免与上一轮残留面板误判同块）
@@ -527,6 +540,24 @@ internal suspend fun ScanEngine.pagedGridCore(
                         //   页末「空读格回读」会把它重新点一遍（跳过白跳过）。
                         lastCellKey = prevAllCellKeys?.getOrNull(copiedFrom).orEmpty()
                         lastCellIdentity = prevAllCellIds?.getOrNull(copiedFrom).orEmpty()
+                        // ★ 2026-10-21 根因（华为 TheExile 4★ / Disenchantment 5★ 锁差）：复制格只抄身份/
+                        //   内容键，**锁/收藏的 vars 仍是本页上一格的** ⇒ 导出字段是"别人的锁"。
+                        //   日志实证：`跨页重叠跳过 page=1 idx=5 ← 上页 idx=11 身份=TheExile/flower/0/hp#4.1,5.6`；
+                        //   该复制格没有面板帧（p1 idx3-11 无 panelShot），扫描现场的 27 张全帧锁 ROI
+                        //   全部可分（已锁 269/228、未锁 0/0）⇒ 不是面板/颜色/裁片问题。
+                        //   复制的内容键里已带源格**最终解析**的 `Ltrue/Lfalse`、`Ftrue/Ffalse`，
+                        //   从这里还原票，导出字段与被复制件的键同源。
+                        val copiedKey = lastCellKey.orEmpty()
+                        // 写 vote 步同一个 sink（pipe>0 = pipePendingVars），并同步到 vars 供本格 emit 用。
+                        val copySink = if (pipeCellVotesStaged) pipePendingVars else vars
+                        if (copiedKey.contains("|Ltrue|")) copySink.locked = true
+                        else if (copiedKey.contains("|Lfalse|")) copySink.locked = false
+                        if (copiedKey.contains("|Ftrue|")) copySink.favorited = true
+                        else if (copiedKey.contains("|Ffalse|")) copySink.favorited = false
+                        if (copySink !== vars) {
+                            vars.locked = copySink.locked
+                            vars.favorited = copySink.favorited
+                        }
                         lastPanelAppeared = true
                         // 复制格也要进**位置表**：`prevAllCellIds` 由 curPageIds 落盘，不写就留空洞
                         //   ⇒ 下页的安全阀/锚定在那格看到"空"⇒ 拒绝跳过 ⇒ 同一条重叠带每页都被重新点。
@@ -1014,9 +1045,66 @@ internal suspend fun ScanEngine.pagedGridCore(
                     "$pageSize ⇒ ${rc.verdict}" + (rc.skipped?.takeIf { it > 0 }?.let { "（漏 $it 件）" } ?: ""),
             )
             rowCheckGlobalStart += (rc.advance ?: (cols * traverseRows))
+            rowCheckCovered += (rc.advance ?: pageSize)
             Log.i(TAG, "pagedGrid[$gridKey] 覆盖率: page=$scannedPage 本页首格全局序号≈$rowCheckGlobalStart")
             if (rc.verdict == GridRowCheck.Verdict.STALL) rowCheckStalls++
             if (rc.verdict == GridRowCheck.Verdict.SKIP) rowCheckSkips++
+            // ★ 2026-10-20：OVERLAP 页补读第 4 行（可见预览行）。
+            //   坏翻页签名：本页 advance≈12/18 ⇒ 下一页首格低约一行（click y≈260）⇒ 本页第 4 行整行被跳过。
+            //   r7/r9/r10 的 6 件级漏块都是这一形态。只补读当前页（相位正常、第 4 行点击点在底栏之上），
+            //   不写 pageKeys ⇒ 行级闭环仍按 18 格计算；补读件的去重交给常规 results 判重。
+            if (TimingOverrides.previewRowBackfill && gridKey == "artifact_backpack" &&
+                rc.verdict == GridRowCheck.Verdict.OVERLAP && !vars.stopRequested
+            ) {
+                val previewBase = cols * traverseRows
+                val previewGeom = pageProfile.gridGeometryFor(gridKey)
+                val previewClick = runCatching { pageProfile.cellCenter(gridKey, previewBase) }.getOrNull()
+                val bottomBarTop = runCatching {
+                    pageProfile.rect("screens.artifact_backpack.filterRoundBtn").top
+                }.getOrNull()
+                    ?: (runCatching { pageCellFrame?.rows() }.getOrNull()?.takeIf { it > 0 } ?: 720) * 88 / 100
+                if (previewGeom != null && previewGeom.rowYs.size > traverseRows &&
+                    previewClick != null && previewClick.y < bottomBarTop - 4
+                ) {
+                    val before = results.size + resultsWeapons.size + resultsCharacters.size
+                    Log.i(
+                        TAG,
+                        "pagedGrid[$gridKey] 预览行补读: page=$scannedPage row=$traverseRows " +
+                            "clickY=${previewClick.y} 底栏上沿=$bottomBarTop（本页 OVERLAP 前进 ${rc.advance}）",
+                    )
+                    // 补读格不计入连续重复/回卷判据（与空读格回读同规则）
+                    suppressDupStreak = true
+                    try {
+                        for (c in 0 until cols) {
+                            val idx = previewBase + c
+                            curCellRow = traverseRows
+                            curCellCol = c
+                            curCellIdx = idx
+                            // 补读行是新的下一行，不是跨页重叠 ⇒ 关掉 identity 丢弃判据
+                            curAdvanceRows = -1
+                            visitBody(this, c, traverseRows, idx, pageProfile)
+                        }
+                        if (TimingOverrides.pipeDepth > 0) pipeJoinPage()
+                    } finally {
+                        suppressDupStreak = false
+                        curCellIdx = -1
+                    }
+                    val added = results.size + resultsWeapons.size + resultsCharacters.size - before
+                    previewRowCells += cols
+                    previewRowAdded += added
+                    Log.i(
+                        TAG,
+                        "pagedGrid[$gridKey] 预览行补读: page=$scannedPage 新增 $added 件" +
+                            "（累计 $previewRowCells 格 / $previewRowAdded 件）",
+                    )
+                } else {
+                    Log.i(
+                        TAG,
+                        "pagedGrid[$gridKey] 预览行补读: page=$scannedPage 跳过（第4行不可点 " +
+                            "y=${previewClick?.y} 底栏=$bottomBarTop rows=${previewGeom?.rowYs?.size}）",
+                    )
+                }
+            }
             // ⚠️ STALL **只计数不回补**（2026-09-16）：整页重复既可能是"真滑空"也可能是"列表到底"
             //   或"半页重叠"（既有单测 `duplicate artifacts across pages are deduped` 正是后者的真实场景：
             //   三页同内容 ⇒ 若这里回补会平白多 2 次滑动、并把"到底"语义搅乱 ✗）。
@@ -1030,10 +1118,16 @@ internal suspend fun ScanEngine.pagedGridCore(
             //   点击不移动列表 ⇒ 失败格内容整页不变 ⇒ 原坐标重访该格即可读到；
             //   位置信息（页内行主序 idx → row/col）本就在手，此前只用 zipWithNext 比内容、丢了行列。
             val failedIdxs = ArrayList<Int>()
-            for (i in 1 until pageIdentities.size) {
-                val prevId = pageIdentities[i - 1]
-                val curId = pageIdentities[i]
-                if (curId.isNotEmpty() && curId == prevId) failedIdxs.add(i)
+            // ★★ 2026-10-20（前台武器多 2）：**武器不能拿"相邻身份相同"当失败信号** ★★
+            //   同款武器连排是合法的（DebateClub/Bloodtainted L1R1 墙），而武器**没有内容键去重**
+            //   ⇒ 这条重访把已经读对的同款格再点一遍、再入库一次（fgw1/fgw3 各多 2 件，
+            //   `定点重访 2/16` 恰好对上）。只有靠内容键去重的网格才能用"重复身份 ⇒ 疑似陈旧"。
+            if (gridKey != "weapon_backpack") {
+                for (i in 1 until pageIdentities.size) {
+                    val prevId = pageIdentities[i - 1]
+                    val curId = pageIdentities[i]
+                    if (curId.isNotEmpty() && curId == prevId) failedIdxs.add(i)
+                }
             }
             // ★★ 2026-09-19 基线定因（96/212 漏件 = 45%）：面板**半新半旧** ——
             //   名字/主词条区已更新（⇒ dup 指纹**检不出**，因为身份前缀不同），
@@ -1115,6 +1209,10 @@ internal suspend fun ScanEngine.pagedGridCore(
                     Log.w(TAG, "  → 定点重访完成：救回 $gained 件（累计 $dupRevisitRecovered/$dupRevisits）")
                 }
             }
+        } else if (scannedPage == 0 && pageKeys.isNotEmpty()) {
+            // 第 0 页没有上一页可比（行级闭环不跑）⇒ 已覆盖量直接取本页格数：
+            // 列表首屏就是第 1..pageSize 件。缺了这一步，位置判据会永远落后一页。
+            rowCheckCovered = pageKeys.size
         }
         rowCheckPrevKeys = ArrayList(pageKeys)
         // ★★ 2026-09-26 方案 C：**收尾主判据 = 件数**，且必须放在"下一页滑动之前"。
@@ -1124,7 +1222,18 @@ internal suspend fun ScanEngine.pagedGridCore(
         //   计数器读不到（null/0）⇒ 本判据不启用，退回下面的回卷链收尾。
         val collected = results.size + resultsWeapons.size + resultsCharacters.size
         val totalForStop = vars.total
-        if (totalForStop != null && totalForStop > 0 && collected >= totalForStop) {
+        // ★★ 2026-10-20（后台武器提前收尾）：件数判据必须**叠加位置判据** ★★
+        //   旧条件只看 `collected >= total`。collected 是**已入库行数**，任何重复读都会把它抬高；
+        //   w1 实测：23 对陈旧帧重复把 collected 顶到 186 ≥ 175 ⇒ 在第 9 页（index 8）就收尾，
+        //   GT 需要 11 页 ⇒ 尾部 lv1 整批没扫到（漏 22 里 16 个是 lv1）。
+        //   位置判据用 `rowCheckCovered`（已覆盖件数 = 第 0 页格数 + 逐页实测前进量，来自
+        //   **内容重叠**，不受重复入库影响）。取 **>=** 是保守方向：只会多翻一页，
+        //   绝不会在列表未走完时提前收尾（`+pageSize` 的上界会低估剩余、是危险方向，禁用）。
+        //   ⚠️ **第 0 页不启用位置判据**（`scannedPage`：`pageNo` 在页体之前就自增了，
+        //   这里看到的是下一页编号）。理由是保持"一页即到底"的旧行为：第 0 页的覆盖
+        //   由既有 `counterCap`（total < 一页格数）与件数判据负责。
+        val positionReached = scannedPage == 0 || rowCheckCovered >= (totalForStop ?: Int.MAX_VALUE)
+        if (totalForStop != null && totalForStop > 0 && collected >= totalForStop && positionReached) {
             // 终止权不挂在**单次** OCR 读数上：达标时再读一次，取较大者。
             // 首次读数是非零的偏小值时（96→968 这类丢位），原先会静默提前收尾，
             // 而 run() 里的「总数不符」告警在 stopRequested 分支被跳过 ⇒ 少一屏也报完成。
@@ -1133,7 +1242,8 @@ internal suspend fun ScanEngine.pagedGridCore(
             if (collected >= confirmed) {
                 Log.i(
                     TAG,
-                    "pagedGrid[$gridKey]: 件数达标（复读确认 计数器=$confirmed）已入库=$collected ⇒ 收尾（不再翻页）",
+                    "pagedGrid[$gridKey]: 件数达标（复读确认 计数器=$confirmed 已覆盖=$rowCheckCovered）" +
+                        "已入库=$collected ⇒ 收尾（不再翻页）",
                 )
                 break
             }
@@ -1142,6 +1252,14 @@ internal suspend fun ScanEngine.pagedGridCore(
                 TAG,
                 "pagedGrid[$gridKey]: 首次计数器=$totalForStop 复读=$again ⇒ 抬到 $confirmed" +
                     "（已入库=$collected 未达标 ⇒ 不收尾，继续翻页）",
+            )
+        } else if (totalForStop != null && totalForStop > 0 && collected >= totalForStop && !positionReached) {
+            // 只观测：这是"重复读把件数顶到达标、但列表还没走完"的确诊日志。修完陈旧帧后
+            // 正常轮应恒为 0；若仍出现，先查本轮的重复来源，别在这里放宽。
+            Log.w(
+                TAG,
+                "pagedGrid[$gridKey]: 件数已达标（$collected≥$totalForStop）但位置未到（$rowCheckGlobalStart）" +
+                    "⇒ 疑似重复入库抬高计数，继续翻页",
             )
         }
         val minCmd = Math.round(rowPitch * 0.6f)
@@ -1190,7 +1308,7 @@ internal suspend fun ScanEngine.pagedGridCore(
             )
         }
         swipeLogged(gridKey, swipeFrom.x, swipeFrom.y, swipeFrom.y - injected, "主滑")
-        val latest = awaitGridStable(
+        var latest = awaitGridStable(
             profile, gridKey, requireChange = true, minElapsedMs = SWIPE_CHAIN_MS,
         )
         // ── ★ 相位消化（2026-09-14 整体改造）：唯一主判据 = fpband 落地条带 ──────────────
@@ -1215,6 +1333,10 @@ internal suspend fun ScanEngine.pagedGridCore(
         //   禁止再回退特征锁平移。超限档 |φ|∈(126,146] 正是特征锁最易锁到邻行的区间，
         //   且回退平移与定稿「超限 ⇒ 本页不平移」相反。Reject/未送达/未登记 ⇒ 保持 false ⇒ 允许回退。
         var fpbandAccepted = false
+        var landingRejected = false
+        // ★ 2026-10-21：拒测时**先验窗屏蔽前**的全局最佳候选位移（px，Reject.bestDy）。
+        //   只用于下方的「回退一行」闸门：dy 小 ⇒ 欠滚/滑空，回退会把仅有的推进抵消成 0。
+        var landingRejectBestDy: Int? = null
         if (landingBand != null && landingGeom != null) {
             val gCur = grayOf(latest)
             if (gCur != null) {
@@ -1232,6 +1354,7 @@ internal suspend fun ScanEngine.pagedGridCore(
                             landingBand!!, search, landingGeom.y0 - landingGeom.sy0, advTarget, priorHalf,
                         )) {
                             is VoteJudges.LandingResult.Ok -> {
+                                fpbandEverAccepted = true
                                 val L = lr.shift.dy
                                 // #70 几何先验：逐页取整（绝不累加），只与内容判决并排打印。
                                 val rows = GridAlign.rowsAdvanced(L, rowPitch)
@@ -1278,6 +1401,8 @@ internal suspend fun ScanEngine.pagedGridCore(
                             }
                             is VoteJudges.LandingResult.Reject -> {
                                 phiSrc = "fpband拒"
+                                landingRejected = true
+                                landingRejectBestDy = lr.bestDy
                                 Log.w(TAG, "advance[$gridKey]: 落地条带不可测(${lr.reason}) ⇒ 回退特征锁")
                             }
                         }
@@ -1291,6 +1416,44 @@ internal suspend fun ScanEngine.pagedGridCore(
             // ★ 2026-09-16（审计 P2-6）：模板**不在此处释放** —— 否则走「到底重发」回边时条带已失效，
             //   只能回退特征锁（±70px）。条带取自**本页首次滑动前**的帧，重发后仍是它的平移且搜索窗
             //   含原位 ⇒ 依旧可测。释放挪到本页翻页真正结束处（下方 while(true) 出口）。
+        }
+        // ★ 2026-10-20（华为整行漏件）：条带**拒测** ⇒ 先回退一行再扫。
+        //   根因（hwfull_a1 p51→p52）：exec `input swipe` 的系统 fling 在部分设备上会多滚一行
+        //   （3 行变 4 行）；条带拒测时拿不到实际行数，而身份锚定只能发现「重叠」、对「缺口」无感
+        //   ⇒ 整行 6 格静默跳过（BS fg4 同一背包顺序逐格证实）。
+        //   回退一行后：正常 3 行 ⇒ 与上页重叠 1 行（锚定照常跳过）；过冲 4 行 ⇒ 正好露出被跳过的那行。
+        //   只认 Reject（测了但不可信）；「手势未送达」与无条带网格不碰，避免把「到底」当成过冲。
+        // ★ 2026-10-21（华为尾部漏件）：回退再加**位移下限** —— 屏蔽前最佳 dy ≥ 1.5 行距才回退。
+        //   根因（hwfull 尾部）：一次翻页只前进 ~1 行（日志 `屏蔽前最佳 dy=79 sc=0.91`，行距 139），
+        //   回退一行把仅有的 1 行推进**抵消成 0** ⇒ 整页 18 件重复、提前收尾漏 4 件。
+        //   欠滚/滑空（bestDy < 1.5 行或未知）本身没有缺口风险，回退只会制造重复 ⇒ 绝不回退；
+        //   原始缺口 p51→p52 的屏蔽前最佳 dy=415（≈3 行）仍 ≥ 门限 ⇒ 照常回退。
+        if (landingRejected && fpbandEverAccepted &&
+            landingRejectBestDy != null && landingRejectBestDy >= (rowPitch * 1.5).toInt()
+        ) {
+            val c0 = runCatching { pageProfile.cellCenter(gridKey, 0) }.getOrNull()
+            if (c0 != null) {
+                val frameH = latest.rows()
+                val backTo = (c0.y + rowPitch + rowPitch / 4).coerceAtMost(frameH - 8)
+                if (backTo > c0.y + rowPitch / 2) {
+                    Log.w(
+                        TAG,
+                        "advance[$gridKey]: 落地条带拒测 ⇒ 回退一行做缺口校验" +
+                            " bestDy=${landingRejectBestDy} (${swipeFrom.x},${c0.y})→(${swipeFrom.x},$backTo)",
+                    )
+                    swipeLogged(gridKey, swipeFrom.x, c0.y, backTo, "回退一行")
+                    latest.release()
+                    latest = awaitGridStable(
+                        profile, gridKey, requireChange = true, minElapsedMs = SWIPE_CHAIN_MS,
+                    )
+                    advanceBacktracks++
+                } else {
+                    Log.w(
+                        TAG,
+                        "advance[$gridKey]: 落地条带拒测但无回退空间(y=${c0.y} H=$frameH) ⇒ 不做缺口校验",
+                    )
+                }
+            }
         }
         // ★ 2026-09-24 试过新增一个"绝对行顶检测"（detectRow − 名义行顶）来取代条带，已回滚删除，
         //   run7 实测**否决**：28 页读数在 −137..+119 乱跳，而同一时刻 20px 标尺量到卡片
@@ -1307,24 +1470,44 @@ internal suspend fun ScanEngine.pagedGridCore(
         var rulerUsed = false
         val bandPhi = pageOffset
         val bandSrc = phiSrc
+        // ★ 2026-10-20 根因（第二层）：条带增量 + **上一页已施加相位** = 真实绝对相位。
+        //   底栏 δ 只是卡内某条周期亮带的众数：星带/下一行标签也能赢（r12 p41 δ=66 带数=18，
+        //   条带预测 -62；点击 y=263 越过顶行，6 件块从未被点）。而且旧 ruler 路径把 pageDrift 清零，
+        //   条带残差不再记账 ⇒ 相位逐页漂到 ±half 边缘（r11 δ 从 0 漂到 +61）。
+        //   现在：条带可用 ⇒ 相位 = prevPhase + φ（mod pitch），pageDrift 保留条带的增量记账；
+        //   底栏只做交叉校验/兜底（条带不可用时才决定点击）。
+        val prevPhase = runCatching {
+            Math.round(pageProfile.gridRowOffset * pageProfile.scaleY).toInt()
+        }.getOrDefault(0)
         val phase = GridAlign.rowPhase(latest, profile, gridKey)
-        if (phase != null) {
+        if (fpbandAccepted && bandPhi != null) {
+            val predicted = GridAlign.centeredMod(prevPhase + bandPhi, rowPitch)
+            pageOffset = predicted
+            phiSrc = "条带+上页"
+            rulerUsed = true
+            val cross = phase?.let {
+                val modDiff = Math.abs(GridAlign.centeredMod(it.offset - predicted, rowPitch))
+                val absDiff = Math.abs(it.offset - predicted)
+                "底栏 δ=${it.offset} 带数=${it.bars} abs差=$absDiff mod差=$modDiff"
+            } ?: "底栏不可测"
+            Log.i(
+                TAG,
+                "advance[$gridKey]: 条带+上页相位 ${prevPhase}+${bandPhi} ⇒ $predicted（$cross）" +
+                    "；条带 φ=$bandPhi($bandSrc) 继续记账 pageDrift=$pageDrift",
+            )
+        } else if (phase != null) {
             val half = rowPitch / 2
             if (Math.abs(phase.offset) <= half) {
                 pageOffset = phase.offset
                 phiSrc = "底栏绝对"
                 rulerUsed = true
-                // ⚠️ **记账必须为 0**（run10 实测：把折叠后的 δ 记进下一次主滑 ⇒ 整轮提前收在 20 页）。
-                //   δ 是 mod pitch 折叠过的相位（+134 与 −144 是同一个画面），因此它**只够回答
-                //   "卡现在在哪个相位"**，不够回答"上一滑少滚/多滚了多少行"。用它做累积性补偿
-                //   （缩短命令）会在"其实是欠滚但折成负"的页上越补越少 ⇒ 页间重叠单调增大 ⇒
-                //   duplicateStreak 判到底。欠/过滚的记账继续归条带那条（它本来就是增量语义）。
+                // 条带不可用 ⇒ 没有增量源，只能把记账清零（旧行为）。
                 pageDrift = 0
                 Log.i(
                     TAG,
                     "advance[$gridKey]: 底栏绝对行相位 δ=${phase.offset}px" +
                         "（列 ${phase.columns} 票 ${phase.votes} 一致带 ${phase.spread}px 带数 ${phase.bars}）" +
-                        " ⇒ 点击按实测行顶；对照：条带 φ=$bandPhi($bandSrc)；本路**不记账**（pageDrift 恒 0，见上）",
+                        " ⇒ 点击按实测行顶；对照：条带 φ=$bandPhi($bandSrc)；条带不可用 ⇒ 记账清零",
                 )
             } else {
                 Log.w(
@@ -1334,7 +1517,7 @@ internal suspend fun ScanEngine.pagedGridCore(
                 )
             }
         } else {
-            Log.w(TAG, "advance[$gridKey]: 底栏绝对行相位不可测 ⇒ 沿用 $bandSrc（φ=$bandPhi，仅对照）")
+            Log.w(TAG, "advance[$gridKey]: 底栏绝对行相位不可测、条带也不可用 ⇒ 沿用上一页相位（prev=$prevPhase）")
         }
         if (pageOffset == null && !fpbandAccepted) {
             // 回退：特征锁（fpband 未跑/未登记/拒/未送达——未送达页画面没动，测出即上一页相位）

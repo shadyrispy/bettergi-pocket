@@ -429,7 +429,12 @@ class ScriptRunner(
                     // #83：页首前台闸门。null（无障碍未连接/还没观察到窗口切换）= 放行，
                     // 与注入侧 `allowInject` 对"未知"的口径一致 —— 拦它会把整条流程变全 false。
                     // #310 / M0：实现收口到 [probe]（默认 ACCESSIBILITY，行为与抽取前逐位一致）。
-                    foregroundOk = { probe.isGameInForeground() ?: true },
+                    // ★ 2026-10-20（后台复验被自身拦停）：**后台模式不能看宿主前台** —— 游戏在
+                    //   VD（display 11）上，宿主前台是脚本管理页 ⇒ a11y 探针恒 false ⇒ 扫描第 0 格
+                    //   就报「前台不是原神」。以前没炸是因为 a11y 缓存恰好空（null fail-open）；
+                    //   重新绑定 a11y 后缓存读到管理器，问题才显形。后台的起跑闸已由
+                    //   `BackgroundSession.isHealthy()` 负责，这里恒 null 放行。
+                    foregroundOk = if (activeActions != null) null else ({ probe.isGameInForeground() ?: true }),
                     // ★ 2026-10-15 S4a：同包名的 SDK 登录/切号页探针（顶号时常见）。
                     //   不能并进上面那条 —— 那条按**包名**判，而 SDK 页与游戏同包名 ⇒ 恒放行；
                     //   这条走**类名**（GenshinPackages.isSdkActivity，与 #283 起跑闸同源）。

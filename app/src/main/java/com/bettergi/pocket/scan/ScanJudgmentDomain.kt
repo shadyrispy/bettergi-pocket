@@ -569,14 +569,13 @@ internal suspend fun ScanEngine.lockClickAdaptive(): Pair<Int, Int> {
 }
 
 /**
- * 诊断（#96，已定案）：把面板锁钮区在**同一帧**上的 gold / 红锁 两种掩码计数都打出来。
+ * 诊断（#96 定案；2026-10-21 校正）：同帧打**判据实际使用的** [VoteJudges.WARM_LOCK] 计数，
+ * 旧 gold/red 只作历史对照。
  *
- * 当初的疑问是「`settle` 读到已锁、1.5s 后 `verify` 读到未锁」，两个候选解释（按下动画帧 /
- * 判据方向反了）**都不成立**：真因是调用方把 `lockClickAdaptive()` 返回的坐标又点了一次
- * （见 click 步骤里 `clickedWhileResolving` 的注释）。实测稳态读数：
- * **已锁 = gold≈871 且 red≈900**（金边红锁，两掩码在 G∈[120,140] 本就重叠，不是二选一）；
- * **未锁 = gold=0 且 red=0**。⇒ `panelLock` 的 gold 判据方向是对的。
- * 留着这段是因为"读数自相矛盾"这类问题只有同帧双判据能一次分辨，重跑流程看不出来。
+ * ⚠️ 原 KDoc 写「未锁 = gold=0 且 red=0」**只在 2560 大档成立**：1280 档的灰开锁按钮
+ * （中性灰蓝 R≈G≈B≈170）有抗锯齿暗边漏进 RED_LOCK，实测 52 命中 > 门槛 10 ⇒ **这就是
+ * a3/a5/a6 每轮 2 件「未锁读成已锁」的根因**。暖色域下未锁 0 命中、已锁 201–312。
+ * 留双色域是为了"读数自相矛盾"类问题能一次分辨，但**判决只看 warm**。
  */
 internal fun ScanEngine.probeLockPixels(frame: Mat, tag: String) {
     val obj = profile.zone("artifact.panel.lock") ?: return
@@ -585,12 +584,15 @@ internal fun ScanEngine.probeLockPixels(frame: Mat, tag: String) {
     val sh = profile.zhushengShiftPx
     val a = base.shiftedBy(0)
     val b = base.shiftedBy(sh)
+    val thr = profile.countThreshold(VoteJudges.Thresholds.PANEL_LOCK_GOLD)
     Log.i(
         TAG,
-        "lockPixels[$tag]: 零位 gold=${VoteJudges.countMatches(frame, a, VoteJudges.GOLD)}" +
-            " red=${VoteJudges.countMatches(frame, a, VoteJudges.RED_LOCK)} |" +
-            " +$sh gold=${VoteJudges.countMatches(frame, b, VoteJudges.GOLD)}" +
-            " red=${VoteJudges.countMatches(frame, b, VoteJudges.RED_LOCK)}",
+        "lockPixels[$tag]: 零位 warm=${VoteJudges.countMatches(frame, a, VoteJudges.WARM_LOCK)}" +
+            " (阈值$thr) | +$sh warm=${VoteJudges.countMatches(frame, b, VoteJudges.WARM_LOCK)}" +
+            " || 旧域 gold=${VoteJudges.countMatches(frame, a, VoteJudges.GOLD)}" +
+            "/${VoteJudges.countMatches(frame, b, VoteJudges.GOLD)}" +
+            " red=${VoteJudges.countMatches(frame, a, VoteJudges.RED_LOCK)}" +
+            "/${VoteJudges.countMatches(frame, b, VoteJudges.RED_LOCK)}（仅对照，不参与判决）",
     )
 }
 
@@ -1515,7 +1517,13 @@ internal suspend fun ScanEngine.vote(
                 if (step.optString("as") == "curLock") sink.curLock = sink.locked
             }
             "artifact.panel.astral" -> {
-                sink.favorited = VoteJudges.panelAstral(frame, profile, yShift).matched
+                // ★ 2026-10-20：双区判定（与 artifact.panel.lock 同款）—— 祝圣横幅漏投时
+                //   crafted=false ⇒ yShift=0 ⇒ 收藏星标读到未移位的行；而「空词条自愈」在
+                //   消费者侧（裁片坐标，拿不到整帧重投）。这里一次判两个区，正常件两区都读不到
+                //   金标（移位区是词条行/空档），真祝圣件由移位区命中。
+                val shift = profile.zhushengShiftPx
+                sink.favorited = VoteJudges.panelAstral(frame, profile, 0).matched ||
+                    (shift > 0 && VoteJudges.panelAstral(frame, profile, shift).matched)
             }
             "artifact.rarity" -> {
                 sink.rarity = VoteJudges.rarityFromBanner(frame, profile)
@@ -1735,6 +1743,12 @@ internal suspend fun ScanEngine.waitReadyBySignature(
     what: String,
     /** 认定"已稳定"所需的**跨帧**连同样本数（默认 [SIG_STABLE_SAMPLES]）。 */
     stableSamples: Int = SIG_STABLE_SAMPLES,
+    /**
+     * ★ 2026-10-20：**首次检出变化之后**至少要再等这么久才允许判稳（默认 0 = 旧行为）。
+     * 用于武器面板：后台 VD 帧在切换初期会先冒一个"仍像上一件"的稳定态，2×20ms 就判稳
+     * 会解析到上一把武器（相邻格同身份重复）。见 [TimingOverrides.weaponPanelSettleMs]。
+     */
+    minAfterChangeMs: Long = 0L,
     confirm: (suspend () -> Boolean)? = null,
 ): Boolean {
     val roiI = roi.toIntRect()
@@ -1802,7 +1816,8 @@ internal suspend fun ScanEngine.waitReadyBySignature(
                 val sameAsPrev = p != null && changedFraction(p, cur, sigBlocks) == 0f
                 sameStreak = if (sameAsPrev && genChanged) sameStreak + 1 else 1
                 if (genChanged) tmSigSamples++
-                stable = sameStreak >= stableSamples && waited >= minMs
+                stable = sameStreak >= stableSamples && waited >= minMs &&
+                    (firstChangeAt < 0 || waited - firstChangeAt >= minAfterChangeMs)
             }
             !changedEver -> {
                 if (genChanged) tmSigSamples++

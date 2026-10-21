@@ -103,6 +103,7 @@ class TriggerSettingsRepository(context: Context) : SettingsGateway {
                 .putBoolean(KEY_SCAN, updated.scanEnabled)
                 .putString(KEY_SCAN_FLOW, updated.scanFlow)
                 .putInt(KEY_SCAN_MAX_PAGES, updated.scanMaxPages)
+                .putString(KEY_RUN_MODE, updated.runMode.wire)
                 .apply()
         }
         // 无障碍进程观察这个 URI 来刷新悬浮窗（同 UID 跨进程，notifyChange 可送达）

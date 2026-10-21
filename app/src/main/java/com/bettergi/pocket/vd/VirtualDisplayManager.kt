@@ -144,8 +144,12 @@ class VirtualDisplayManager(
         frameSourceGenerationProbe: (() -> Long)? = null,
     ): Int {
         if (display != null) {
-            Log.w(TAG, "create：已有虚拟显示器（displayId=$displayId），先 destroy 再建")
-            return -1
+            // ★ 2026-10-20（装包/重启后后台起屏恒失败）：旧实现**只打日志就 return -1**，
+            //   "先 destroy 再建"从没执行 —— Shizuku 用户服务进程跨 `install -r` 存活，
+            //   它手里的 display 还在 ⇒ 新会话每次 create 都撞「已有虚拟显示器」→ 建屏失败。
+            //   这里按注释的原意真正释放旧的，再用新 surface 建。destroy 幂等、内部 runCatching。
+            Log.w(TAG, "create：已有虚拟显示器（displayId=$displayId）⇒ 先 destroy 再建")
+            destroy()
         }
         // ★ BS 实测修复（VdShellContext KDoc）：shell uid 下 createVirtualDisplay 校验
         //   packageName vs calling uid —— 包装已在构造时统一做（VdShellContext.wrap），

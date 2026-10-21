@@ -306,12 +306,18 @@ internal suspend fun ScanEngine.parsePanel(
     //   对齐 GOODScanner backpack_scanner.rs:1417（is_duplicate ⇒ 面板等待直接不走）。
     //   语义：等的是「面板变化」，同一件点了面板本就不会变 ⇒ 等是白等。
     //   快照更新与「可能陈旧帧」W 日志路径保留（waited=0 < 任何预算 ⇒ 走 else-if 打 W）。
+    // ★ 2026-10-20（后台页首格）：本页第 0 格必须**无条件**等面板变化 —— 页首快照现在是
+    //   上一页末格的面板（见 pagedGrid 开页处），而 `gridCellChanged` 只比**卡格**指纹：
+    //   同款卡面（同套同部位）会判"没换"⇒ 走 DUP 短等待甚至 dupskip=0 的零等待 ⇒ 读到
+    //   上一页遗留面板 ⇒ 首格被去重静默吃掉。页首用完整预算，且不受 dupskip 影响。
+    val pageFirstCell = curCellIdx == 0
     val fpWaitMs = when {
+        pageFirstCell -> PANEL_FP_WAIT_MS
         !gridCellChanged && TimingOverrides.duplicateCellSkipWait -> 0L
         gridCellChanged -> PANEL_FP_WAIT_MS
         else -> PANEL_FP_DUP_WAIT_MS
     }
-    if (!gridCellChanged && TimingOverrides.duplicateCellSkipWait) {
+    if (!pageFirstCell && !gridCellChanged && TimingOverrides.duplicateCellSkipWait) {
         Log.i(TAG, "面板指纹：重复格（卡格指纹未变）⇒ 跳过等待，直接解析")
     }
     // 每格先按"未出现"处理；检测到指纹变化/新快照即置 true（见下）
@@ -793,6 +799,40 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //      ⇒ 一旦把 name 槽也平移，
     //      祝圣件的单件名会读成别的行 ⇒ 反推链直接断掉。**不要"顺手"给 name/slot/main 加 shift。**
     val yShift = if (vars.crafted) profile.zhushengShiftPx else 0
+    // ★★ 2026-10-20：lock/收藏票在**最终解析帧**上重投 ★★
+    //   flow 的 vote 步跑在 click 收敛帧上，而本函数拿到的是指纹闸门换帧/裁片后的帧；
+    //   两帧不一致时同一件会读出 Lfalse/Ltrue 两个内容键（fg2：prb 行 Lfalse + 下一页首行
+    //   Ltrue ⇒ 多 1），lock 字段也在轮间抖动 5–11 件。这里按与 vote 步**相同的双区口径**
+    //   重投（origin 处理裁片），保证内容键与导出字段读的是同一张稳定帧。
+    if (panelKey == "artifact_backpack") {
+        val settleShift = profile.zhushengShiftPx
+        // ★ 2026-10-20：下移位只对**祝圣件**有意义。非祝圣件面板没有横幅、内容不下移，
+        //   无条件 OR 下移位会让模板在低星 0 级件上误命中（hwfix_a1：3 件 lock 由 false 翻 true，
+        //   且同一件预览行/正常行两次读的 lock 不一致 ⇒ 多 1 件）。crafted 误判为 false 的
+        //   祝圣件由下面的空词条自愈路径先验 level+4 行、采纳后同步 crafted=true，再走本判据。
+        val lockBase = VoteJudges.panelLock(frame, profile, 0, origin).matched
+        val lockShift = settleShift > 0 && VoteJudges.panelLock(frame, profile, settleShift, origin).matched
+        val astralBase = VoteJudges.panelAstral(frame, profile, 0, origin).matched
+        val astralShift = settleShift > 0 && VoteJudges.panelAstral(frame, profile, settleShift, origin).matched
+        // ★ 2026-10-21 审计：原条件 `base != shift` 对**正常件也成立**（锁只在一个带里：
+        //   未祝圣 base=true/shift=false、祝圣 base=false/shift=true）⇒ a7 全量打了 990 行
+        //   "分歧"，把正常态当异常。只报**不该同时成立**的组合：两带都命中，或 crafted 与
+        //   命中带相反（crafted=true 却 base 命中 / crafted=false 却 shift 命中）。
+        val bothLock = lockBase && lockShift
+        val bothAstral = astralBase && astralShift
+        val oddLock = (vars.crafted == true && lockBase) || (vars.crafted == false && lockShift)
+        val oddAstral = (vars.crafted == true && astralBase) || (vars.crafted == false && astralShift)
+        if (bothLock || bothAstral || oddLock || oddAstral) {
+            Log.w(
+                TAG,
+                "面板票异常: lock base=$lockBase shift=$lockShift astral base=$astralBase shift=$astralShift " +
+                    "crafted=${vars.crafted} bothLock=$bothLock bothAstral=$bothAstral " +
+                    "oddLock=$oddLock oddAstral=$oddAstral page=$curPageNo r${curCellRow}c${curCellCol}",
+            )
+        }
+        vars.locked = lockBase || (vars.crafted && lockShift)
+        vars.favorited = astralBase || (vars.crafted && astralShift)
+    }
 
     // 一次批量读全部文本槽（name/mainName/level/subStats×4 (+setName) (+equipped)）——单帧单调用，
     // 返回与 rects 一一对应（blank 保留占位，按索引取回）。
@@ -1026,6 +1066,86 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     // ★ #269：词典键提到局部变量，下方 roll 重裁链（:1007 附近）用的是**同一个吸附**。
     val subDictKey = dict?.optString("subStats")?.takeIf { it.isNotEmpty() }
     subDictKey?.let { substats = snapSubstats(substats, rarity, it) }
+
+    // ★★ 2026-10-20（后台祝圣横幅漏投 ⇒ 整件静默漏）：空词条时按**另一套 yShift 对齐**原地重读 ★★
+    //   现象（a1/a2/a3 共 9 格，同一件会在不同轮反复中招）：面板原文恒为
+    //   `件名 | 主词条 | S院 | 0 | 真1 | 真2 | 真3` —— 内容整体下移一行（祝圣横幅把
+    //   level/副词条区下移 zhushengShiftPx），而 `artifact.panel.zhusheng` 在这帧没命中
+    //   （后台 VD 帧里紫色横幅比布局晚一拍画完）⇒ crafted=false ⇒ yShift=0 ⇒ level 读到
+    //   横幅碎片（"S院" 经 fixDigits 变成 5）、首条副词条位读到 "0"、parseBlock 首行不可
+    //   解析 ⇒ 整块为空 ⇒ 「丢弃读失败条目」。GT 复核：这些件全部 elixerCrafted=true、
+    //   level=20、4 词条；背包页末回读读到的还是同一帧内容，所以回读救不回。
+    //   修法：同一帧上按另一套对齐（yShift 取反）重读 level+副词条；**必须过 RollSolver**
+    //   才采纳 —— 把"对齐猜错/半幅帧读出的残块"挡在外面。采纳后同步 crafted/收藏/锁态三票。
+    if (panelKey == "artifact_backpack" && substats.isEmpty() && pieceName != null && rarity >= 4) {
+        val altShift = if (yShift > 0) 0 else profile.zhushengShiftPx
+        if (altShift != yShift) {
+            val altLevelRect = sh(profile.rect("$base.level").shiftedBy(altShift))
+            val altSubRects = (0 until subStatsArr.length()).map { i ->
+                val r = subStatsArr.getJSONArray(i)
+                sh(profile.scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3)).shiftedBy(altShift))
+            }
+            val altLines = runCatchingCancellable {
+                ocr.readRois(frame, listOf(altLevelRect) + altSubRects)
+            }.getOrNull()
+            val altLevelText = altLines?.firstOrNull()?.takeIf { it.isNotBlank() }
+            val altLevel = altLevelText?.let { StatParser.extractValue(it)?.toInt() }
+            val altRaw = altLines?.let { ls ->
+                val judged = altSubRects.indices.map { i ->
+                    val t = ls.getOrNull(1 + i).orEmpty()
+                    if (t.isBlank()) t else when (VoteJudges.substatRowPending(frame, altSubRects[i], profile)) {
+                        true -> if (t.contains("待激活")) t else "$t（待激活）"
+                        else -> t
+                    }
+                }
+                StatParser.parseBlock(judged, names)
+            } ?: emptyList()
+            val altSnapped = subDictKey?.let { snapSubstats(altRaw, rarity, it) } ?: altRaw
+            val altSolved = if (altSnapped.isNotEmpty() && altLevel != null) {
+                RollSolver.solve(
+                    rarity,
+                    altLevel,
+                    altSnapped.map { RollSolver.In(it.key, it.value, it.inactive) },
+                )
+            } else {
+                null
+            }
+            if (altSolved != null) {
+                Log.w(
+                    TAG,
+                    "空词条自愈：按${if (altShift > 0) "下移" else "原位"}对齐重读成功" +
+                        "（page=$curPageNo r${curCellRow}c${curCellCol} piece=$pieceName " +
+                        "level 原读=${levelText ?: "-"}→$altLevel 词条 ${altSnapped.size} 条 " +
+                        "crafted ${vars.crafted}→${altShift > 0}）",
+                )
+                levelText = altLevelText
+                vars.level = altLevel ?: vars.level
+                vars.crafted = altShift > 0
+                substats = altSnapped
+                subRects = altSubRects
+                // 票**不在这里重投**：本函数拿到的可能是裁片（pipe>0），面板判据的 rect 是整帧坐标；
+                // 锁/收藏在 vote 步已按双区判定（见 artifact.panel.astral 的 2026-10-20 注释），
+                // 漏投的祝圣件也能读到正确的星标。
+                // ★ 2026-10-20：上面的最终解析锁票现在只对 crafted=true 才用下移位；本路径刚把
+                //   crafted 从误判的 false 改成 true ⇒ 必须在这里补一次下移位锁/收藏票，否则
+                //   祝圣件的锁会被最终解析的 base-only 票覆盖成 false。
+                if (altShift > 0) {
+                    vars.locked = (vars.locked == true) ||
+                        VoteJudges.panelLock(frame, profile, altShift, origin).matched
+                    vars.favorited = (vars.favorited == true) ||
+                        VoteJudges.panelAstral(frame, profile, altShift, origin).matched
+                }
+                craftedRescues++
+            } else {
+                Log.w(
+                    TAG,
+                    "空词条自愈：${if (altShift > 0) "下移" else "原位"}对齐重读未过 solver" +
+                        "（page=$curPageNo r${curCellRow}c${curCellCol} piece=$pieceName " +
+                        "level=$altLevel 词条 ${altSnapped.size} 条）⇒ 维持丢弃/回读",
+                )
+            }
+        }
+    }
 
     // ★ A1'（2026-09-16）：把单件名规范化为**词典标准名**，供去重键使用（见内容键注释）。
     //   只影响"入键用的名字"，不改变 setKey 反推本身；词典未命中/未注入词典时回落原始名。

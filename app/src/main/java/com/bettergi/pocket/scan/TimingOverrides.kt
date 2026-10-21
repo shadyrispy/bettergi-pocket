@@ -77,6 +77,23 @@ object TimingOverrides {
     var weaponPanelDelayMs: Long = 0L
 
     /**
+     * ★ 2026-10-20（后台武器相邻格重复）：武器点击后，**面板内容带**从首次检出变化起
+     * 至少再等这么久才允许判稳（`wpsettle=<ms>`，0 = 关，默认 [DEFAULT_WEAPON_PANEL_SETTLE_MS]）。
+     *
+     * 为什么需要：后台 VD 帧里面板切换会先冒一帧"仍像上一件"的稳定态（交叉淡入/旧帧），
+     * 旧路径 2×20ms 就判稳 ⇒ 解析到上一把武器 ⇒ 同一身份相邻两格各入库一次（多在 24-25 对/轮），
+     * 被挤掉的真件则表现为漏。GOODScanner 对武器用 FixedDelay 50ms + `ensure_panel_stable(100)`；
+     * 后台实测坏帧在点击后 ~157ms 仍在，故取 150ms 起步。
+     */
+    var weaponPanelSettleMs: Long = DEFAULT_WEAPON_PANEL_SETTLE_MS
+
+    /**
+     * 圣遗物面板闭锁图标的最短点击龄（`locksettle=<ms>`，0 = 关，默认 [ScanEngine.PANEL_LOCK_SETTLE_MS]）。
+     * 见该常量的取证：点击后早抓的收敛帧里锁徽可能仍是上一件状态。
+     */
+    var panelLockSettleMs: Long = ScanEngine.PANEL_LOCK_SETTLE_MS
+
+    /**
      * 签名不可用时那条**固定等待**的覆盖值（`prefresh=<ms>`，`-1` = 用 [ScanEngine.PANEL_REFRESH_MS]）。
      * 角色流水每格都走这一档 ⇒ 这是"角色等待"唯一的旋钮；对齐方案里 550→400 那条取值决策
      * 原先没有 A/B 通道（纯 const，改一次重编一次），这个键就是为了补上它。
@@ -171,6 +188,7 @@ object TimingOverrides {
     private const val DEFAULT_SWIPE_SLOW_MS = 180L
     private const val DEFAULT_SWIPE_BACK_MS = 100L
     /** A9：连续 skip 页收尾上限的默认值（依据见 [pageSkipLimit] KDoc）。 */
+    private const val DEFAULT_WEAPON_PANEL_SETTLE_MS = 150L
     private const val DEFAULT_PAGE_SKIP_LIMIT = 3
     /** A9：总滑动次数上限的默认值（依据见 [maxTotalSwipes] KDoc）。 */
     private const val DEFAULT_SWIPE_CAP = 240
@@ -186,6 +204,7 @@ object TimingOverrides {
         pipeExplicit = false
         pipeAnchorIdlePolls = 0L
         weaponPanelDelayMs = 0L
+        weaponPanelSettleMs = DEFAULT_WEAPON_PANEL_SETTLE_MS
         panelRefreshMs = -1L
         navSkipRedundant = true
         panelSigPollMs = DEFAULT_PANEL_SIG_POLL_MS
@@ -217,6 +236,8 @@ object TimingOverrides {
             panelSigSamples == DEFAULT_PANEL_SIG_SAMPLES && panelSigConfirm == DEFAULT_PANEL_SIG_CONFIRM &&
             panelSigGateCached == DEFAULT_PANEL_SIG_GATE && !sigDebug && sigBlocksX == DEFAULT_SIG_BLOCK_X && sigBlocksY == DEFAULT_SIG_BLOCK_Y &&
             advanceDistPx == 0 && advanceExtraPx == 0 && panelSettleMs == 0L &&
+            weaponPanelSettleMs == DEFAULT_WEAPON_PANEL_SETTLE_MS &&
+            panelLockSettleMs == ScanEngine.PANEL_LOCK_SETTLE_MS &&
             pageSkipLimit == DEFAULT_PAGE_SKIP_LIMIT && maxTotalSwipes == DEFAULT_SWIPE_CAP &&
 
             swipeFastSteps == DEFAULT_SWIPE_FAST_STEPS &&
@@ -252,6 +273,15 @@ object TimingOverrides {
     var overlapSkip: Boolean = true
 
     /**
+     * ★ 2026-10-20：**OVERLAP 页补读第 4 行**（可见预览行）。默认开；`prb=0` 关闭（A/B 与回滚）。
+     *
+     * 机理：本页 `行级闭环` 判 OVERLAP（前进约 12/18）时，下一页首格可能低约一行（click y≈260），
+     * 顶行（本页第 4 行）被跳过；r7/r9/r10 的 6 件级漏块都是这一形态。补读只读**当前页**
+     * 第 4 行 6 格，不写 pageKeys，行级闭环仍按 18 格计算。
+     */
+    var previewRowBackfill: Boolean = true
+
+    /**
      * P1（2026-10-06）：重复格（卡格指纹未变）跳过面板指纹门等待。对齐 GOODScanner
      * backpack_scanner.rs:1417 的 is_duplicate ⇒ 不进面板等待。
      * ★ 2026-10-10 默认改 **0（不跳过）**：BS 全量 A/B 实证同套装同部位同 lv0 的相邻两件
@@ -285,10 +315,12 @@ object TimingOverrides {
         phiApply = true
         anchorBudgetMs = 0L
         overlapSkip = true
+        previewRowBackfill = true
         duplicateCellSkipWait = false
         navSkipRedundant = true
         entryIdempotent = true
         panelSettleMs = 0L
+        panelLockSettleMs = ScanEngine.PANEL_LOCK_SETTLE_MS
         if (!spec.isNullOrBlank()) {
             for (kv in spec.split(',')) {
                 val i = kv.indexOf('=')
@@ -325,6 +357,8 @@ object TimingOverrides {
                     // #260 后半：锚点停等的"无进展轮询次数"上限（原为墙钟预算，干跑不再需要覆盖）
                     "panchor" -> pipeAnchorIdlePolls = v.coerceAtLeast(0L)
                     "wpdelay" -> weaponPanelDelayMs = v.coerceIn(0L, 5000L)
+                    "wpsettle" -> weaponPanelSettleMs = v.coerceIn(0L, 5000L)
+                    "locksettle" -> panelLockSettleMs = v.coerceIn(0L, 5000L)
                     "prefresh" -> panelRefreshMs = v.coerceIn(-1L, 5000L)
                     "sigpoll" -> panelSigPollMs = v.coerceAtLeast(5L)
                     "sigband" -> panelSigBand = v != 0L
@@ -336,6 +370,7 @@ object TimingOverrides {
                     "anchor" -> anchorBudgetMs = v.coerceIn(0L, 60000L)
                     "panel" -> panelSettleMs = v.coerceIn(0L, 10000L)
                     "oskip" -> overlapSkip = v != 0L
+                    "prb" -> previewRowBackfill = v != 0L
                     "dupskip" -> duplicateCellSkipWait = v != 0L
                     "advdist" -> advanceDistPx = v.toInt().coerceIn(50, 2000)
                     "advextra" -> advanceExtraPx = v.toInt().coerceIn(-500, 1000)
@@ -360,10 +395,11 @@ object TimingOverrides {
             "sig=${if (panelSigEnabled) 1 else 0},crop=${if (panelCrop) 1 else 0},pipe=$pipeDepth,sigpoll=$panelSigPollMs," +
             "sigband=${if (panelSigBand) 1 else 0},sigsamples=$panelSigSamples,sigconfirm=${if (panelSigConfirm) 1 else 0}," +
             "siggate=${if (panelSigGateCached) 1 else 0},phi=${if (phiApply) 1 else 0}," +
-            "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0}," +
+            "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0},prb=${if (previewRowBackfill) 1 else 0}," +
             "navskip=${if (navSkipRedundant) 1 else 0},dupskip=${if (duplicateCellSkipWait) 1 else 0}," +
             "panel=$panelSettleMs," +
-            "wpdelay=$weaponPanelDelayMs,prefresh=$panelRefreshMs," +
+            "wpdelay=$weaponPanelDelayMs,wpsettle=$weaponPanelSettleMs,prefresh=$panelRefreshMs," +
+            "locksettle=$panelLockSettleMs," +
             "advdist=$advanceDistPx,advextra=$advanceExtraPx," +
             "skiplimit=$pageSkipLimit,swipecap=$maxTotalSwipes," +
 

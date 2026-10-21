@@ -1425,7 +1425,7 @@
         2845,
         758
       ],
-      "judge": "gold>=40=已锁; gold==0 且 dark>400=未锁",
+      "judge": "WARM_LOCK(R≥150,R−G>45,R−B>45)≥阈值=已锁；灰开锁不命中（旧 gold/dark 描述已废弃）",
       "note": "3200 实测中心 (2828,744)"
     },
     "artifact.panel.astral": {
@@ -1473,7 +1473,7 @@
             2845,
             758
           ],
-          "judge": "gold>=40=已锁; gold==0 且 dark>400=未锁",
+          "judge": "WARM_LOCK(R≥150,R−G>45,R−B>45)≥阈值=已锁；灰开锁不命中（旧 gold/dark 描述已废弃）",
           "note": "3200 实测中心 (2828,744)"
         }
       }

@@ -300,8 +300,11 @@ class GridAlignTest {
                 // 行窗按 rowPhase 同式复算（BAND_MAX_RUN=96 是 GridAlign 私有常量，此处同值写死）
                 val pitch = p.scale(g.rowPitch.toInt().coerceAtLeast(1), p.scaleY)
                 val firstCenter = p.scale(g.rowYs[0] + g.labelAnchor, p.scaleY)
+                val traverseRows = JSONObject(File(dslDir(), asset).readText())
+                    .getJSONObject("grids").getJSONObject("artifact_backpack").getInt("traverseRows")
                 val yFrom = (firstCenter - pitch).coerceAtLeast(0)
-                val yTo = (firstCenter + g.rowYs.size * pitch + p.scale(96, p.scaleY)).coerceAtMost(h - 1)
+                val yTo = (firstCenter + (traverseRows - 1) * pitch + p.scale(96, p.scaleY) / 2)
+                    .coerceAtMost(h - 1)
                 val read = (yTo - yFrom + 1).coerceAtLeast(0)
                 val calls = g.cols.toLong() * h
                 val bytesPerCall = g.cardW.toLong() * 3
@@ -326,6 +329,39 @@ class GridAlignTest {
             }
         }
     }
+
+    /**
+     * ★ 2026-10-20 根因回归：`rowPhase` 的相位票**只能来自实际遍历行**。
+     *
+     * 1280 档 visibleRows=4 / traverseRows=3：第 4 行（预览行）的等级标签落在底栏上，
+     * 真实帧里被裁掉/被星带顶替，旧窗把它投进相位票 ⇒ bars=24、δ 锁到 ±65 ⇒ 点击下移一行
+     * （r7/r9/r10 的 6 件级漏块）。本用例的合成帧把第 4 行标签**确实画进帧**（正对照），
+     * 断言 phase.bars 只等于 3×cols；旧窗下这里会是 24。
+     */
+    @Test
+    fun `rowPhase 只计遍历行标签带，第4行预览行不计入相位票`() {
+        val asset = "profiles_1280x720.json"
+        val p = profileAt(asset, 1280, 720)
+        val g = p.gridGeometryFor("artifact_backpack")!!
+        val traverseRows = JSONObject(File(dslDir(), asset).readText())
+            .getJSONObject("grids").getJSONObject("artifact_backpack").getInt("traverseRows")
+        val frame = benchFrame(p, "artifact_backpack", 1280, 720)
+        try {
+            val phase = GridAlign.rowPhase(frame, p, "artifact_backpack")
+            assertNotNull("合成帧应测到绝对行相位（否则断言的是提前返回）", phase)
+            assertEquals(
+                "相位票应只来自遍历行 ${traverseRows}×${g.cols}；第4行标签不得进入",
+                g.cols * traverseRows,
+                phase!!.bars,
+            )
+            // 正对照：第 4 行标签带确实画进了帧（否则 18 可能是夹具没画导致的空跑）
+            val fourthLabelY = p.scale(g.rowYs[traverseRows] + g.labelAnchor, p.scaleY)
+            assertTrue("第4行标签带应在帧内，实测 y=$fourthLabelY", fourthLabelY in 0 until 720)
+        } finally {
+            frame.release()
+        }
+    }
+
 
     /**
      * #226 的两条候选改法**必须逐位不变**（行剖面喂绝对行相位 ⇒ 数值一动就静默挪点击坐标），

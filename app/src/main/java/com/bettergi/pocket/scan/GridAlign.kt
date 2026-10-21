@@ -234,8 +234,18 @@ object GridAlign {
         val minRun = profile.scale(BAND_MIN_RUN, sy)
         val maxRun = profile.scale(BAND_MAX_RUN, sy)
         val tol = profile.scale(BAND_TOL, sy)
+        // ★ 2026-10-20 根因修：只量**实际遍历行**的标签带。visibleRows=4 时第 4 行
+        //   （row index = traverseRows）被底栏遮挡：等级标签被裁掉，可见的**星带**顶上来
+        //   成为一条紧而假的亮带（δ≈+64）；旧窗 `firstCenter + rowYs.size*pitch` 把它投进
+        //   相位票 ⇒ bars 24、δ 锁到 ±65（r7/r9/r10 坏页），点击整体下移一行。
+        //   窗尾 = 最后一条**遍历行**标签带的下沿（center + maxRun/2），只保留 0..traverseRows-1 行；
+        //   好页 bars=18、δ 稳定在真值附近。
+        val traverseRows = profile.rawObject("grids.$gridKey")
+            ?.optInt("traverseRows", g.rowYs.size) ?: g.rowYs.size
+        val rowsForPhase = traverseRows.coerceIn(1, g.rowYs.size)
         val yFrom = (firstCenter - pitch).coerceAtLeast(0)
-        val yTo = (firstCenter + g.rowYs.size * pitch + maxRun).coerceAtMost(frame.rows() - 1)
+        val yTo = (firstCenter + (rowsForPhase - 1) * pitch + maxRun / 2)
+            .coerceAtMost(frame.rows() - 1)
         if (yTo <= yFrom + pitch) return null
 
         val barsByCol = ArrayList<List<Int>>(g.cols)

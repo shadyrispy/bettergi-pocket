@@ -278,10 +278,13 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   ⇒ 同进程连跑两轮时第二轮的 `scan finished` 摘要会把上一轮的数一起算进去。
         dupRevisits = 0; dupRevisitRecovered = 0; pageFreezeAbandoned = 0; swallowedClickRetries = 0
         clickGiveups = 0; weaponStaleDropped = 0
+        dupRollbackVetoes = 0 // 件数否决计数（P0 2026-10-21）：随 run 复位，与上面同一批观察量同点
+        previewRowCells = 0; previewRowAdded = 0; advanceBacktracks = 0
         navRedundantSkipped = 0 // #233 单2：冗余复位导航的跳过计数（与上面同一批观察量同点复位）
         // ★ #241（2026-10-13）：重裁链三计数同点复位 —— 不给复位点就会重演 2026-09-24 那次
         //   「第二轮摘要把上一轮的观察数一起报」（同 :239-240 的教训）。
         recropAttempts = 0; recropNewCandidates = 0; recropRescued = 0
+        craftedRescues = 0
         weaponOverlapRepeats = 0; weaponIdentityRuns.clear(); lastEmittedWeaponIdentity = null
         unknownSetPieces = 0; charUnresolved = 0; charTalentUnread = 0
         // ★ #265：随 run 复位，与其它观察量同一处。这个量只在 visit 第 ② 步被读，而那时**本格还没投票**
@@ -367,6 +370,8 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
             TAG,
             "scan finished: $reason elapsed=${elapsed}ms cells=$tmCells pages=$tmPages " +
                 "| 行级闭环 判跳行=$rowCheckSkips 判滑空=$rowCheckStalls " +
+                "预览行补读=${previewRowCells}格/${previewRowAdded}件 " +
+                "落地回退=${advanceBacktracks}次 " +
                 "吞击重发=$swallowedClickRetries 点击放弃=${clickGiveups}格 定点重访=$dupRevisitRecovered/$dupRevisits " +
                 "武器陈旧丢弃=${weaponStaleDropped}件 " +
                 // ★ #188：只数 rarity>=3 的未命中（素材未命中是对的，见计数器 KDoc）。
@@ -387,6 +392,8 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 (if (recropAttempts > 0) {
                     "重裁 n=${recropAttempts}/新候选 ${recropNewCandidates}/抢救 ${recropRescued} "
                 } else "") +
+                // ★ 2026-10-20：祝圣横幅漏投的空词条自愈数（条件式，正常轮为 0 不出声）。
+                (if (craftedRescues > 0) "祝圣对齐自愈=${craftedRescues}件 " else "") +
                 // ★ #156：身份未解析的位数（照常入库、导出无 key）。>0 就说明昵称表又漏人了，
                 //   对账侧会同时报"多 N 条未解析 + 缺 N 个真角色"。
                 // ★ #274：天赋没读成的角色数（0 不是合法值）——条件式打印，与 `未解析身份` 同一族。
@@ -525,6 +532,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     /** 行级闭环统计（进 scan finished 摘要）：判跳行 / 判滑空。 */
     internal var rowCheckSkips = 0
     internal var rowCheckStalls = 0
+    /** ★ 2026-10-20：OVERLAP 页补读第 4 行的格数/新增件数（进 scan finished 摘要）。 */
+    internal var previewRowCells = 0
+    internal var previewRowAdded = 0
+    /** ★ 2026-10-20：落地条带拒测后「回退一行做缺口校验」的次数（进 scan finished 摘要）。 */
+    internal var advanceBacktracks = 0
 
     /** 单件名→套装反查未命中的件数（词典缺口，件本身已照常入库；见 emit 处的拆分判据）。 */
     internal var unknownSetPieces = 0
@@ -655,6 +667,15 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     internal var recropRescued: Int = 0
 
     /**
+     * ★ 2026-10-20：祝圣横幅漏投后经「另一套 yShift 对齐重读 + solver 校验」救回的件数
+     * （随 run 复位，进 `scan finished` 摘要）。
+     *
+     * 恒 0 且后台仍报「丢弃读失败条目（词条 0 条）」 ⇒ 说明丢的**不只是**横幅漏投这一类，
+     * 别把这条兜底当成"0 漏"的证明；>0 则每一件都能和 GT 里 elixerCrafted=true 的件对上。
+     */
+    internal var craftedRescues: Int = 0
+
+    /**
      * ★ #265：**生产者自己**在本格投出来的武器星级（`vote` 的 `weapon.panel.starBand` 两条分支写）。
      *
      * 只有一个读者：[stopWhenRarityAtMost2]，它在 visit 第 ② 步求值 ⇒ 量的是**上一格**的星级。
@@ -782,6 +803,8 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
      */
     internal var lastCellClickX: Int = -1
     internal var lastCellClickY: Int = -1
+    /** 本格点击注入时刻（elapsedRealtime）；0 = 本格未点过。用于面板闭锁图标的沉降闸。 */
+    internal var lastCellClickAtMs: Long = 0L
     /**
      * ★★ 本页 **idx → identity** 表（定长语义，每页清空）★★
      * ⚠️ 2026-09-17 修 bug：此前用 `pageIdentities`（**可变长**收集数组）保存跨页比对用的身份串，
@@ -928,6 +951,13 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
 
     /** 本页判定的结果（配合 [dupPageDecided] 在同一页内复用，避免重复计数）。 */
     internal var dupPageStopConfirmed = false
+
+    /**
+     * 件数否决计数（P0，2026-10-21）：pagedGrid 尾部欠滚时「整页重复」可能是滑空造成的假回卷，
+     * `dupRollbackConfirmed` 在「剩余量 ≤ 一页+一行」时否决停止；本计数限制**连续**否决次数
+     * （上限 3），用尽后不再否决、允许回卷止扫收尾（防计数器偏大时无限翻页）。
+     */
+    internal var dupRollbackVetoes = 0
 
     /**
      * 连续重复达到「一页卡片数」时的**统一处置**（item 级 `noteDupAndMaybeStop` 与格级检查共用同一判据）。
@@ -1969,6 +1999,16 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          * GOODScanner `PANEL_LOAD_FAST_TIMEOUT_MS = 100ms`（重复件只缩短超时、**不跳过 OCR**）✓
          */
         const val PANEL_FP_DUP_WAIT_MS = 100L
+
+        /**
+         * 圣遗物面板**闭锁图标**的最短"点击龄"（从点击注入算起）。
+         *
+         * 2026-10-21 a6 全量取证：点击后 ~200–270ms 抓到的帧里，名字/词条已是新件、**锁徽仍是
+         * 上一件的红闭锁**（p040 实证：面板文字=新件、卡片无徽、GT=未锁，抓到红锁）⇒ 锁票误判。
+         * 同设备手测 ~450ms 时已转灰。故在收敛帧抓取前补等到本值，再重抓一帧（只作用于
+         * artifact_backpack；武器面板有独立的 `wpsettle`）。`locksettle=<ms>` 可覆盖，0=关。
+         */
+        const val PANEL_LOCK_SETTLE_MS = 450L
 
         /** 武器面板**固定延迟**（GOODScanner `DEFAULT_WEAPON_PANEL_DELAY = 50ms`）：同款武器面板全同 ⇒ 指纹无效。 */
         // ★ 2026-10-14 #233：这里原来有 `WEAPON_PANEL_DELAY_MS = 300L`，**已删**。

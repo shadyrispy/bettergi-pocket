@@ -1520,7 +1520,7 @@
     1986,
     576
    ],
-   "judge": "gold>=40=已锁; gold==0 且 dark>400=未锁",
+   "judge": "WARM_LOCK(R≥150,R−G>45,R−B>45)≥阈值=已锁；灰开锁不命中（旧 gold/dark 描述已废弃）",
    "note": "按 3200 右距×0.75 推导（待实测校验）"
   },
   "artifact.panel.astral": {
@@ -1580,7 +1580,7 @@
       1986,
       576
      ],
-     "judge": "gold>=40=已锁; gold==0 且 dark>400=未锁",
+     "judge": "WARM_LOCK(R≥150,R−G>45,R−B>45)≥阈值=已锁；灰开锁不命中（旧 gold/dark 描述已废弃）",
      "note": "按 3200 右距×0.75 推导（待实测校验）"
     }
    }

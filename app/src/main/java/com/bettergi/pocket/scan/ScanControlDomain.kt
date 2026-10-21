@@ -1033,6 +1033,8 @@ internal suspend fun ScanEngine.visitClick(
     // ★ #317：记录本格点击坐标 —— parsePanel 指纹闸门「等满未变」时同坐标重击用（后台补偿）。
     lastCellClickX = cx
     lastCellClickY = cy
+    // ★ 2026-10-21：锁徽沉降闸的计时起点（见 ScanEngine.PANEL_LOCK_SETTLE_MS）。
+    lastCellClickAtMs = SystemClock.elapsedRealtime()
     Log.i(TAG, "visit cell($col,$row) idx=$index click=($cx,$cy) ok=$clickOk")
     // ⚠️ 收敛帧必须在**所有**退出路径上都是"点击后"的新帧。
     //   2026-09-12 踩过：把抓帧挪进 confirm 回调 ⇒ helper 走「未变兜底」退出时
@@ -1105,6 +1107,13 @@ internal suspend fun ScanEngine.visitClick(
                     fallbackMs = TimingOverrides.panelStableFallbackMs,
                     what = if (clickRetry == 0) "panel" else "panel-retry$clickRetry",
                     stableSamples = TimingOverrides.panelSigSamples,
+                    // ★ 2026-10-20：武器面板切换初期会先冒一帧"仍像上一件"的稳定态 ⇒
+                    //   判稳后再给固定余量，避免解析到上一把（相邻格同身份重复）。见 KDoc。
+                    minAfterChangeMs = if (gridKey == "weapon_backpack") {
+                        TimingOverrides.weaponPanelSettleMs
+                    } else {
+                        0L
+                    },
                     confirm = onPanelStable,
                 )
                 if (sawChange) break
@@ -1124,6 +1133,16 @@ internal suspend fun ScanEngine.visitClick(
                         TAG,
                         "visit cell($col,$row) idx=$index 面板未变但**选中框已移动** ⇒ 点击已送达，不重发",
                     )
+                    // ★ 2026-10-20（fgw1 同款墙多 2）：签名没变 ≠ 面板已稳定 —— 同款武器的
+                    //   详情面板逐像素相同，签名永不变化；此前直接 break、随后立刻抓帧，可能
+                    //   仍读到**上一张**面板 ⇒ 同一身份在相邻格各入库一次。给固定余量再抓帧；
+                    //   真·同款面板内容相同，多等的代价不影响件数。
+                    if (gridKey == "weapon_backpack" && TimingOverrides.weaponPanelSettleMs > 0L) {
+                        delay(TimingOverrides.weaponPanelSettleMs)
+                        ctx.release()
+                        ctx.frame = freshFrame()
+                        panelFrameReady = true
+                    }
                     break
                 }
                 // 本轮首格：游戏打开背包时**已自动选中第一件** ⇒ 面板与选中框都不会变，
@@ -1170,6 +1189,21 @@ internal suspend fun ScanEngine.visitClick(
             val refreshMs = TimingOverrides.panelRefreshMs.takeIf { it >= 0L } ?: PANEL_REFRESH_MS
             tmPanelMs += refreshMs
             delay(refreshMs)
+        }
+    }
+    // ★ 2026-10-21：锁徽沉降（圣遗物）。点击后名字/词条先换、锁徽要晚 ~几百 ms 才切到新件状态；
+    //   收敛帧若取得比 [ScanEngine.PANEL_LOCK_SETTLE_MS] 早，锁票会读到上一件的闭锁（a6 p040 实证）。
+    //   只补不足的部分，然后强制重抓收敛帧（vote 与 parse 读同一张沉降后的帧）。
+    //   ⚠️ 只给**扫格**用：artifact_lock 的 fast.at 锁钮点击（clickedWhileResolving）已经在
+    //   lockClickAdaptive/settleLockState 里等到达目标态，再按"点击龄"补等就是重复等待。
+    if (gridKey == "artifact_backpack" && !clickedWhileResolving) {
+        val settleMs = TimingOverrides.panelLockSettleMs
+        val age = if (lastCellClickAtMs > 0) SystemClock.elapsedRealtime() - lastCellClickAtMs else Long.MAX_VALUE
+        if (settleMs > 0 && age < settleMs) {
+            val need = settleMs - age
+            delay(need)
+            panelFrameReady = false
+            Log.i(TAG, "锁徽沉降：点击龄 ${age}ms < ${settleMs}ms ⇒ 补等 ${need}ms 后重抓收敛帧")
         }
     }
     // 收敛帧兜底：签名路径若从未确认成功（未变兜底/超时），此处补抓一次，

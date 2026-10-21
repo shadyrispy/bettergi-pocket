@@ -855,6 +855,39 @@ internal fun ScanEngine.dupRollbackConfirmed(): Boolean {
     dupPageStreak++
     dupPageStopConfirmed = dupPageStreak >= dupPageConfirm
     if (dupPageStopConfirmed) {
+        // ★ P0（2026-10-21）件数否决：pagedGrid 有计数器、且「剩余量 ≤ 一页+一行」⇒ 计数器说马上
+        //   到底，此刻的整页重复只能是尾部欠滚/滑空的假回卷 ⇒ 否决停止、清计数继续翻页。
+        //   实测（华为 artifact 全量）：尾部一次翻页只前进 ~1 行，新增的「回退一行」把它抵消成整页
+        //   重复（18 件），下一页又欠滚 2 行（再 6 件）⇒ 重复累计 24 = dupLimitEffective 触发回卷止扫；
+        //   而 readCount=1018 / collected=1014，判据不看计数器 ⇒ 提前停止，最后 12 格（含 4 件）没点。
+        //   ⚠️ 仅 pagedGrid（dupLimitEffective > 0）且计数器可读时启用；roster/角色路径原样不动。
+        //   ⚠️ 连续否决上限 dupRollbackVetoes=3：真到底（列表末尾/计数器偏大）时最多多扫 3 页。
+        val total = vars.total
+        if (dupLimitEffective > 0 && total != null && total > 0) {
+            val collected = results.size + resultsWeapons.size + resultsCharacters.size
+            val remain = total - collected
+            if (collected < total && remain <= dupLimitEffective) {
+                if (dupRollbackVetoes < 3) {
+                    dupRollbackVetoes++
+                    Log.w(
+                        TAG,
+                        "回卷止扫被件数否决（第 ${dupRollbackVetoes}/3 次）：collected=${collected} " +
+                            "total=${total} 差=${remain} ≤ 一页+一行 ${dupLimitEffective}" +
+                            "（dupPageStreak=${dupPageStreak}）⇒ 判为滑空/误判到底，清计数继续翻页",
+                    )
+                    dupPageStreak = 0
+                    dupPageStopConfirmed = false
+                    charDupStreak = 0
+                    vars.charDupStreak = 0
+                    return false
+                }
+                Log.w(
+                    TAG,
+                    "回卷止扫件数否决已达上限（${dupRollbackVetoes}/3）：collected=${collected} " +
+                        "total=${total} 差=${remain} ⇒ 不再否决，允许停止",
+                )
+            }
+        }
         Log.i(TAG, "回卷判据：连续 $dupPageStreak 个整页零新增 ≥ $dupPageConfirm ⇒ 断言列表回卷，停止扫描")
     } else {
         Log.i(
