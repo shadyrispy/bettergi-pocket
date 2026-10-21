@@ -207,13 +207,15 @@ class ScriptRunner(
         /** 外部任务计划（P4 规则层注入）：artifact_lock 的 targets / auto_equip 的 plan。 */
         plan: List<JSONObject>? = null,
         /**
-         * 时序覆盖串（调试标定用，形如 `nav=700,poll=120`）。**null = 复位为默认**。
+         * 时序覆盖串（调试标定用，形如 `nav=700,sigpoll=40`）。**null = 复位为默认**。
          * ⚠️ 必须在这里统一 apply：扫描入口有 5 处，若只在 DEBUG_SCAN_FLOW 里 apply，
          *    其余入口（普通扫描/自动拾取）会**沿用上一轮的覆盖值**。
          */
         timingSpec: String? = null,
     ) {
         FlowSource.install(appContext)
+        // #230：钳频/温度摘要需要 Context 读电池粘性广播（sysfs 那几项不需要）。
+        CpuTelemetry.init(appContext)
         Log.i(TAG, "timing: ${TimingOverrides.apply(timingSpec)}")
         // A15（2026-09-30）：上一轮未**真正**终结（含取消收尾中——isActive 在 cancel() 后立即
         // 变 false，不能再用它判忙）⇒ 拒绝新启动，但必须回执：原先静默 return，悬浮窗停在
@@ -439,6 +441,7 @@ class ScriptRunner(
                 try {
                     engine.run()
                 } finally {
+                    engine.panelCropBuf.release()
                     wdStop.set(true)
                     wd.interrupt()
                     if (SCAN_OVERLAY_HIDDEN) {

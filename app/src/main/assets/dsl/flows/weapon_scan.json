@@ -69,7 +69,6 @@
     {
       "do": "pagedGrid",
       "grid": "weapon_backpack",
-      "fingerprintSkip": true,
       "visit": [
         {
           "do": "stopWhen",
@@ -88,7 +87,6 @@
         {
           "do": "vote",
           "zone": "weapon.card.lockBadge",
-          "passes": 3,
           "as": "locked"
         },
         {
@@ -112,17 +110,6 @@
         {
           "do": "parsePanel",
           "panel": "weapon_backpack",
-          "fields": [
-            "name",
-            "slot",
-            "mainLabel",
-            "mainValue",
-            "baseLabel",
-            "baseValue",
-            "level",
-            "refine",
-            "equipped"
-          ],
           "dict": {
             "name": "mappings.weapons",
             "fuzzy": 1

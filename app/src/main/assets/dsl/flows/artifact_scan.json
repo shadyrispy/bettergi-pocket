@@ -106,7 +106,6 @@
         {
           "do": "vote",
           "zone": "artifact.card.lockBadge",
-          "passes": 3,
           "as": "gridLocked"
         },
         {
@@ -124,8 +123,7 @@
         {
           "do": "vote",
           "zone": "artifact.panel.zhusheng",
-          "as": "crafted",
-          "apply": "yShift+63"
+          "as": "crafted"
         },
         {
           "do": "vote",
@@ -145,15 +143,6 @@
         {
           "do": "parsePanel",
           "panel": "artifact_backpack",
-          "fields": [
-            "name",
-            "slot",
-            "mainName",
-            "mainValue",
-            "level",
-            "subStats(动态行数)",
-            "equipped"
-          ],
           "derive": {
             "setName": "由 name 反推（背包面板 set_name 被遮挡 OCR 不可读，用户定稿 2026-09-01）",
             "dict": "tools/mappings.json artifactPieces（276 件/56 套）"

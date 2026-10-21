@@ -1162,7 +1162,7 @@ class TriggerForegroundService : Service() {
         const val EXTRA_PLAN_B64 = "planB64"
 
         /**
-         * 时序覆盖（仅调试标定）：`--es timing "nav=650,poll=120,sstable=150,swFastMs=110,..."`
+         * 时序覆盖（仅调试标定）：`--es timing "nav=650,sstable=150,swFastMs=110,..."`
          * 见 [com.bettergi.pocket.scan.TimingOverrides] 与 dsl/verify/_audit/PERF-timing.md 档位计划。
          * 空/缺省 → 全默认（与改动前逐位一致）。
          */

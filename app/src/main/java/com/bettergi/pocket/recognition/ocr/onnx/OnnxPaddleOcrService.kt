@@ -5,6 +5,7 @@ import com.bettergi.pocket.core.IntRect
 import com.bettergi.pocket.recognition.ocr.IOcrService
 import com.bettergi.pocket.recognition.ocr.OcrResult
 import com.bettergi.pocket.recognition.ocr.OcrResultRegion
+import com.bettergi.pocket.recognition.ocr.OcrStageProbe
 import org.opencv.core.Core
 import org.opencv.core.CvType
 import org.opencv.core.Mat
@@ -280,12 +281,21 @@ class OnnxPaddleOcrService(
      *  FloatBuffer（在张量 close 前消费完）；解码结果 Result 是不可变值对象，块外使用安全。
      *  判据与旧实现同口径：空输出/步数为 0 ⇒ null。 */
     private fun recognizeLine(ws: PreprocWorkspace, src: Mat, rect: IntRect): Line? {
+        // ★ 2026-10-05（P0 分段探针）：把一次 rec 拆成 pre（crop+resize+convertTo+split+3×JNI+3×copy）
+        //   / run（建张量 + ORT session.run）/ dec（CTC 逐元素扫）三段记账，纯计数不改时序。
+        //   回调入口时刻即 run 的终点（`runRecInto` 的契约：张量 close 前调用），故 run 不含解码。
+        //   推理失败时 lambda 不被调用 ⇒ 该槽不产生样本（少计一次，不影响 ms/px 口径）。
+        val t0 = System.nanoTime()
         val prepared = preprocessRec(ws, src, rect) ?: return null
         val (input, width) = prepared
+        val t1 = System.nanoTime()
         val decoded = engine.runRecInto(input, width) { buf, n ->
+            val t2 = System.nanoTime()
             val steps = n / MODEL_CLASS_COUNT
-            if (n == 0 || steps <= 0) null
+            val r = if (n == 0 || steps <= 0) null
             else CtcDecoder.decode(buf, steps, MODEL_CLASS_COUNT, dict, declaredOutput = recOutputType)
+            OcrStageProbe.add(t1 - t0, t2 - t1, System.nanoTime() - t2, width)
+            r
         } ?: return null
         return Line(rect, decoded.text, decoded.confidence)
     }

@@ -6,6 +6,7 @@ import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 import org.opencv.core.Mat
+import com.bettergi.pocket.recognition.ocr.OcrStageProbe
 import com.bettergi.pocket.scan.ScanEngine.Companion.ADV_MIN_END_Y
 import com.bettergi.pocket.scan.ScanEngine.Companion.ANCHOR_SETTLE_MAX_DY_PX
 import com.bettergi.pocket.scan.ScanEngine.Companion.ANCHOR_SETTLE_MAX_MS
@@ -266,6 +267,8 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
         }
         // ★ 行级闭环（方案 C）：本页键序列必须在**页级作用域**（skip 页也要留序列占位）
         val pageKeys = ArrayList<String>(cols * traverseRows)
+        // ★ S2b：本页页号（pipe 模式 job 遥测/epoch 键用）
+        pipeSetPage(pageNo)
         // ★ 跨页重叠跳过（**武器专用**）：新页各格指纹 vs 上页**同列任意行**指纹 ⇒ 相同即同一件。
         //   命中写进 [skipCopyFrom]（本页 idx → 上页 idx），访问处**照此复制身份/内容键**。
         //   ⚠️ 圣遗物**不能**用像素判重来跳过点击，见 [lastCellFp] 的定谳（18 张同套同强化羽毛
@@ -349,6 +352,35 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                     //   「本页后停」（当页仍完整遍历，避免漏掉同页后面的高稀有度件）。
                     //   一旦在此加 stopRequested 检查，就会把它变成「立即停」——
                     //   实测三星期用例由 21 格/页塌成 1 格/页（expected 46 but was 26）。勿加。
+                    // ★ #234：**表头计数当格数上界**（对齐上游 `backpack_scanner.rs:1094-1099` +
+                    //   `:1372-1379` —— `total_row=ceil(total/cols)`、`last_row_col=total%cols`，
+                    //   内层 `for col in 0..row_item_count`；表头说 6 件就只点 6 格、0 次滑动，
+                    //   终止走 `ScanTermination::Exhausted`（`:1660-1663`），全程不看画面）。
+                    //   本引擎此前只把 `total` 拿来跟**已入库件数**比（下方 `collected >= totalForStop`），
+                    //   而 1★/2★ 按设计不入库 ⇒ 只要背包里有低星件，`collected` 就**恒**追不上 `total`，
+                    //   主判据永不成立。实测（BS 新账号 6 件圣遗物）：42 格点满、其中 36 格是空格，
+                    //   每格都走「面板未变化」回退 ⇒ `吞击重发=150 点击放弃=30格`、panel 等待占 71%。
+                    //   ⚠️ **只在第一页生效**（`pageNo == 0`）：第一页在任何滑动之前，屏幕上就是
+                    //   第 1..cols×traverseRows 格，所以"点过第 total 格 ⇒ 余下全是空格"是无假设结论；
+                    //   且 `total ≤ cols×traverseRows` 时它同时给出上游的 `Exhausted`（不再翻页）。
+                    //   后面的页**不能**这么算 —— 本引擎设计上允许欠滚（一页可能只前进 ~1.9 行），
+                    //   拿累计点击数当进度尺会**提前截断**，那正是 09-26 删 `pagesByCount` 的原因
+                    //   （误伤 21 件尾巴）。`total` 读不到（null/0）或大于一页格数 ⇒ 本分支不介入。
+                    val counterCap = vars.total
+                    if (pageNo == 0 && counterCap != null && counterCap in 1 until cols * traverseRows &&
+                        row * cols + col >= counterCap
+                    ) {
+                        vars.stopRequested = true
+                        vars.stopReason = "stopWhen"
+                        vars.gridExhausted = true
+                        dupWrapped = true
+                        Log.i(
+                            TAG,
+                            "pagedGrid[$gridKey]: 计数上界（表头 total=$counterCap）⇒ 第 $counterCap 格之后" +
+                                "全是空格，收尾（停在 r$row c$col 之前，0 次滑动；上游 Exhausted 同款）",
+                        )
+                    }
+                    if (dupWrapped) break
                     val dupLim = if (dupLimitEffective > 0) dupLimitEffective else charDupStreakLimit
                     if (dupLim > 0 && vars.charDupStreak >= dupLim) {
                         // 页内已攒满「一页卡片数」个连续重复 ⇒ 本页疑似零新增。
@@ -603,7 +635,34 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
             // 背包按等级降序 → 本页末格等级即本页最低等级（作下页 pageSkip 判据）
             if (vars.level > 0) pageMinLevel = vars.level
         }
+        // ★ S2b：页末 join + 排水**必须在页末统计之前** —— 下面三处读的都是消费者产出的东西：
+        //   ① `added`（results 由消费者 emit 追加）→ 零新增连击 dupPageStreak；
+        //   ② `curPageIds` → `prevAllCellIds`（下一跳格前"上页那件已入库"安全阀）；
+        //   ③ `pageKeys` → `prevAllCellKeys`（跨页重叠判据）。
+        //   ⚠️ 这是一条**顺序约束**，不是 #69 那次超时的根因：排水原本也交回 21 件，挪前挪后
+        //   两轮 send/join 计数逐字节相同（真根因见 design-docs/scan-pipeline-20261006.md §13）。
+        //   留着是因为真机一格 ≈600ms，① 若先于 join 求值会**少计新增** ⇒ 回卷判据误动。
+        //   pipe=0 时整块 no-op，同步路径行为不变。
+        if (TimingOverrides.pipeDepth > 0) {
+            pipeJoinPage()
+            for ((idx, k, id) in pipeDrainResults()) {
+                if (idx < pageKeys.size) {
+                    pageKeys[idx] = k ?: ""
+                    pageIdentities[idx] = id
+                }
+                // ★ `curPageIds` 一并按 job.idx 定槽重述：它由**消费者的 emit** 写，而下标取的是
+                //   生产者的 `curCellIdx`（ArtifactDomainPanels 的 emitArtifact）。干跑里消费者
+                //   0ms 就追得上 ⇒ 两者同值、这条看不出差别；真机若追不上就会**落错槽**。
+                //   它是上面 ② 的唯一来源，所以按构造定槽，不留给时序决定。（推理，未实测复现）
+                curPageIds[idx] = id
+            }
+        }
         val added = results.size + resultsWeapons.size + resultsCharacters.size - beforeCount
+        // ★ #230 续：把**每页**的「时钟上限 + rec 累计成本」配成一对打出来。
+        //   起/收两点读不到中途塌到多深，而"扫描中 rec 单价为什么涨"必须用**同一轮内**的
+        //   多组 (上限, Δrun/ΔΣw) 配对才能判：是钳频加深，还是与抓帧/vote 争用。
+        //   纯记账日志，不改任何行为。相邻两行相减即得该页的 ms/px。
+        Log.i(TAG, "pagePerf p=$pageNo added=$added ${CpuTelemetry.snapshot()} | ${OcrStageProbe.summary()}")
         RecognitionLog.log(logTag, RecognitionLog.Level.I, "第 $pageNo 页 入库 $added 件")
         // ★ 2026-09-16：页级回卷连击必须**真正连续**（KDoc 写的是"连续 N 个整页零新增"）——
         //   中间出现任何"有新增"的正常页即清零；否则两次相隔很远的坏页也会凑成 2 连击 ⇒ 误判回卷。
@@ -729,6 +788,8 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                     curCellCol = col
                     curCellIdx = i
                     runVisit(visit, gridKey, col, row, i, pageProfile)
+                    // ★ S2b：回读也走流水线（job 携带）⇒ 逐格 join 后再读 lastCellKey
+                    if (TimingOverrides.pipeDepth > 0) pipeJoinPage()
                     curCellIdx = -1
                     val k = lastCellKey
                     val id = lastCellIdentity

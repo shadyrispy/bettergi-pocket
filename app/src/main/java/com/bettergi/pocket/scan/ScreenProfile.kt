@@ -2,6 +2,7 @@ package com.bettergi.pocket.scan
 
 import android.util.Log
 import com.bettergi.pocket.core.FlowSource
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -526,6 +527,104 @@ class ScreenProfile(
     fun gridInt(gridKey: String, field: String): Int =
         rawObject("grids.$gridKey")?.getInt(field) ?: error("grids.$gridKey.$field missing")
 
+    /**
+     * S1 裁片（#69 流水线）：`panels.<key>` 下**解析会读到的全部像素区域**的并集。
+     *
+     * 构成（与解析侧逐字对齐，漏一块就是静默读空）：
+     * - 该 panel 对象下所有「4 个整数的数组」叶子（name/slot/mainName/mainValue/level/
+     *   subStats×4/equipped/setName/banner/…，将来新增的 rect 自动进并集）；
+     * - `starBand` 的五格（[countStars] 的读法：y 两值 + x0/pitch/cell 逐格算）；
+     * - 底边外扩 [zhushengShiftPx]（祝圣帧横幅以下内容整体下移，rect 会带 yShift 读）。
+     *
+     * ⚠️ **不含** vote 步骤在整帧上读的 zone（artifact.panel.lock/astral/zhusheng）——
+     *   那些在 S1 仍读整帧；S2 把 vote 搬进消费者时必须把它们并进这里，并补包含性断言。
+     * 缓存按 panelKey（档位内不变）。
+     */
+    private val cropCache = HashMap<String, FrameRect?>()
+
+    fun panelCropRect(panelKey: String): FrameRect? {
+        if (cropCache.containsKey(panelKey)) return cropCache[panelKey]
+        val obj = rawObject("panels.$panelKey")
+        var acc: FrameRect? = null
+        fun eat(r: FrameRect) {
+            acc = acc?.let {
+                FrameRect(
+                    minOf(it.left, r.left), minOf(it.top, r.top),
+                    maxOf(it.right, r.right), maxOf(it.bottom, r.bottom),
+                )
+            } ?: r
+        }
+        fun walk(node: Any?) {
+            when (node) {
+                is JSONArray -> {
+                    if (node.length() == 4 && (0..3).all { node.opt(it) is Int }) {
+                        eat(scaleRect(node.getInt(0), node.getInt(1), node.getInt(2), node.getInt(3)))
+                    } else {
+                        for (i in 0 until node.length()) walk(node.opt(i))
+                    }
+                }
+                is JSONObject -> for (k in node.keys()) walk(node.opt(k))
+            }
+        }
+        if (obj != null) {
+            walk(obj)
+            obj.optJSONObject("starBand")?.let { band ->
+                val ys = band.getJSONArray("y")
+                val top = scale(ys.getInt(0), scaleY)
+                val bottom = scale(ys.getInt(1), scaleY)
+                val x0 = band.getInt("x0")
+                val pitch = band.getInt("pitch")
+                val cell = band.optInt("cell", 46)
+                for (i in 0 until 5) {
+                    eat(
+                        FrameRect(
+                            left = scale(x0 + i * pitch, scaleX),
+                            top = top,
+                            right = scale(x0 + i * pitch + cell, scaleX),
+                            bottom = bottom,
+                        ),
+                    )
+                }
+            }
+        }
+        // ★ S2a（#69 流水线，2026-10-06）：vote 步骤（锁/收藏/祝圣三 zone）搬进消费者读裁片的前提
+        //   = 三个 zone 必须落在裁片并集内，否则 vote 静默读 0（锁态/收藏态/祝圣全丢，不报错）。
+        //   zhusheng zone 是**采样点表**（每点 5×5 紫占比）⇒ 并入每点 ±PADDING 的包围盒。
+        //   只对 artifact 系面板生效（weapon/character 面板没有这三个 zone，平铺无意义）。
+        if (panelKey.startsWith("artifact")) {
+            val zones = root.optJSONObject("zones")
+            fun zoneRect(name: String): FrameRect? {
+                val z = zones?.optJSONObject(name) ?: return null
+                z.optJSONArray("rect")?.let { r ->
+                    if (r.length() == 4) return scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3))
+                }
+                z.optJSONArray("points")?.let { pts ->
+                    var box: FrameRect? = null
+                    for (i in 0 until pts.length()) {
+                        val p = pts.getJSONArray(i)
+                        val cx = scale(p.getInt(0), scaleX)
+                        val cy = scale(p.getInt(1), scaleY)
+                        val pad = 8 // 5×5 采样点 ±2px，给缩放/圆角余量
+                        box = box?.let {
+                            FrameRect(
+                                minOf(it.left, cx - pad), minOf(it.top, cy - pad),
+                                maxOf(it.right, cx + pad), maxOf(it.bottom, cy + pad),
+                            )
+                        } ?: FrameRect(cx - pad, cy - pad, cx + pad, cy + pad)
+                    }
+                    return box
+                }
+                return null
+            }
+            for (name in listOf("artifact.panel.lock", "artifact.panel.astral", "artifact.panel.zhusheng")) {
+                zoneRect(name)?.let { eat(it) }
+            }
+        }
+        acc = acc?.let { FrameRect(it.left, it.top, it.right, it.bottom + zhushengShiftPx.coerceAtLeast(0)) }
+        cropCache[panelKey] = acc
+        return acc
+    }
+
     private fun resolve(path: String): Any? {
         // ⚠️ zones 顶层 key 自身含点号（char_popup.collapse / artifact.panel.lock …）→ 点分拆分前
         // 先按「最长前缀整键命中」试解，否则 "zones.char_popup.collapse.rect" 会拆成 zones→char_popup
@@ -576,6 +675,9 @@ data class FrameRect(val left: Int, val top: Int, val right: Int, val bottom: In
 
     /** 纵向平移（祝圣 yShift 等场景）。 */
     fun shiftedBy(dy: Int): FrameRect = FrameRect(left, top + dy, right, bottom + dy)
+
+    /** 二维平移（S1 裁片：解析 rect 从帧坐标换到裁片坐标时整体减原点）。 */
+    fun shiftedBy(dx: Int, dy: Int): FrameRect = FrameRect(left + dx, top + dy, right + dx, bottom + dy)
 }
 
 data class FramePoint(val x: Int, val y: Int)

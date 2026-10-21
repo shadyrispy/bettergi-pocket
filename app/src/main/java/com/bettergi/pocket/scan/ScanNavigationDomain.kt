@@ -661,6 +661,9 @@ internal suspend fun ScanEngine.dialog(step: JSONObject) {
  * 用于「清空条件」(reset) 与「确认筛选」(ok) —— 二者 §12.4 原记为缺口，实已标定于 profiles。
  */
 internal suspend fun ScanEngine.safetyGuard(): Boolean {
+    // ★ ②降频：同一 visit 内的连续 clickAt 复用上次结果（退出框不可能由 clickAt 产生，
+    //   只有 BACK/游戏侧事件能 ⇒ 跨 visit 边界由 runVisit 失效缓存；见 ScanEngine 字段注释）
+    if (safetyGuardCacheValid) return safetyGuardCacheOk
     val gateway = ocr ?: return true
     val rect = runCatchingCancellable { profile.rect("screens.dialogs.quitConfirm.title") }.getOrNull() ?: return true
     val expect = runCatchingCancellable {
@@ -669,6 +672,7 @@ internal suspend fun ScanEngine.safetyGuard(): Boolean {
     val frame = try {
         freshFrame()
     } catch (e: CancellationException) { throw e } catch (_: Exception) {
+        // 抓帧失败无从判定 ⇒ 不缓存（下次重试），保持改动前逐次重试的行为
         return true
     }
     val text = try {
@@ -678,7 +682,12 @@ internal suspend fun ScanEngine.safetyGuard(): Boolean {
     } finally {
         frame.release()
     }
-    if (!text.contains(expect)) return true
+    val ok = !text.contains(expect)
+    // 两种结果都记缓存：安全 ⇒ 本 visit 内后续 clickAt 免一帧+一 OCR；
+    // 危险 ⇒ 虽已 stopRequested，缓存里也必须是 false，绝不给后续调用放行
+    safetyGuardCacheValid = true
+    safetyGuardCacheOk = ok
+    if (ok) return true
     Log.e(TAG, "SAFETY: 检测到危险界面（'$text'）⇒ 立即中止流程，绝不再点击")
     // ⚠️ RecognitionLog.Level 只有 I/D/W（无 E）⇒ 这里用 W；严重性由下一行 NoticeCenter.error 承担
     RecognitionLog.log(logTag, RecognitionLog.Level.W, "安全守卫触发：当前界面是「$text」⇒ 已中止（不点击）")

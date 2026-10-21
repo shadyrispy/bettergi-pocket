@@ -5,6 +5,7 @@ import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import org.opencv.core.Mat
+import org.opencv.core.Rect
 import com.bettergi.pocket.log.RecognitionLog
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_SHOT_JPEG_QUALITY
@@ -233,7 +234,13 @@ internal suspend fun ScanEngine.dumpStallShot(
     }.onFailure { Log.w(TAG, "stall shot 落盘失败", it) }
 }
 
-internal suspend fun ScanEngine.parsePanel(step: JSONObject, ctx: ScanEngine.CellFrameContext? = null) {
+internal suspend fun ScanEngine.parsePanel(
+    step: JSONObject,
+    ctx: ScanEngine.CellFrameContext? = null,
+    /** S2b（#69）：非 null ⇒ 管道路径——头部（指纹闸/取证）在本函数完成后，把整帧交回调用方
+     *  做「裁片拷贝+send」，解析/判据/emit 在单消费者协程；null = 同步路径（pipe=0，回滚杠杆）。 */
+    pipeOut: (suspend (Mat) -> Unit)? = null,
+) {
     // 每格先置 false：任何提前 return 都不会留下上一格的陈旧命中值（宁可不动作）
     vars.panelMatched = false
     // ★ 全局弹框清场：加锁确认框可能**迟到 >60s**（服务端回包慢），会盖住整个界面把后续点击全吃掉。
@@ -282,7 +289,18 @@ internal suspend fun ScanEngine.parsePanel(step: JSONObject, ctx: ScanEngine.Cel
         emptyList()
     }
     if (isWeaponPanel) delay(WEAPON_PANEL_DELAY_MS)
-    val fpWaitMs = if (gridCellChanged) PANEL_FP_WAIT_MS else PANEL_FP_DUP_WAIT_MS
+    // ★ P1（2026-10-06）：重复格（卡格指纹没变 = 同一件再点）**整段跳过等待**，
+    //   对齐 GOODScanner backpack_scanner.rs:1417（is_duplicate ⇒ 面板等待直接不走）。
+    //   语义：等的是「面板变化」，同一件点了面板本就不会变 ⇒ 等是白等。
+    //   快照更新与「可能陈旧帧」W 日志路径保留（waited=0 < 任何预算 ⇒ 走 else-if 打 W）。
+    val fpWaitMs = when {
+        !gridCellChanged && TimingOverrides.duplicateCellSkipWait -> 0L
+        gridCellChanged -> PANEL_FP_WAIT_MS
+        else -> PANEL_FP_DUP_WAIT_MS
+    }
+    if (!gridCellChanged && TimingOverrides.duplicateCellSkipWait) {
+        Log.i(TAG, "面板指纹：重复格（卡格指纹未变）⇒ 跳过等待，直接解析")
+    }
     // 每格先按"未出现"处理；检测到指纹变化/新快照即置 true（见下）
     // 三态定案（#55）：**有**闸门 ⇒ 先按"还没出现"记（等不到变化就保持 false = 真停滞信号）；
     //   **没有**闸门（武器 FixedDelay）⇒ null = "没测"，既不谎报"出现过"也不谎报"没出现"。
@@ -314,8 +332,10 @@ internal suspend fun ScanEngine.parsePanel(step: JSONObject, ctx: ScanEngine.Cel
                     f2.release()
                 }
             }
-            if (!PanelFingerprint.same(PanelFingerprint.capture(frame, fpRects), panelFpSnapshot)) {
-                panelFpSnapshot = PanelFingerprint.capture(frame, fpRects)
+            // ★ 同一帧同一 regions 采一次即可（原先连按两次 capture；E3 去重，行为逐位不变）
+            val fpCur = PanelFingerprint.capture(frame, fpRects)
+            if (!PanelFingerprint.same(fpCur, panelFpSnapshot)) {
+                panelFpSnapshot = fpCur
             } else if (waited >= fpWaitMs) {
                 Log.w(TAG, "面板指纹：${fpWaitMs}ms 内面板未变化（按原样解析，可能陈旧帧）")
                 panelFpSnapshot = fp0
@@ -331,11 +351,42 @@ internal suspend fun ScanEngine.parsePanel(step: JSONObject, ctx: ScanEngine.Cel
     //   （2026-09-24 首版误放在取帧处，早于 5072 行的赋值 ⇒ 清单里 1003/1004 格恒报
     //    `appeared:false`，与 `格级` 日志的上千次 `appeared=true` 直接矛盾。埋点埋早了。）
     dumpPanelShot(frame, panelKey, fpWaitMs)
+    // ★ S2b（#69）管道路径：头部段（指纹闸/取证）已在生产者完成；这里把整帧交回调用方的
+    //   pipeOut = 「裁片拷进 job 私有 Mat + send（背压）」，随后池帧早还（§4 池帧早还——
+    //   vote(rarity) 已在交回前完成）。解析/判据/emit 由单消费者协程按 FIFO 序执行。
+    if (pipeOut != null) {
+        pipeOut(frame)
+        if (owned) frame.release() else ctx?.release()
+        return
+    }
+    // ★ S1（#69 流水线第一步，timing key `crop=1` 开，默认关）：OCR/解析改读**面板裁片**，
+    //   rect 经 origin 平移到裁片坐标；指纹闸门/vote/祝圣判据仍读整帧（S2 才搬）。
+    //   裁片拷进引擎级复用 Mat：copyTo 在尺寸类型不变时**零重分配**，每格只多一次 memcpy
+    //   （2244 约 3MB ≈ 0.3ms），换来 S2 可以立刻 release 池帧。
+    val cropRect = if (TimingOverrides.panelCrop) profile.panelCropRect(panelKey) else null
+    var origin = FramePoint(0, 0)
+    var parseFrame = frame
+    if (cropRect != null) {
+        val x0 = cropRect.left.coerceIn(0, frame.cols() - 1)
+        val y0 = cropRect.top.coerceIn(0, frame.rows() - 1)
+        val x1 = cropRect.right.coerceIn(x0 + 1, frame.cols())
+        val y1 = cropRect.bottom.coerceIn(y0 + 1, frame.rows())
+        val t0 = System.nanoTime()
+        val view = Mat(frame, Rect(x0, y0, x1 - x0, y1 - y0))
+        try {
+            view.copyTo(panelCropBuf)
+        } finally {
+            view.release()
+        }
+        PerfProbe.addCrop(System.nanoTime() - t0)
+        parseFrame = panelCropBuf
+        origin = FramePoint(x0, y0)
+    }
     try {
         if (panelKey == "weapon_backpack") {
-            parseWeaponPanel(frame, ocr, step.optJSONObject("dict"))
+            parseWeaponPanel(parseFrame, ocr, step.optJSONObject("dict"), origin)
         } else {
-            parseArtifactPanel(frame, ocr, panelKey, step.optJSONObject("dict"))
+            parseArtifactPanel(parseFrame, ocr, panelKey, step.optJSONObject("dict"), origin)
         }
     } finally {
         if (owned) frame.release()
@@ -390,7 +441,15 @@ internal fun ScanEngine.stopAtMaterialMarker(kind: String, hit: String, detail: 
     RecognitionLog.log(logTag, RecognitionLog.Level.I, "$kind 止扫标识「$hit」⇒ 停止")
 }
 
-internal suspend fun ScanEngine.parseWeaponPanel(frame: Mat, ocr: OcrGateway, dict: JSONObject? = null) {
+internal suspend fun ScanEngine.parseWeaponPanel(
+    frame: Mat,
+    ocr: OcrGateway,
+    dict: JSONObject? = null,
+    /** 见 [parseArtifactPanel] 的同名参数：裁片左上角帧坐标，rect 建树处统一减。 */
+    origin: FramePoint = FramePoint(0, 0),
+) {
+    fun sh(r: FrameRect): FrameRect =
+        if (origin.x == 0 && origin.y == 0) r else r.shiftedBy(-origin.x, -origin.y)
     val yShift = 0
     // ★ 2026-09-12：**5 次单槽 `readLines` → 1 次批量 `readRois`**（多 ROI 同帧、一次推理）。
     //   ⚠️ 语义差异（踩过）：`readLines` 是 `mapNotNull`（丢空串、返回长度会变）；
@@ -399,12 +458,12 @@ internal suspend fun ScanEngine.parseWeaponPanel(frame: Mat, ocr: OcrGateway, di
     //   顺带删掉两个**读了从不使用**的槽（mainLabel/mainValueText：武器主词条/白字无 GOOD 映射）。
     val base = "panels.weapon_backpack"
     val rects = listOf(
-        profile.rect("$base.name"),
-        profile.rect("$base.level"),
-        profile.rect("$base.refine"),
+        sh(profile.rect("$base.name")),
+        sh(profile.rect("$base.level")),
+        sh(profile.rect("$base.refine")),
         // ★ 2026-09-17 对齐 GOODScanner（`WeaponOcrRegions.equip`）：**读装备者**
         //   真机核对：`panels.weapon_backpack.equipped`=[2305,1163,2685,1217] 精确套住「珐露珊已装备」✓
-        profile.rect("$base.equipped"),
+        sh(profile.rect("$base.equipped")),
     )
     val texts = ocr.readRois(frame, rects)
     fun at(i: Int): String? = texts.getOrNull(i)?.takeIf { it.isNotBlank() }
@@ -631,7 +690,14 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     panelKey: String = "artifact_backpack",
     /** flow 的 `dict` 声明（字段→词典 key / fuzzy / subStats 档位表），全 JSON 驱动。 */
     dict: JSONObject? = null,
+    /**
+     * S1 裁片原点（#69）：[frame] 是整帧时为 (0,0)；是面板裁片时为裁片左上角的帧坐标，
+     * 本函数内所有 rect 统一减它换到裁片坐标。**rect 建树只在这一处减**，不要散到使用点。
+     */
+    origin: FramePoint = FramePoint(0, 0),
 ) {
+    fun sh(r: FrameRect): FrameRect =
+        if (origin.x == 0 && origin.y == 0) r else r.shiftedBy(-origin.x, -origin.y)
     val base = "panels.$panelKey"
     // ══ 祝圣之霜（Sanctifying Elixir）内容下移：**只移 y 轴在横幅以下的那几项** ══════════
     // 【用户 2026-09-16 定稿 + GOODScanner ELIXIR_SHIFT 佐证】
@@ -648,11 +714,11 @@ internal suspend fun ScanEngine.parseArtifactPanel(
 
     // 一次批量读全部文本槽（name/slot/mainName/mainValue/level/subStats×4）——单帧单调用，
     // 返回与 rects 一一对应（blank 保留占位，按索引取回）
-    val nameRect = profile.rect("$base.name")
-    val slotRect = profile.rect("$base.slot")
-    val mainNameRect = profile.rect("$base.mainName")
-    val mainValueRect = profile.rect("$base.mainValue")
-    val levelRect = profile.rect("$base.level").shiftedBy(yShift)
+    val nameRect = sh(profile.rect("$base.name"))
+    val slotRect = sh(profile.rect("$base.slot"))
+    val mainNameRect = sh(profile.rect("$base.mainName"))
+    val mainValueRect = sh(profile.rect("$base.mainValue"))
+    val levelRect = sh(profile.rect("$base.level").shiftedBy(yShift))
     // ★ P3（2026-09-30）：`rawObject(base)!!` 裸断言改显式校验 —— null 时抛带 key 的明确错误，
     //   不再是难定位的 KotlinNullPointerException。
     val panelObj = profile.rawObject(base)
@@ -660,19 +726,26 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     val subStatsArr = panelObj.getJSONArray("subStats")
     val subRects = (0 until subStatsArr.length()).map { i ->
         val r = subStatsArr.getJSONArray(i)
-        profile.scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3)).shiftedBy(yShift)
+        sh(profile.scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3)).shiftedBy(yShift))
     }
     // ★ 2026-09-12：把 artifact_manage 的 set_name 也**并入同一次批量**（原为独立第 2 次调用）。
     val setNameRect = if (panelKey == "artifact_manage") {
         profile.rawObject(base)?.optJSONArray("setName")?.takeIf { it.length() >= 4 }?.let {
-            profile.scaleRect(it.getInt(0), it.getInt(1), it.getInt(2), it.getInt(3))
+            sh(profile.scaleRect(it.getInt(0), it.getInt(1), it.getInt(2), it.getInt(3)))
         }
     } else null
     val setNameIdx = if (setNameRect != null) 5 + subRects.size else -1
+    // ★ 2026-10-05：装备者（location）原先是**同帧的第 2 次 OCR 调用**（单槽 readLines）⇒ 每格多跑
+    //   一整条 rec 推理。并入同一次批量（武器面板早就是这么读的）。缺该 profile 键 ⇒ null ⇒
+    //   下标越界取回空串，与旧 `runCatchingCancellable { ... }.getOrElse { "" }` 同语义。
+    val equippedRect =
+        runCatchingCancellable { profile.rect("panels.$panelKey.equipped") }.getOrNull()?.let { sh(it) }
+    val equippedIdx = 5 + subRects.size + (if (setNameRect != null) 1 else 0)
     val lines = ocr.readRois(
         frame,
         listOf(nameRect, slotRect, mainNameRect, mainValueRect, levelRect) + subRects +
-            (if (setNameRect != null) listOf(setNameRect) else emptyList()),
+            (if (setNameRect != null) listOf(setNameRect) else emptyList()) +
+            (if (equippedRect != null) listOf(equippedRect) else emptyList()),
     )
 
     // 件名 + 部位 + 主词条（blank → null，保持原单槽 readLines 语义）
@@ -684,7 +757,7 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     val mainStat = mainName?.let { StatParser.parse(it + (mainValueText ?: ""), names) }
 
     // ★★ 面板原文 dump（诊断用，见 PANEL_RAW_DUMP）★★
-    //   打印该面板全部文本槽：name | slot | mainName | mainValue | level | subStats×4 (+setName)。
+    //   打印该面板全部文本槽：name | slot | mainName | mainValue | level | subStats×4 (+setName) (+equipped)。
     if (PANEL_RAW_DUMP) {
         Log.i(TAG, "面板原文: " + lines.joinToString(" | ") { it })
     }
@@ -694,7 +767,7 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     vars.level = levelText?.let { StatParser.extractValue(it)?.toInt() } ?: 0
 
     // 星带逐格（⚠️整带列投影 5★ 会合并，必须逐格；祝圣 yShift 不作用于星带——profiles zhusheng.fields 仅 level/subStats/lock/astral）
-    val starCount = countStars(frame, panelKey)
+    val starCount = countStars(frame, panelKey, origin)
     // 交叉校验：banner 色分类 vs 星数——以星数为准
     val rarity = if (starCount > 0) starCount else vars.rarity
     vars.rarity = rarity
@@ -708,7 +781,20 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //     y≈1090 起是「套装名: 2件套：…」⇒ 只有 3 条时第 4 行 ROI 正好压在这一行上。
     //   · GT 实测 **4★+16 24/24 全是 4 条** ⇒ 旧规则「4★ 最高 3」把真第 4 条砍掉 ⇒ **少读**（24/24）。
     //   ⇒ 改为**不按稀有度猜条数**：读**连续块**，遇"非空但解析不出 stat"的行即块结束，全局上限 4。
-    var substats = StatParser.parseBlock(lines.drop(5), names)
+    // ★ 2026-10-05 subStats ROI 收窄（2990→2660，GT 帧实测激活行文本右缘 ≤2510）后，
+    //   行文本不再包含「（待激活）」后缀 ⇒ 待激活改由**颜色判据**判定
+    //   （VoteJudges.substatRowPending：激活行深灰核心 lum90-150 计数 1913-2219，待激活行 0，
+    //   JPEG 有损下仍完美分离）。判得 pending ⇒ 给该行文本补上与 OCR 时代相同的
+    //   「（待激活）」标记 ⇒ 下游 StatParser/RollSolver/GoodExporter 语义零改动
+    //   （拆分优先级①的标记来源从 OCR 换成颜色；ROI 收窄同时把 rec Σw 砍 ~27%）。
+    val judgedSubLines = (0 until subRects.size).map { i ->
+        val t = lines.getOrNull(5 + i).orEmpty()
+        if (t.isBlank()) t else when (VoteJudges.substatRowPending(frame, subRects[i])) {
+            true -> if (t.contains("待激活")) t else "$t（待激活）"
+            else -> t
+        }
+    } + (if (setNameIdx >= 0) listOf(lines.getOrNull(setNameIdx).orEmpty()) else emptyList())
+    var substats = StatParser.parseBlock(judgedSubLines, names)
 
     // 仅保留止扫判定（3★/2★ 不解析）
     // ★★ 2026-09-16 修（新 GT 定标：账号 941 件全 4★/5★、无任何 3★，却有 13 件
@@ -846,10 +932,8 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //   默认空串，构造处**根本没传**它 ⇒ 导出里 location 恒空（GT 1045 件里 262 件有值，我方 0/921 ✗）。
     //   与武器路径同口径：面板底部 `panels.<panelKey>.equipped` 读「XX已装备」⇒ 取「已装备」前的内容，
     //   再按角色词典归一成 GOOD key（旅行者昵称等匹配不到就保留原文，与武器路径一致）。
-    val equippedText = runCatchingCancellable {
-        val r = profile.rect("panels.$panelKey.equipped")
-        ocr.readLines(frame, listOf(r)).joinToString(" ")
-    }.getOrElse { "" }
+    //   2026-10-05：文本改从上面的批量结果按下标取（原来这里自己再发一次单槽 OCR）。
+    val equippedText = lines.getOrNull(equippedIdx).orEmpty()
     val location = equippedOwnerOf(equippedText)
         ?.let { StatParser.clean(it) }
         ?.takeIf { it.isNotEmpty() }
@@ -1036,7 +1120,11 @@ internal fun ScanEngine.cellFingerprintRect(
 }.getOrNull()
 
 /** 星带逐格采样：格内金像素>100 → 该星点亮（profiles starBand.judge 固化阈值）。星带不随祝圣 yShift 移动。 */
-internal fun ScanEngine.countStars(frame: Mat, panelKey: String = "artifact_backpack"): Int {
+internal fun ScanEngine.countStars(
+    frame: Mat,
+    panelKey: String = "artifact_backpack",
+    origin: FramePoint = FramePoint(0, 0),
+): Int {
     val band = profile.rawObject("panels.$panelKey")?.optJSONObject("starBand")
         ?: return 0
     val y0 = band.getJSONArray("y").getInt(0)
@@ -1050,10 +1138,10 @@ internal fun ScanEngine.countStars(frame: Mat, panelKey: String = "artifact_back
     for (i in 0 until 5) {
         val baseX = x0 + i * pitch
         val rect = FrameRect(
-            left = profile.scale(baseX, profile.scaleX),
-            top = top,
-            right = profile.scale(baseX + cell, profile.scaleX),
-            bottom = bottom,
+            left = profile.scale(baseX, profile.scaleX) - origin.x,
+            top = top - origin.y,
+            right = profile.scale(baseX + cell, profile.scaleX) - origin.x,
+            bottom = bottom - origin.y,
         )
         if (VoteJudges.countMatches(frame, rect, VoteJudges.GOLD) > STAR_GOLD_THRESHOLD) count++
     }

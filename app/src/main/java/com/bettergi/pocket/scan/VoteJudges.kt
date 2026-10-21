@@ -1,6 +1,7 @@
 package com.bettergi.pocket.scan
 
 import android.util.Log
+import kotlin.math.abs
 import org.opencv.core.Core
 import org.opencv.core.Mat
 import org.opencv.core.Scalar
@@ -77,6 +78,54 @@ object VoteJudges {
         const val ASTRAL_GOLD = 400        // gold>=400=已收藏
         const val BANNER_PURPLE_RATIO = 0.6
         const val BANNER_POINTS_REQUIRED = 2 // ≥2/3 点
+
+        // ★ 2026-10-05 subStats 待激活颜色判据（GT 帧实测：3200×1440 JPG 有损下仍完美分离）：
+        //   激活行深灰核心（中性色 lum 90-150）计数 1913-2219；待激活行 **0**（文字整体 150-215）。
+        //   阈值给 10× 余量；背景米色（lum ~228）被 215 上限排除。
+        const val SUBSTAT_PENDING_DARK_MAX = 150   // 深灰核心少于该数 ⇒ 待激活（激活行实测 ≥1913）
+        const val SUBSTAT_MIN_TEXT_PIXELS = 400    // 双带合计低于该数 ⇒ 空行（无词条）
+    }
+
+    /**
+     * subStats 行三态判据（ROI 收窄后"（待激活）"后缀不再进 OCR 文本的替代证据）。
+     *
+     * 原理（2026-10-05 GT 帧实测，见 Thresholds 注释）：激活行文字是**深灰**（中性色
+     * lum 90-150 的核心像素 1913-2219 个），待激活行文字是**中灰**（同带 0 个深灰、
+     * 全部落在 150-215）；面板米色背景（lum ~228）与彩色描边被中性色度 + 215 上限排除。
+     *
+     * 返回：true=待激活；false=激活；null=行内没有可判文字（3 词条件第 4 行为空）。
+     * 判据只读像素，不改扫描语义；调用方把 true 翻译成与 OCR 时代相同的「（待激活）」标记。
+     */
+    fun substatRowPending(frame: Mat, rect: FrameRect): Boolean? {
+        if (frame.empty()) return null
+        val x0 = rect.left.coerceIn(0, frame.cols() - 1)
+        val y0 = rect.top.coerceIn(0, frame.rows() - 1)
+        val x1 = rect.right.coerceIn(0, frame.cols())
+        val y1 = rect.bottom.coerceIn(0, frame.rows())
+        if (x1 <= x0 || y1 <= y0) return null
+        val w = x1 - x0
+        val rowBuf = ByteArray(3 * w)
+        var dark = 0
+        var light = 0
+        for (y in y0 until y1) {
+            frame.get(y, x0, rowBuf)
+            for (i in 0 until w) {
+                val o = i * 3
+                val b = rowBuf[o].toInt() and 0xFF
+                val g = rowBuf[o + 1].toInt() and 0xFF
+                val r = rowBuf[o + 2].toInt() and 0xFF
+                if (abs(r - g) < 18 && abs(g - b) < 18) {
+                    val lum = (r + g + b) / 3
+                    if (lum in 90 until 150) dark++
+                    else if (lum in 150 until 215) light++
+                }
+            }
+        }
+        return when {
+            dark + light < Thresholds.SUBSTAT_MIN_TEXT_PIXELS -> null
+            dark < Thresholds.SUBSTAT_PENDING_DARK_MAX -> true
+            else -> false
+        }
     }
 
     /** vote 结果：matched + 命中像素计数（诊断用）。 */

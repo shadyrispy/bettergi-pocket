@@ -15,17 +15,31 @@ object TimingOverrides {
 
     // ── 引擎等待（默认值**引用 ScanEngine 常量**，单一事实源，勿在此写死数字）──
     var navSettleMs: Long = ScanEngine.NAVIGATE_PAGE_SETTLE_MS
-    var panelPollMs: Long = ScanEngine.PANEL_POLL_MS
     var panelStableFallbackMs: Long = ScanEngine.PANEL_STABLE_FALLBACK_MS
     var settlePollMs: Long = ScanEngine.SETTLE_POLL_MS
     var settleStableMs: Long = ScanEngine.SETTLE_STABLE_MS
 
     /**
      * ★ 就绪信号直采（2026-09-12）：`true` = 面板就绪轮询改用 [ScanEngine.FrameSource.sampleSignature]
-     * 的分块签名（零 Mat / 零 OCR），步长 [panelSigPollMs]；`false` = **完全回退**到旧的
-     * 「`delay(panelPollMs)` + `freshFrame()` + OCR 名字」路径（用于 A/B 与回滚）。
+     * 的分块签名（零 Mat / 零 OCR），步长 [panelSigPollMs]；`false` = 回退为**固定 `delay(PANEL_REFRESH_MS)`**。
+     * （2026-10-05：原先 `false` 回退到的「`delay` + `freshFrame` + OCR 名字轮询」分支已删 ——
+     *   它在全部存档真机日志里 0 次命中，只留下误导。要 A/B 就绪判定请比 `sigpoll`/`sigsamples`。）
      */
     var panelSigEnabled: Boolean = DEFAULT_PANEL_SIG_ENABLED
+
+    /**
+     * S1（#69 流水线）：OCR/解析改读面板裁片（origin 平移），vote/指纹仍读整帧。
+     * 默认关；`--es timing "crop=1"` 开。开与关的解析结果必须逐字段相同（真机 A/B 验）。
+     */
+    var panelCrop: Boolean = DEFAULT_PANEL_CROP
+
+    /**
+     * S2b（#69 流水线）：解析流水线深度。0=现状同步路径（新增代码零执行）；
+     * 1..8=每格 parse 步只做「指纹闸+裁片拷贝+send」，OCR/解析/emit 在单消费者协程；
+     * >0 时强制 crop=1（消费者只拿得到裁片，整帧路径与流水线路径不并存，防语义漂移）。
+     * K 只决定"藏多深"（点击/门/翻页窗口藏进消费者积压），不增加并行度。
+     */
+    var pipeDepth: Int = DEFAULT_PIPE_DEPTH
 
     /** 签名轮询步长（仅 [panelSigEnabled] 时生效）。默认 40ms —— 实测面板内容 133ms 就绪（中位）。 */
     var panelSigPollMs: Long = ScanEngine.PANEL_SIG_POLL_MS
@@ -93,11 +107,12 @@ object TimingOverrides {
     val swipeTotalMs: Long get() = swipeFastSteps * swipeFastMs + swipeSlowSteps * swipeSlowMs + swipeBackMs
 
     private val DEFAULT_NAV_SETTLE_MS = ScanEngine.NAVIGATE_PAGE_SETTLE_MS
-    private val DEFAULT_PANEL_POLL_MS = ScanEngine.PANEL_POLL_MS
     private val DEFAULT_PAGE_STABLE_MS = ScanEngine.PANEL_STABLE_FALLBACK_MS
     private val DEFAULT_SCAN_POLL_MS = ScanEngine.SETTLE_POLL_MS
     private val DEFAULT_SCAN_STABLE_MS = ScanEngine.SETTLE_STABLE_MS
     private const val DEFAULT_PANEL_SIG_ENABLED = true
+    private const val DEFAULT_PANEL_CROP = false
+    private const val DEFAULT_PIPE_DEPTH = 0
     private val DEFAULT_PANEL_SIG_POLL_MS = ScanEngine.PANEL_SIG_POLL_MS
     private const val DEFAULT_PANEL_SIG_BAND = true
     /** 内容带 + 2 样本 + 免确认的 A/B 结论（见 panelSigSamples/panelSigConfirm 的 KDoc）。 */
@@ -120,11 +135,12 @@ object TimingOverrides {
 
     fun reset() {
         navSettleMs = DEFAULT_NAV_SETTLE_MS
-        panelPollMs = DEFAULT_PANEL_POLL_MS
         panelStableFallbackMs = DEFAULT_PAGE_STABLE_MS
         settlePollMs = DEFAULT_SCAN_POLL_MS
         settleStableMs = DEFAULT_SCAN_STABLE_MS
         panelSigEnabled = DEFAULT_PANEL_SIG_ENABLED
+        panelCrop = DEFAULT_PANEL_CROP
+        pipeDepth = DEFAULT_PIPE_DEPTH
         panelSigPollMs = DEFAULT_PANEL_SIG_POLL_MS
         panelSigBand = DEFAULT_PANEL_SIG_BAND
         panelSigSamples = DEFAULT_PANEL_SIG_SAMPLES
@@ -147,9 +163,9 @@ object TimingOverrides {
 
     /** 是否为全默认（用于日志区分"基线轮"）。 */
     val isDefault: Boolean
-        get() = navSettleMs == DEFAULT_NAV_SETTLE_MS && panelPollMs == DEFAULT_PANEL_POLL_MS &&
+        get() = navSettleMs == DEFAULT_NAV_SETTLE_MS &&
             panelStableFallbackMs == DEFAULT_PAGE_STABLE_MS && settlePollMs == DEFAULT_SCAN_POLL_MS &&
-            settleStableMs == DEFAULT_SCAN_STABLE_MS && panelSigEnabled == DEFAULT_PANEL_SIG_ENABLED &&
+            settleStableMs == DEFAULT_SCAN_STABLE_MS && panelSigEnabled == DEFAULT_PANEL_SIG_ENABLED && panelCrop == DEFAULT_PANEL_CROP &&
             panelSigPollMs == DEFAULT_PANEL_SIG_POLL_MS && panelSigBand == DEFAULT_PANEL_SIG_BAND &&
             panelSigSamples == DEFAULT_PANEL_SIG_SAMPLES && panelSigConfirm == DEFAULT_PANEL_SIG_CONFIRM &&
             panelSigGateCached == DEFAULT_PANEL_SIG_GATE && !sigDebug && sigBlocksX == DEFAULT_SIG_BLOCK_X && sigBlocksY == DEFAULT_SIG_BLOCK_Y &&
@@ -161,8 +177,11 @@ object TimingOverrides {
             swipeSlowMs == DEFAULT_SWIPE_SLOW_MS && swipeBackMs == DEFAULT_SWIPE_BACK_MS
 
     /**
-     * 解析 `"nav=650,poll=120,pstable=400,spoll=120,sstable=150,swFast=110,swFastMs=110,swSlow=110,swSlowMs=110,swBack=60"`
+     * 解析 `"nav=650,pstable=400,spoll=120,sstable=150,swFast=110,swFastMs=110,swSlow=110,swSlowMs=110,swBack=60"`
      * 未知键忽略；空串 → [reset]。
+     * ★ 2026-10-05：`poll` 键已删 —— 它映射的 `PANEL_POLL_MS` 常量从未被任何生效路径引用
+     *   （就绪轮询早改走签名直采 `sigpoll`，签名不可用时是固定 `PANEL_REFRESH_MS` 等待），
+     *   留着只会误导"以为 A/B 过它"。传入 `poll=…` 现按未知键静默忽略。
      * @return 生效值摘要（回写日志用）
      */
     /** 是否**应用**页面相位平移（真机标定开关；`phi=0` 关闭）。 */
@@ -186,6 +205,13 @@ object TimingOverrides {
     var overlapSkip: Boolean = true
 
     /**
+     * P1（2026-10-06）：重复格（卡格指纹未变）**跳过面板指纹门等待**（对齐 GOODScanner
+     * backpack_scanner.rs:1417 的 is_duplicate ⇒ 不进面板等待）。默认**开**；
+     * `--es timing "dupskip=0"` 回退到旧的 100ms 短档（A/B 与回滚用）。
+     */
+    var duplicateCellSkipWait: Boolean = true
+
+    /**
      * 入口幂等（开链前先短轮询锚点，命中即跳过入口链）。默认 **开**；
      * 干跑测试关掉它，因为测试夹具的合成帧会让锚点直接命中、从而不再记录入口链的点击（点击计数断言会变）。
      */
@@ -196,6 +222,7 @@ object TimingOverrides {
         phiApply = true
         anchorBudgetMs = 0L
         overlapSkip = true
+        duplicateCellSkipWait = true
         entryIdempotent = true
         panelSettleMs = 0L
         if (!spec.isNullOrBlank()) {
@@ -215,12 +242,18 @@ object TimingOverrides {
                 val v = raw.toLongOrNull() ?: continue
                 when (k) {
                     "nav" -> navSettleMs = v
-                    "poll" -> panelPollMs = v
                     "pstable" -> panelStableFallbackMs = v
                     "spoll" -> settlePollMs = v
                     "sstable" -> settleStableMs = v
-                    // ★ 就绪信号直采 A/B 开关：sig=0 完全回退旧的「抓帧+OCR」轮询
+                    // ★ 就绪信号直采 A/B 开关：sig=0 回退为固定 delay(PANEL_REFRESH_MS)（见字段 KDoc）
                     "sig" -> panelSigEnabled = v != 0L
+                    // S1 裁片开关（#69）：crop=1 时解析读裁片
+                    "crop" -> panelCrop = v != 0L
+                    // S2b 流水线深度（#69）：0=同步；1..8=消费者队列深度（>0 强制 crop=1）
+                    "pipe" -> {
+                        pipeDepth = v.toInt().coerceIn(0, 8)
+                        if (pipeDepth > 0) panelCrop = true
+                    }
                     "sigpoll" -> panelSigPollMs = v.coerceAtLeast(5L)
                     "sigband" -> panelSigBand = v != 0L
                     "sigsamples" -> panelSigSamples = v.toInt().coerceIn(1, 6)
@@ -231,6 +264,7 @@ object TimingOverrides {
                     "anchor" -> anchorBudgetMs = v.coerceIn(0L, 60000L)
                     "panel" -> panelSettleMs = v.coerceIn(0L, 10000L)
                     "oskip" -> overlapSkip = v != 0L
+                    "dupskip" -> duplicateCellSkipWait = v != 0L
                     "advdist" -> advanceDistPx = v.toInt().coerceIn(50, 2000)
                     "advextra" -> advanceExtraPx = v.toInt().coerceIn(-500, 1000)
                     // A9 终止保护上限（见字段 KDoc）
@@ -249,9 +283,9 @@ object TimingOverrides {
     }
 
     fun summary(): String =
-        "nav=$navSettleMs,poll=$panelPollMs,pstable=$panelStableFallbackMs," +
+        "nav=$navSettleMs,pstable=$panelStableFallbackMs," +
             "spoll=$settlePollMs,sstable=$settleStableMs," +
-            "sig=${if (panelSigEnabled) 1 else 0},sigpoll=$panelSigPollMs," +
+            "sig=${if (panelSigEnabled) 1 else 0},crop=${if (panelCrop) 1 else 0},pipe=$pipeDepth,sigpoll=$panelSigPollMs," +
             "sigband=${if (panelSigBand) 1 else 0},sigsamples=$panelSigSamples,sigconfirm=${if (panelSigConfirm) 1 else 0}," +
             "siggate=${if (panelSigGateCached) 1 else 0},phi=${if (phiApply) 1 else 0}," +
             "anchor=$anchorBudgetMs,oskip=${if (overlapSkip) 1 else 0},panel=$panelSettleMs," +

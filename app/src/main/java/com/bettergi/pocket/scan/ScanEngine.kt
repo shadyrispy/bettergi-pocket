@@ -10,10 +10,19 @@ import com.bettergi.pocket.core.IntRect
 import com.bettergi.pocket.recognition.name.GoodNames
 import com.bettergi.pocket.recognition.name.NameMatcher
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import org.opencv.core.CvType
 import org.opencv.core.Mat
+import org.opencv.core.Rect
 import org.opencv.imgcodecs.Imgcodecs
 
 /**
@@ -170,7 +179,7 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         freshFrameTimeouts = 0; frameRefusedTotal = 0
         settleFrameTimeouts = 0; settleStaleFramesUsed = 0
         PerfProbe.reset() // 只读探针：每轮扫描独立统计
-        Log.i(TAG, "timing: ${TimingOverrides.summary()}")
+        Log.i(TAG, "timing: ${TimingOverrides.summary()} | ${CpuTelemetry.snapshot()}")
         // §15 流程前置归位：GOODScanner `GenshinGameController::return_to_main_ui` 同思想
         // （循环点返回直至主界面），各流程启动前统一回到 game_home，避免残留弹窗/界面错位。
         // 默认 false：仅 ScriptRunner 真机启动路径显式开启（干跑单测不注入 → 不产生归位点击/取帧）
@@ -271,7 +280,9 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         )
         // 只读性能探针：click/swipe 真实注入耗时 + OCR 网关耗时（分量实测，供
         // dsl/verify/_audit/IMAGE-PATH-COST.md §8 决策）。**独立一行**，避免打乱既有日志正则。
-        Log.i(TAG, "probe ${PerfProbe.summary()} | sigSamples=$tmSigSamples")
+        // ★ #230：行尾再读一次钳频/温度，与 `timing:` 那行的**起跑**读数配对 ——
+        //   没有这一对，"这一轮慢"就分不清是代码慢还是中途被 EMUI 压了频。
+        Log.i(TAG, "probe ${PerfProbe.summary()} | sigSamples=$tmSigSamples | ${CpuTelemetry.snapshot()}")
         listener.onFinished(reason)
     }
 
@@ -449,6 +460,9 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     // ── ★ 行级闭环（2026-09-16 方案 C）：用内容键量「上一页→本页」前进量，判跳行/判滑空并计数 ──
     /** 每格计算出的内容键（含重复件）；页末收集成本页键序列。 */
     internal var lastCellKey: String? = null
+
+    /** S1 裁片复用缓冲（#69）：每格 copyTo 进这里，尺寸不变时零重分配；ScriptRunner 收尾 release。 */
+    internal val panelCropBuf = Mat()
 
     /** 上一页的键序列（**含读失败的空串占位**，下标 = 页内序号 —— 占位必须保留，否则前进量算错）。 */
     internal var rowCheckPrevKeys: List<String> = emptyList()
@@ -823,6 +837,251 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
 
     internal fun dictFuzzy(step: JSONObject): Boolean = dictFuzzyOf(step.optJSONObject("dict"))
 
+    // ── S2b 解析流水线（#69，timing key pipe=K；0=同步路径零执行）────────────────────
+    //
+    // 生产者（visit 的 parse 步）：指纹闸/取证/裁片拷贝 → send；消费者（单协程，
+    // Dispatchers.Default）按 FIFO 序做 OCR/解析/判据/emit。K 只决定"藏多深"
+    // （点击/门/翻页窗口藏进消费者积压），不增加并行度（§9：双消费者默认不上）。
+    // 页末 join（pipeJoinPage）保证页末机制（空读回读/锚定/dupPageConfirm/stopWhen total）
+    // 拿到的结果与现状同时刻可用；取消语义（§6.1）：close 后缓冲里的 job 只释放裁片。
+    // 池帧早还（§4）：裁片拷进 job 私有 Mat 后立即 ctx.release（vote 已在此之前完成）。
+
+    /** 每格解析 job：生产者（visit）闸门+裁片后发送，单消费者按 FIFO 序处理（take 序=格序）。 */
+    internal class ParseJob(
+        val id: Int,
+        val epoch: Int,              // 该格重访纪元（回读/定点重访重发时 ++）
+        val gridKey: String,
+        val col: Int, val row: Int, val page: Int,
+        val crop: Mat,               // job 私有裁片（池化复用，complete 归还；非池帧别名）
+        val origin: FramePoint,
+        val parseStep: JSONObject,   // parsePanel 的 step JSON（dict/match）
+        val emitStep: JSONObject?,   // 后随 emit 步（GoodCharacter 的止扫判据在 emit 求值）
+        val stopStep: JSONObject?,   // ★ S2b：本格 stopWhen 步（逐格步，判据要读本格 vars ⇒ 必须随 job）
+        val panelKey: String,
+        val idx: Int,                // 本格在 pageKeys/pageIdentities 的槽位（页末排水用）
+    ) {
+        val cellKey: String get() = "$gridKey:$col:$row"
+        // 消费者解析完成后回填（单消费者顺序执行，下一 job 解析前必已被生产者读取）：
+        var resultKey: String? = null       // ← lastCellKey（contentKey；空读为 null/空）
+        var resultIdentity: String? = ""    // ← lastCellIdentity
+    }
+
+    private var pipeChannel: Channel<ParseJob>? = null
+    private var pipeScope: CoroutineScope? = null
+    private var pipeConsumerJob: Job? = null
+    private var pipeNextId = 0
+    private var pipeInFlight = 0
+    private var pipeCancelled = false
+    private var pipePageNo = 0
+    internal var pipeEmitStep: JSONObject? = null
+    /** ★ S2b：本格 stopWhen 步（逐格步；生产者在下一格前非阻塞查 stopRequested）。 */
+    internal var pipeStopStep: JSONObject? = null
+    internal var pipeCellJobSent = false
+    /**
+     * ★ safetyGuard 降频缓存（②，2026-10-10 用户拍板）：守卫读「退出确认框」要一整帧 + 一次 OCR，
+     * auto_equip 一次导航序列里 clickAt 前要跑 ~9 次 ⇒ 光守卫就 9 帧 + 9 OCR。
+     * 退出框只可能由 **BACK 键或游戏侧事件**产生，**不可能由 clickAt 产生** ⇒ 同一次 visit 的
+     * 连续 clickAt 之间框状态不会变，结果可复用；跨 visit 边界（那里才可能发生 BACK/导航）
+     * 必查 —— 每格开头由 [com.bettergi.pocket.scan.ScanControlDomain] 的 runVisit 失效。
+     * 一旦某次检查读到「退出」⇒ stopRequested ⇒ 整轮不再点击，缓存无所谓。
+     */
+    internal var safetyGuardCacheValid = false
+    internal var safetyGuardCacheOk = false
+    private val pipeSentEpoch = HashMap<String, Int>()
+    private val pipeJobPool = ArrayDeque<ParseJob>()
+    private val pipeDoneResults = ArrayList<ParseJob>()
+    private val pipeDoneLock = Any()
+    private val pipeLock = Any()
+
+    /** 页号载体（pagedGrid 每页设置；job 遥测用）。 */
+    internal fun pipeSetPage(page: Int) {
+        synchronized(pipeLock) { pipePageNo = page }
+    }
+
+    private fun pipeAcquireCropLocked(w: Int, h: Int): Mat {
+        val it = pipeJobPool.iterator()
+        while (it.hasNext()) {
+            val j = it.next()
+            if (j.crop.cols() == w && j.crop.rows() == h) {
+                it.remove()
+                return j.crop
+            }
+            it.remove()
+            j.crop.release()
+        }
+        return Mat(h, w, CvType.CV_8UC3)
+    }
+
+    /** 生产者：裁片拷进 job 私有 Mat → send（背压=队列满挂起）。 */
+    internal suspend fun pipeSend(
+        gridKey: String,
+        col: Int, row: Int, idx: Int,
+        cropRect: FrameRect,
+        frame: Mat,
+        parseStep: JSONObject,
+        panelKey: String,
+    ) {
+        val ch = pipeChannel ?: Channel<ParseJob>(capacity = TimingOverrides.pipeDepth.coerceAtLeast(1)).also { created ->
+            pipeChannel = created
+            pipeScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            // ⚠️ 显式传 `created`，**不用 it**：launch 的 lambda 有自己的隐式 it(Unit)，
+            //   写 `pipeConsumerLoop(it)` 会在嵌套 lambda 里绑到 launch 的参数（实测排查出的坑）。
+            pipeConsumerJob = pipeScope!!.launch { pipeConsumerLoop(created) }
+        }
+        val key = "$gridKey:$col:$row"
+        // ★ 纪元 = **本 job 的世代**（自增后再取）。消费者判据是 `job.epoch < pipeSentEpoch[cellKey]`
+        //   （"该格已有更新的世代发出 ⇒ 我是过期件，丢弃"）。若用**自增前**的值打标，最新发出的
+        //   那件也恒小于表内值 ⇒ **每格每件都被判过期丢弃**（实测 send/take 各 292、proc 0、join 13，
+        //   消费者空转、背压永不成立 ⇒ 引擎一路翻页直到超时）。
+        val epoch = (pipeSentEpoch[key] ?: 0) + 1
+        pipeSentEpoch[key] = epoch
+        val x0 = cropRect.left.coerceIn(0, frame.cols() - 1)
+        val y0 = cropRect.top.coerceIn(0, frame.rows() - 1)
+        val x1 = cropRect.right.coerceIn(x0 + 1, frame.cols())
+        val y1 = cropRect.bottom.coerceIn(y0 + 1, frame.rows())
+        val crop = synchronized(pipeLock) { pipeAcquireCropLocked(x1 - x0, y1 - y0) }
+        val view = Mat(frame, Rect(x0, y0, x1 - x0, y1 - y0))
+        try {
+            view.copyTo(crop)
+        } finally {
+            view.release()
+        }
+        val job = ParseJob(
+            id = pipeNextId++, epoch = epoch, gridKey = gridKey, col = col, row = row,
+            page = synchronized(pipeLock) { pipePageNo },
+            crop = crop, origin = FramePoint(x0, y0),
+            parseStep = parseStep, emitStep = pipeEmitStep, stopStep = pipeStopStep,
+            panelKey = panelKey,
+            idx = idx,
+        )
+        synchronized(pipeLock) { pipeInFlight++ }
+        pipeCellJobSent = true
+        val t0 = System.nanoTime()
+        ch.send(job)
+        PerfProbe.addPipeWait(System.nanoTime() - t0)
+    }
+
+    /** 消费者循环：FIFO 取 job → 过期丢弃（§6.2）→ 解析/判据/emit → 归还裁片。 */
+    private suspend fun pipeConsumerLoop(channel: Channel<ParseJob>) {
+        for (job in channel) {
+            val stale = synchronized(pipeLock) {
+                val latest = pipeSentEpoch[job.cellKey] ?: job.epoch
+                job.epoch < latest
+            }
+            if (pipeCancelled || stale) {
+                Log.d(TAG, "pipe job #${job.id} ${if (stale) "过期丢弃" else "取消丢弃"}")
+                PerfProbe.addPipeDiscard()
+                synchronized(pipeLock) { pipeInFlight--; pipeReturnJob(job) }
+                continue
+            }
+            pipeProcess(job)
+            synchronized(pipeLock) {
+                pipeInFlight--
+                // 消费者解析完成 ⇒ 回填本格结果（页末排水按 idx 序写 pageKeys，§3.3）
+                job.resultKey = lastCellKey
+                job.resultIdentity = lastCellIdentity
+                synchronized(pipeDoneLock) { pipeDoneResults.add(job) }
+                pipeReturnJob(job)
+            }
+        }
+    }
+
+    /** 消费者单 job：解析（裁片+origin）→ match 闸求值 → emit（判据在 emitCharacter）。 */
+    private suspend fun pipeProcess(job: ParseJob) {
+        val t0 = System.nanoTime()
+        val gw = ocr ?: run {
+            Log.w(TAG, "pipe job #${job.id}: OcrGateway 为空（同步路径前置校验已兜底）")
+            return
+        }
+        try {
+            if (job.panelKey == "weapon_backpack") {
+                parseWeaponPanel(job.crop, gw, job.parseStep.optJSONObject("dict"), job.origin)
+            } else {
+                parseArtifactPanel(job.crop, gw, job.panelKey, job.parseStep.optJSONObject("dict"), job.origin)
+            }
+            vars.panelMatched = evaluatePanelMatch(job.parseStep)
+            if (job.parseStep.optString("match").isNotEmpty() && vars.panelMatched) vars.matchHit = true
+            job.emitStep?.let { emitByStep(it) }
+            // ★ S2b：stopWhen 是**逐格步**（visit 步序列第 10~11 位），判据读本格 vars
+            //   （rarity 连击/素材标识/total 核对）⇒ 必须与 parse/emit 同序在消费者求值。
+            //   生产者侧只在下一格前**非阻塞**查 vars.stopRequested（止扫语义仍是"本页后停"，
+            //   见 pagedGrid 页末检查）⇒ 不破坏流水线的并发。
+            job.stopStep?.let { stopWhen(it) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // §6.3：单 job 抛异常按"解析失败"记（不入库+交回读），消费者协程不得死
+            // ★ 计数是**必需的**，不只打日志：干跑 `isReturnDefaultValues` 把 Log 全吞，
+            //   没有 `pipeFail` 这条，"消费抛异常"与"读到空"在单测里原理上不可分
+            //   （#69 排查时多花了整整一轮才分清，见 design-docs §13.5）。
+            PerfProbe.addPipeFail()
+            Log.w(TAG, "pipe job #${job.id} 消费失败: ${e.message}")
+        } finally {
+            PerfProbe.addConsOcr(System.nanoTime() - t0)
+        }
+    }
+
+    private fun pipeReturnJob(job: ParseJob) {
+        if (pipeCancelled || pipeJobPool.size >= TimingOverrides.pipeDepth.coerceAtLeast(1)) {
+            job.crop.release()
+        } else {
+            pipeJobPool.addLast(job)
+        }
+    }
+
+    /** 页末 join：等在途 job 全部消费完成（背压保证 send 已返回 ⇒ 只等消费完成）。 */
+    internal suspend fun pipeJoinPage() {
+        if (pipeChannel == null) return
+        while (true) {
+            val n = synchronized(pipeLock) { pipeInFlight }
+            if (n == 0) break
+            delay(2)
+        }
+        // 只等齐，不清空 —— 清空由 [pipeDrainResults] 在排水后做（否则调用方读到空）
+    }
+
+    /**
+     * 页末排水（本页 job 结果，按 job id 序 = 生产者发送序 = 格序）。
+     * 返回 (idx, contentKey, identity)：idx 是该格在 pageKeys/pageIdentities 的槽位。
+     * ⚠️ 必须先 [pipeJoinPage]；`pipe=0`（无消费者）时返回空。
+     */
+    internal fun pipeDrainResults(): List<Triple<Int, String?, String>> =
+        synchronized(pipeDoneLock) {
+            val page = synchronized(pipeLock) { pipePageNo }
+            val out = pipeDoneResults.sortedBy { it.id }
+                .filter { it.page == page }
+                .map { Triple(it.idx, it.resultKey, it.resultIdentity ?: "") }
+            // 本页结果已全部交付 ⇒ 清空（pipeDrainAppeared 必须在本次调用之前或同批读取，见调用点顺序）
+            pipeDoneResults.removeAll { it.page == page }
+            out
+        }
+
+
+    /** 取消（§6.1）：close 后消费者把缓冲 job 只释放裁片，不 emit/不记账。 */
+    internal fun pipeCancel() {
+        val ch = pipeChannel ?: return
+        synchronized(pipeLock) { pipeCancelled = true }
+        ch.close()
+        pipeChannel = null
+        pipeConsumerJob = null
+        synchronized(pipeLock) {
+            pipeJobPool.forEach { it.crop.release() }
+            pipeJobPool.clear()
+        }
+    }
+
+    /** 扫描开始复位（取消上一轮残留的消费者/池）。 */
+    internal fun pipeReset() {
+        pipeCancel()
+        synchronized(pipeLock) {
+            pipeCancelled = false
+            pipeNextId = 0
+            pipeInFlight = 0
+            pipePageNo = 0
+            pipeSentEpoch.clear()
+        }
+    }
+
     /** [dictFuzzy] 的 dict 对象版（子解析函数只拿到 dict 时用）。 */
     internal class CellFrameContext {
         var frame: Mat? = null
@@ -893,13 +1152,10 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         const val PANEL_REFRESH_MS = 550L
         /** 面板名「未变但已稳定」的兜底等待：相邻同名时不至于打满 6s 上限（实测省 ~54s/100s）。 */
         const val PANEL_STABLE_FALLBACK_MS = 400L
-        /**
-         * 点格后面板名轮询**步长**。**2026-09-12 由 200 → 120**（全量武器实测 −29%）。
-         * ⚠️ 不要再调到 80：面板真刷新前就会走完「未变但稳定」兜底 → 读到上一格的名字
-         * → 会被 character_scan 的「连续重复」止扫判据误判成遍历完（实测只出 1 个角色）。
-         */
-        const val PANEL_POLL_MS = 120L        // §15 P1-1：点格后面板变化轮询上限（武器详情 3D 加载慢，实测切换可 >2s）
-        const val PANEL_CHANGE_WAIT_MAX_MS = 6000L
+        // ★ P1（2026-10-06）：6000→400。对齐 GOODScanner Fingerprint{timeout 200, initial 20}
+        //   （game_controller.rs:666）；BS 实测就绪门+settle 占每格 68%（508ms 里 345ms）。
+        //   语义不变：超时仍是「按原样解析」，只是不再先白等 6 秒。
+        const val PANEL_CHANGE_WAIT_MAX_MS = 400L
 
         // ── ★ 就绪信号直采（2026-09-12，取代上面的「抓帧 + OCR」轮询）──
         /**
@@ -1208,6 +1464,8 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          * 提到 **300ms**（与我方 artifact 的 clickDelay 同量级），给面板渲染留足时间。
          */
         const val WEAPON_PANEL_DELAY_MS = 300L
+        // ★ 对齐方案 P1 曾考虑降到 GOODScanner 的 50ms —— **被上面这条事故否决**：
+        //   它 50ms 能活靠「每格单帧 + 无指纹门」，我方就绪逻辑不同，抄数值不抄条件必复现漏件。
 
         /** 天赋读数为 0 时（时序性读失败 / 切页淡入）**最多重读次数**与间隔（ms）。 */
         const val TALENT_RETRY_MAX = 6

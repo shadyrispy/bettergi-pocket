@@ -573,6 +573,94 @@ class OnnxOcrBenchmarkTest {
         assertEquals(Long.MAX_VALUE, OnnxOcrEngine.medianAfterDroppingWarmup(longArrayOf()))
     }
 
+    // ================= A 改（2026-10-05）：整行 bulk 读 vs 逐元素绝对索引读 =================
+
+    /**
+     * 参考实现 = 改动前那一版（每步 `buf.get(base+ci)` 逐元素扫）。只用于对拍，不进生产。
+     * 目的：证明「整行 bulk copy 到复用数组再扫」与原实现**逐位**等价（文本相同、置信度 float 严格相等）。
+     */
+    private fun referenceDecode(
+        buf: java.nio.FloatBuffer,
+        t: Int,
+        c: Int,
+        dict: List<String>,
+        declared: String,
+    ): CtcDecoder.Result {
+        val base0 = buf.position()
+        val sb = StringBuilder()
+        var prev = -1
+        var keep = 0
+        var sum = 0.0
+        for (ti in 0 until t) {
+            val base = base0 + ti * c
+            var best = 0
+            var maxv = buf.get(base)
+            for (ci in 1 until c) {
+                val v = buf.get(base + ci)
+                if (v > maxv) { maxv = v; best = ci }
+            }
+            if (best == 0) { prev = 0; continue }
+            if (best == prev) continue
+            prev = best
+            val idx = best - 1
+            if (idx in dict.indices) sb.append(dict[idx])
+            val prob = when (declared) {
+                "softmax" -> maxv.toDouble()
+                "logits" -> softmaxRef(buf, base, c, maxv)
+                else -> if (maxv in 0f..1f) maxv.toDouble() else softmaxRef(buf, base, c, maxv)
+            }
+            keep++
+            sum += prob
+        }
+        return CtcDecoder.Result(sb.toString(), if (keep > 0) (sum / keep).toFloat() else 0f)
+    }
+
+    private fun softmaxRef(buf: java.nio.FloatBuffer, base: Int, c: Int, maxv: Float): Double {
+        var denom = 0.0
+        for (ci in 0 until c) denom += Math.exp(buf.get(base + ci).toDouble() - maxv.toDouble())
+        return 1.0 / denom
+    }
+
+    /**
+     * 三种缓冲（heap wrap / direct native / 非零 position 切片）× 三种声明口径。
+     * 数据里**故意造并列最大值**：并列时新旧都必须取**第一个**，否则这条改动会把字符悄悄换掉
+     * （文本仍"看起来像话"，属最难查的那类错）。
+     */
+    @Test
+    fun `A改 CTC 整行bulk读与逐元素读逐位一致 含并列与direct缓冲`() {
+        val dict = listOf("A", "B", "力", "7", "暴击率")
+        val c = dict.size + 1
+        val t = 9
+        val rng = java.util.Random(20261005)
+        val logits = FloatArray(t * c) { rng.nextFloat() * 4f - 2f }
+        // 并列：ti=1 时类 2 与类 4 同为最大值；ti=4 整行相等（全并列 ⇒ argmax=0=blank，不进文本）
+        val tie = 2.5f
+        logits[1 * c + 2] = tie; logits[1 * c + 4] = tie
+        for (ci in 0 until c) logits[4 * c + ci] = 1.25f
+        // 落在 0..1 之外，逼 "auto" 走 softmaxAt 分支
+        logits[6 * c + 3] = 7.5f
+
+        val heap = java.nio.FloatBuffer.wrap(logits)
+        val direct = java.nio.ByteBuffer.allocateDirect(logits.size * 4)
+            .order(java.nio.ByteOrder.nativeOrder()).asFloatBuffer()
+        direct.put(logits); direct.rewind()
+        // position=c 的切片视图：可读步数只剩 t-1（limit 决定，不是 capacity）
+        val slice = java.nio.FloatBuffer.wrap(logits, c, (t - 1) * c)
+
+        for (declared in listOf("auto", "softmax", "logits")) {
+            for ((name, buf, steps) in listOf(
+                Triple("heap", heap, t), Triple("direct", direct, t), Triple("slice", slice, t - 1),
+            )) {
+                val mine = CtcDecoder.decode(buf, steps, c, dict, declaredOutput = declared)
+                val ref = referenceDecode(buf, steps, c, dict, declared)
+                assertEquals("[$declared/$name] 文本不一致", ref.text, mine.text)
+                assertEquals("[$declared/$name] 置信度必须逐位相等", ref.confidence, mine.confidence, 0f)
+            }
+        }
+        val one = CtcDecoder.decode(heap, t, c, dict, declaredOutput = "softmax")
+        assertTrue("并列应取第一个最大类（得到 'B'）：${one.text}", one.text.contains("B"))
+    }
+
     /** P3：manifest `recOutputType` 声明驱动置信度来源，三条路径均可单测。 */
     @Test
     fun `P3 recOutputType 声明驱动置信度计算`() {
