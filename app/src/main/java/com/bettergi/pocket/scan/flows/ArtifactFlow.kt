@@ -1,0 +1,164 @@
+package com.bettergi.pocket.scan.flows
+
+import com.bettergi.pocket.scan.ScanEngine
+import com.bettergi.pocket.scan.assertScreen
+import com.bettergi.pocket.scan.dualStateButton
+import com.bettergi.pocket.scan.enterScreen
+import com.bettergi.pocket.scan.filterReset
+import com.bettergi.pocket.scan.pagedGridNative
+import com.bettergi.pocket.scan.readCount
+import com.bettergi.pocket.scan.runVisitBody
+import com.bettergi.pocket.scan.stopWhenRegisterDuplicateStreak
+import com.bettergi.pocket.scan.visitClick
+import com.bettergi.pocket.scan.visitEmit
+import com.bettergi.pocket.scan.visitParsePanel
+import com.bettergi.pocket.scan.vote
+import org.json.JSONArray
+import org.json.JSONObject
+
+/*
+ * 流程二：圣遗物背包全量扫描 → GoodArtifact（原 flows/artifact_scan.json 的原生平移）。
+ * 步序与参数**逐字**取自 artifact_scan.json v1.0.0。
+ */
+
+internal object ArtifactFlow {
+    /** 网格键（原 pagedGrid.grid）。 */
+    const val GRID = "artifact_backpack"
+
+    // ---- 顶层步（原 steps[0..5]）----
+
+    /** 原 steps[0]：入口链第一段——开背包 + 标题条确认「背包」。 */
+    val ENTER_BAGPACK: JSONObject = FlowDicts.step("enterScreen")
+        .put("target", "artifact_backpack")
+        .put("chain", FlowDicts.chainOf("game_home→bagpack(2786,36)"))
+        .put("anchor", FlowDicts.ocrAnchor("\$screens._common.titleBar", "背包", 3))
+
+    /** 原 steps[1]：入口链第二段——补一击圣遗物页签 + 标题条确认「圣遗物」。 */
+    val ENTER_ARTIFACT_TAB: JSONObject = FlowDicts.step("enterScreen")
+        .put("target", "artifact_backpack")
+        .put("chain", FlowDicts.chainOf("artifact_tab"))
+        .put("anchor", FlowDicts.ocrAnchor("\$screens._common.titleBar", "圣遗物", 3))
+
+    /** 原 steps[2]：五星 pill 幂等复位到 OFF（ON 时漏斗/排序被游戏禁用）。 */
+    val DUAL_PILL_OFF: JSONObject = FlowDicts.step("dualStateButton")
+        .put("ref", "\$screens.artifact_backpack.fiveStarToggle")
+        .put("ensure", "off")
+
+    /** 原 steps[3]：带校验的筛选复位（「圣遗物筛选」是唯一可靠判据）。 */
+    val FILTER_RESET: JSONObject = FlowDicts.step("filterReset")
+        .put("open", "\$screens.artifact_backpack.filterRoundBtn")
+        .put("title", "\$screens.dialogs.filterPanel.anchorTitle")
+        .put("titleExpect", "圣遗物筛选")
+        .put("reset", "\$screens.dialogs.filterPanel.reset")
+        .put("ok", "\$screens.dialogs.filterPanel.ok")
+        .put("retries", 2)
+
+    /** 原 steps[4]：筛选复位后确认已回到圣遗物背包（误开面板时按 BACK 清掉）。 */
+    val ASSERT_ARTIFACT: JSONObject = FlowDicts.step("assertScreen")
+        .put("expect", "圣遗物")
+        .put("retries", 3)
+        .put("onFail", "back")
+
+    /** 原 steps[5]：右上总数 OCR（0 件时重进界面重试）。 */
+    val READ_COUNT: JSONObject = FlowDicts.step("readCount")
+        .put("rect", "\$screens.artifact_backpack.count")
+        .put("as", "total")
+        .put("onZero", "reopenAndRetry")
+
+    // ---- visit 步（原 steps[6].visit，按序）----
+
+    /** pipe>0 时 job 携带的 stopWhen 步 = visit 里第一条 stopWhen（dup 登记，幂等）。 */
+    val STOP_DUP: JSONObject = FlowDicts.step("stopWhen")
+        .put("mode", "duplicateStreak")
+        .put("streak", 3)
+        .put("dupPageConfirm", 1)
+
+    /** 原 visit[1]：vote 卡片锁徽（点击前）。 */
+    val VOTE_GRID_LOCKED: JSONObject = FlowDicts.step("vote")
+        .put("zone", "artifact.card.lockBadge")
+        .put("as", "gridLocked")
+
+    /** 原 visit[2]：点格（面板名 OCR 兜底重击）。 */
+    val CLICK_CELL: JSONObject = FlowDicts.step("click")
+        .put("fast", JSONObject().put("at", "\$cell.center"))
+        .put(
+            "fallback",
+            JSONArray().put(
+                JSONObject().put("kind", "ocrAnchor").put("region", "\$panel.artifact_backpack.name"),
+            ),
+        )
+
+    /** 原 visit[3]：vote 祝圣紫（craft 判据）。 */
+    val VOTE_ZHUSHENG: JSONObject = FlowDicts.step("vote")
+        .put("zone", "artifact.panel.zhusheng")
+        .put("as", "crafted")
+
+    /** 原 visit[4]：vote 星级 banner。 */
+    val VOTE_RARITY: JSONObject = FlowDicts.step("vote")
+        .put("zone", "artifact.rarity")
+        .put("as", "rarity")
+
+    /** 原 visit[5]：vote 面板锁态（双区判定）。 */
+    val VOTE_PANEL_LOCK: JSONObject = FlowDicts.step("vote")
+        .put("zone", "artifact.panel.lock")
+        .put("as", "locked")
+
+    /** 原 visit[6]：vote 收藏（astral，随祝圣 yShift）。 */
+    val VOTE_ASTRAL: JSONObject = FlowDicts.step("vote")
+        .put("zone", "artifact.panel.astral")
+        .put("as", "favorited")
+
+    /** 原 visit[7]：解析圣遗物面板（dict 平移：name=mappings.artifactPieces, subStats=rollTable）。 */
+    val PARSE_PANEL: JSONObject = FlowDicts.step("parsePanel")
+        .put("panel", "artifact_backpack")
+        .put(
+            "dict",
+            JSONObject().put("name", "mappings.artifactPieces").put("subStats", "rollTable"),
+        )
+
+    /** 原 visit[8]：入库/上报（GoodArtifact 实体在 parseArtifactPanel 组装）。 */
+    val EMIT: JSONObject = FlowDicts.step("emit").put("as", "GoodArtifact")
+}
+
+/**
+ * artifact_scan 原生入口（spec §3.2）。步序 = 原 flow JSON 的 steps 逐条直调。
+ * @param pageSkipExpr 页级 pageSkip 表达式（原 pagedGrid.pageSkip.expr；如
+ *   `"pageMinLevel > max(plan.level)"`——core 内做 targetMaxLevel/targetMinRarity 文本替换；
+ *   artifact_scan 原生（全量扫描）不声明，注入点供干跑/调试用）。
+ */
+internal suspend fun ScanEngine.runArtifactScanNative(pageSkipExpr: String? = null) {
+    runPreamble()
+    runArtifactSteps(pageSkipExpr)
+    runPostamble()
+}
+
+/** artifact_scan 步序主体（foreach 包装——resetScanPerItem 语义——与干跑夹具复用）。 */
+internal suspend fun ScanEngine.runArtifactSteps(pageSkipExpr: String? = null) {
+    nativeStep("enterScreen") { enterScreen(ArtifactFlow.ENTER_BAGPACK) }
+    nativeStep("enterScreen") { enterScreen(ArtifactFlow.ENTER_ARTIFACT_TAB) }
+    nativeStep("dualStateButton") { dualStateButton(ArtifactFlow.DUAL_PILL_OFF) }
+    nativeStep("filterReset") { filterReset(ArtifactFlow.FILTER_RESET) }
+    nativeStep("assertScreen") { assertScreen(ArtifactFlow.ASSERT_ARTIFACT) }
+    nativeStep("readCount") { readCount(ArtifactFlow.READ_COUNT) }
+    nativeStep("pagedGrid") {
+        pagedGridNative(ArtifactFlow.GRID, pageSkipExpr = pageSkipExpr) { col, row, idx, prof ->
+            runVisitBody(ArtifactFlow.GRID, col, row, idx, prof, ArtifactFlow.EMIT, ArtifactFlow.STOP_DUP) { ctx ->
+                // ① 止扫登记（留在生产者；§12.1）
+                stopWhenRegisterDuplicateStreak(3, 1)
+                // ② vote 卡片锁徽（点击前）
+                vote(ArtifactFlow.VOTE_GRID_LOCKED, ArtifactFlow.GRID, col, row, ctx, prof)
+                // ③ 点格
+                visitClick(ArtifactFlow.CLICK_CELL, ArtifactFlow.GRID, col, row, idx, ctx, prof)
+                // ④⑤⑥⑦ 面板四判据（祝圣/星级/锁态/收藏）
+                vote(ArtifactFlow.VOTE_ZHUSHENG, ArtifactFlow.GRID, col, row, ctx, prof)
+                vote(ArtifactFlow.VOTE_RARITY, ArtifactFlow.GRID, col, row, ctx, prof)
+                vote(ArtifactFlow.VOTE_PANEL_LOCK, ArtifactFlow.GRID, col, row, ctx, prof)
+                vote(ArtifactFlow.VOTE_ASTRAL, ArtifactFlow.GRID, col, row, ctx, prof)
+                // ⑧ 解析面板
+                visitParsePanel(ArtifactFlow.PARSE_PANEL, ArtifactFlow.GRID, col, row, idx, ctx, prof)
+                // ⑨ 入库/上报
+                visitEmit(ArtifactFlow.EMIT)
+            }
+        }
+    }
+}

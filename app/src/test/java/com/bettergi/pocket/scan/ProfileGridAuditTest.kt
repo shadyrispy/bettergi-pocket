@@ -1,7 +1,15 @@
 package com.bettergi.pocket.scan
 
+import com.bettergi.pocket.scan.flows.ArtifactFlow
+import com.bettergi.pocket.scan.flows.CalibrateFlows
+import com.bettergi.pocket.scan.flows.CharacterFlow
+import com.bettergi.pocket.scan.flows.EquipFlow
+import com.bettergi.pocket.scan.flows.LockFlow
+import com.bettergi.pocket.scan.flows.WeaponFlow
+
 import org.json.JSONArray
 import org.json.JSONObject
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -163,16 +171,19 @@ class ProfileGridAuditTest {
     @Test
     fun `flow grid names exist in 2560 profile`() {
         val grids = raw("profiles_2560x1440.json").getJSONObject("grids")
-        val flowsDir = File(assetsDir(), "flows")
-        for (f in flowsDir.listFiles { x -> x.name.endsWith(".json") }?.sorted() ?: emptyList()) {
-            val root = JSONObject(f.readText())
-            val text = root.toString()
-            // 粗粒度：抓 "grid": "xxx"
-            val re = Regex("\"grid\"\\s*:\\s*\"([^\"]+)\"")
-            for (m in re.findAll(text)) {
-                val name = m.groupValues[1]
-                assertTrue("${f.name}: 引用 grids.$name 但 2560 profile 无此网格", grids.has(name))
-            }
+        // ★ simple 阶段3：flow JSON 下线，网格引用改由原生常量承载（scan/flows/*）。
+        val refs = mapOf(
+            "artifact_scan" to ArtifactFlow.GRID,
+            "weapon_scan" to WeaponFlow.GRID,
+            "character_scan" to CharacterFlow.GRID,
+            "artifact_lock" to LockFlow.GRID,
+            "auto_equip(select)" to EquipFlow.SELECT_GRID,
+            "auto_equip(rosterFind)" to EquipFlow.ITEM_ROSTER_FIND.optString("grid"),
+            "char_calibrate" to "char_popup",
+            "setFilter" to "set_filter_popup",
+        )
+        for ((from, name) in refs) {
+            assertTrue("$from: 引用 grids.$name 但 2560 profile 无此网格", grids.has(name))
         }
     }
 
@@ -191,11 +202,16 @@ class ProfileGridAuditTest {
      */
     @Test
     fun `selectByOcr grid has the row-text contract in every profile`() {
+        // ★ simple 阶段3：flow JSON 下线，selectByOcr 引用改由原生常量承载（scan/flows/*）。
         val grids = HashMap<String, MutableSet<String>>()   // gridKey → 引用它的 flow
-        for (f in File(assetsDir(), "flows").listFiles { x -> x.name.endsWith(".json") }?.sorted()
-            ?: emptyList()) {
-            collectSelectByOcrGrids(JSONObject(f.readText()), f.name, grids)
+        fun collect(step: JSONObject?, from: String) {
+            step?.optJSONObject("selectByOcr")?.optString("grid")?.takeIf { it.isNotEmpty() }?.let {
+                grids.getOrPut(it) { mutableSetOf() }.add(from)
+            }
         }
+        collect(LockFlow.SET_FILTER, "artifact_lock")
+        collect(EquipFlow.ITEM_SET_FILTER_PILL, "auto_equip")
+        collect(CalibrateFlows.SETFILTER_STEP, "setfilter_calibrate")
         assertTrue("没有任何 flow 用 selectByOcr —— 本条用例的覆盖面已失效，去查引用方", grids.isNotEmpty())
         for ((file, w, _) in profiles) {
             val g = raw(file).getJSONObject("grids")
@@ -235,29 +251,17 @@ class ProfileGridAuditTest {
         }
     }
 
-    /** 递归找 `{"selectByOcr": {"grid": "..."}}`，避免对 JSON 文本做正则（flow 里 "grid" 也出现在别处）。 */
-    private fun collectSelectByOcrGrids(node: Any, flow: String, out: MutableMap<String, MutableSet<String>>) {
-        when (node) {
-            is JSONObject -> {
-                node.optJSONObject("selectByOcr")?.optString("grid")?.takeIf { it.isNotEmpty() }?.let {
-                    out.getOrPut(it) { mutableSetOf() }.add(flow)
-                }
-                for (k in node.keys()) collectSelectByOcrGrids(node.get(k), flow, out)
-            }
-            is JSONArray -> for (i in 0 until node.length()) collectSelectByOcrGrids(node.get(i), flow, out)
-            else -> Unit
-        }
-    }
-
     @Test
     fun `character_scan uses char_strip and auto_equip uses char_popup`() {
-        val cs = File(assetsDir(), "flows/character_scan.json").readText()
-        val ae = File(assetsDir(), "flows/auto_equip.json").readText()
-        assertTrue("character_scan 应走 char_strip", cs.contains("\"char_strip\""))
-        assertTrue("character_scan 不应再直接遍历 char_popup", !cs.contains("\"grid\": \"char_popup\""))
-        assertTrue("auto_equip 应走 char_popup", ae.contains("\"char_popup\""))
-        assertTrue("auto_equip 须先开弹层（clicks[tian]）", ae.contains("\"tian\""))
-        assertTrue("auto_equip 须用弹层收起钮（田不可收层）", ae.contains("弹层收起"))
+        // ★ simple 阶段3：flow JSON 下线，网格引用改从原生常量断言（语义同前）。
+        assertEquals("character_scan 应走 char_strip", "char_strip", CharacterFlow.GRID)
+        assertTrue("character_scan 不应再直接遍历 char_popup", CharacterFlow.GRID != "char_popup")
+        assertEquals(
+            "auto_equip 的 rosterFind 应走 char_popup",
+            "char_popup",
+            EquipFlow.ITEM_ROSTER_FIND.optString("grid"),
+        )
+        assertEquals("auto_equip 的选择网格应是 select_3col（snap）", "select_3col", EquipFlow.SELECT_GRID)
     }
 
     @Test

@@ -14,7 +14,7 @@ import androidx.core.content.ContextCompat
 import com.bettergi.pocket.R
 import com.bettergi.pocket.notice.NoticeCenter
 import com.bettergi.pocket.dsl.ScriptStore
-import com.bettergi.pocket.dsl.ScriptIcons
+import com.bettergi.pocket.overlay.ScriptIcons
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.input.SwipeMethod
 import com.bettergi.pocket.input.SwipeTestRunner
@@ -51,10 +51,6 @@ internal fun MainActivity.showScriptManager() {
     //   面板靠 ACTION_OUTSIDE 自动收起，但**落在面板内的第一下不会**（那不是 outside），
     //   所以必须在这里主动收，不能等用户点第二下。
     runCatching { com.bettergi.pocket.bridge.OverlayBridge(this).collapse() }
-    findViewById<TextView>(R.id.btn_import).setOnClickListener {
-        runCatching { importLauncher.launch(arrayOf("application/json", "text/plain", "*/*")) }
-            .onFailure { NoticeCenter.error("无文件选择器：${it.message}") }
-    }
     findViewById<TextView>(R.id.btn_back_overlay).setOnClickListener { launchOverlayAndExit() }
     findViewById<android.view.View>(R.id.status_card).setOnClickListener { openA11yIfNeeded() }
     bindCalibrateRow()
@@ -324,7 +320,7 @@ internal fun MainActivity.scriptRow(e: ScriptStore.Entry): android.view.View {
             setTextColor(
                 ContextCompat.getColor(
                     activity(),
-                    if (e.issues.isEmpty()) R.color.pocket_text_muted else R.color.pocket_warn,
+                    R.color.pocket_text_muted,
                 ),
             )
         })
@@ -336,15 +332,6 @@ internal fun MainActivity.scriptRow(e: ScriptStore.Entry): android.view.View {
             renderAll()
         }
     })
-    if (e.imported) {
-        row.isLongClickable = true
-        row.setOnLongClickListener {
-            val ok = ScriptStore.resetFlow(this, e.key)
-            if (ok) NoticeCenter.info("已恢复内置：${e.label}") else NoticeCenter.warn("无导入副本")
-            renderAll()
-            true
-        }
-    }
     return row
 }
 
@@ -352,8 +339,7 @@ internal fun MainActivity.scriptRow(e: ScriptStore.Entry): android.view.View {
 internal fun MainActivity.subtitleOf(e: ScriptStore.Entry): String {
     val parts = ArrayList<String>()
     parts.addAll(e.actions.map { it.label })
-    parts.add(if (e.imported) "已导入" else "内置")
-    if (e.issues.isNotEmpty()) parts.add("⚠ " + e.issues.joinToString("; ").take(70))
+    parts.add("内置")
     return parts.joinToString(" · ")
 }
 

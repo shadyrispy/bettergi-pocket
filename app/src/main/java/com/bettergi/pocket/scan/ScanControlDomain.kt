@@ -481,32 +481,45 @@ internal suspend fun ScanEngine.setFilter(step: JSONObject) {
     }
     if (pending.isNotEmpty()) Log.w(TAG, "setFilter: 目标未全部点选，剩余=$pending")
     // ★ 2026-09-18（P0）：一个都没勾上 ⇒ 同样**不确认**，退出并记 not_applied。
-    //   （部分勾上则照旧确认：有筛选总比没有好，未点到的由后面的逐格匹配兜。）
     if (selected == 0) {
         Log.w(TAG, "setFilter: 一个目标都没勾上（selected=0，翻页 $turns 次）⇒ 不确认、直接退出（not_applied）")
         leaveFilterPanels("selected=0", homeHint = homeHintOf(step))
         return
     }
-    Log.i(TAG, "setFilter: 已勾选 $selected 个目标（翻页 $turns 次，未点完=$pending）⇒ 确认筛选")
+    // ★ P0-C（2026-10-08，GS 对齐 lock_manager.rs set_filter_plan 三态）：**部分命中**
+    //   （勾上了部分、剩余目标没找到）⇒ **清掉筛选改扫全量**，不再"带半套筛选扫"。
+    //   原因（GS 对齐）：游戏记住最后一次筛选 ⇒ 剩余目标在"看不见"的区段里被漏，
+    //   且与缺席证明门禁叠加把这些项谎报成 NotFound。改扫全量后逐格 planMatch 照常兜。
+    //   实现：**不点确认**（面板保持打开）→ leaveFilterPanels 逐层退出即视为取消筛选；
+    //   置 `lockFilterPartial` ⇒ planSummary 把未绑定项记 Skipped（需要重跑才有完整结论）。
+    //   equip 流程不受影响（foreach 有自己的逐格匹配兜，且 manageStatusOf 五态已在）。
+    if (pending.isNotEmpty()) {
+        if (vars.currentTask != null || vars.plan.isNullOrEmpty()) {
+            // 非 lock/非计划驱动流程（防御）：保持旧行为（带半套筛选扫）
+            Log.w(TAG, "setFilter: 部分命中 selected=$selected 未点完=$pending ⇒ 确认带筛扫（旧语义，非计划驱动）")
+            confirmFilter(step)
+            return
+        }
+        Log.w(
+            TAG,
+            "setFilter: 部分命中 selected=$selected/未点完=$pending ⇒ 清掉筛选改扫全量" +
+                "（未绑定项将记 Skipped，P0-C）",
+        )
+        vars.lockFilterPartial = true
+        leaveFilterPanels("partial=$selected", homeHint = homeHintOf(step))
+        return
+    }
+    Log.i(TAG, "setFilter: 已勾选全部 $selected 个目标（翻页 $turns 次）⇒ 确认筛选")
     confirmFilter(step)
 }
 
 /** 取当前帧网格缩略图（失败返回 null），用于到底判据（差异比例阈值）。 */
-internal suspend fun ScanEngine.foreach(step: JSONObject) {
-    val over = step.getString("over").removePrefix("$")
-    val items: List<JSONObject>? = when (over) {
-        "plan" -> vars.plan
-        else -> null
-    }
-    if (items.isNullOrEmpty()) {
-        Log.w(TAG, "foreach: '$over' not available or empty, skipped")
-        return
-    }
-    val asName = step.optString("as", "task")
-    val subSteps = step.getJSONArray("steps")
-    // ★ 逐目标循环必须**每项复位流程状态**（止扫计数/页间游标；GOOD 结果跨目标累加去重，
-    //   见 resetScanAccumulation 的 KDoc，2026-10-01 裁决）
-    val resetPerItem = step.optBoolean("resetScanPerItem", false)
+internal suspend fun ScanEngine.forEachPlanItem(
+    items: List<JSONObject>,
+    asName: String,
+    resetPerItem: Boolean,
+    steps: List<suspend ScanEngine.(JSONObject) -> Unit>,
+) {
     manageResults.clear()
     for ((idx, item) in items.withIndex()) {
         if (resetPerItem) resetScanAccumulation()
@@ -528,8 +541,8 @@ internal suspend fun ScanEngine.foreach(step: JSONObject) {
         var itemAborted = false
         val pagesAtItemStart = tmPages
         Log.i(TAG, "foreach iter $asName[$idx/${items.size}]: $label")
-        for (i in 0 until subSteps.length()) {
-            executeStep(subSteps.getJSONObject(i))
+        for (stepFn in steps) {
+            stepFn(item)
             // ★ #136：某一步断言"我还在不在该界面上"失败 ⇒ 本项余下步骤**一步都不再执行**
             //   （尤其不能再跑 pagedGrid：它只会按坐标点格子，不知道屏上是什么）。
             if (vars.abortItem) {
@@ -796,81 +809,51 @@ internal fun ScanEngine.lookupName(dictKey: String, text: String, allowFuzzy: Bo
 }
 
 /**
- * P3 ocrWithRetry：OCR 区域 → 词典模糊匹配 → vars.ocrMatch = key。
- * 重试 N 次（每次重新取帧），重试间 200ms（动画缓冲）。
- * fuzzy：0=仅精确；>0=走完整分级（子串/编辑距离/LCS/Dice）。
+ * 原生 visit 体（simple 分支五流程原生化，2026-10-07）：每格一次调用。
+ * - `col/row/idx` = 本格网格位置（idx = row*cols+col，与原 JSON 路径 runVisit 同语义）；
+ * - `prof` = 本页相位视图（与原 JSON 路径的 pageProfile 同源）。
+ * ★ simple 阶段3：JSON visit 分发骨架（runVisit/TAIL_RUN_ALWAYS/executeVisitStep*）已随
+ *   DSL 运行时下线删除 —— visit 只剩原生体一条路。
  */
-internal suspend fun ScanEngine.ocrWithRetry(step: JSONObject) {
-    val ocrGateway = ocr ?: return
-    val rect = profile.rect(step.getString("rect").removePrefix("$"))
-    val fuzzy = step.optInt("fuzzy", 0)
-    val maxRetries = step.optInt("retries", 3)
-    val dictKey = step.optString("dict", "mappings.characters")
-    for (attempt in 1..maxRetries) {
-        val frame = freshFrame()
-        val text = try {
-            ocrGateway.readLines(frame, listOf(rect)).joinToString(" ")
-        } finally { frame.release() }
-        val cleaned = StatParser.clean(text)
-        if (cleaned.isNotEmpty()) {
-            val key = lookupName(dictKey, cleaned, allowFuzzy = fuzzy > 0)
-            if (key != null) {
-                vars.ocrMatch = key
-                Log.i(TAG, "ocrWithRetry matched: $cleaned → $key (attempt $attempt)")
-                return
-            }
-        }
-        if (attempt < maxRetries) delay(200)
-    }
-    Log.w(TAG, "ocrWithRetry failed after $maxRetries attempts: $rect")
-}
+internal typealias NativeVisitRunner =
+    suspend ScanEngine.(col: Int, row: Int, idx: Int, prof: ScreenProfile) -> Unit
 
-/** #206 判重命中后 visit 尾部仍要跑的步：止扫登记（stopWhen）与入库/重复记账（emit）。 */
-private val TAIL_RUN_ALWAYS = setOf("stopWhen", "emit")
-
-/** P3 exit：via 返回按钮（文本 "return[2913,41]"）→ 点击后终止流程。链名优先走 CHAIN_ANCHOR_PATHS 机读，字面点只是回落。 */
-internal suspend fun ScanEngine.runVisit(
-    visit: JSONArray,
+/**
+ * 原生 visit 的 **ctx 生命周期壳**（与原 runVisit 的壳逐位同语义，spec §7）：
+ * `visitSkipTail=false` 复位、ctx try/finally release、pipe 预扫步注入（原生常量步）。
+ * 尾部放行语义（判重跳过时 stopWhen/emit 照跑）由各 visitBody 自行保证
+ * （如 character_scan 的 dedupeSkip 后用 `if (!visitSkipTail)` 守卫）。
+ *
+ * @param pipeEmit pipe>0 时 job 携带的 emit 步（原生常量 JSON；null = 本 visit 无 emit 步）。
+ * @param pipeStop pipe>0 时 job 携带的 stopWhen 步——**取 visit 里第一条 stopWhen**
+ *   （与原 JSON 路径 `firstOrNull { do == "stopWhen" }` 逐字对应，含其幂等重登记语义）。
+ */
+internal suspend fun ScanEngine.runVisitBody(
     gridKey: String,
     col: Int,
     row: Int,
-    index: Int,
+    idx: Int,
     prof: ScreenProfile,
-    /** §14 A3：snap 遍历——点击由外部固定循环完成，visit 内 click 步只做 settle + 抓帧。 */
-    snapMode: Boolean = false,
+    pipeEmit: JSONObject? = null,
+    pipeStop: JSONObject? = null,
+    body: suspend ScanEngine.(ScanEngine.CellFrameContext) -> Unit,
 ) {
     val ctx = ScanEngine.CellFrameContext()
     try {
         // ⚠️ 不在格子级响应 stopRequested：止扫语义是「本页后停」（pagedGrid 在页完成后检查）。
         visitSkipTail = false
-        // ★ S2b：预扫本 visit 的 emit 步（pipe 模式 job 携带，emit 判据在消费者求值）；
-        //   每格复位「本格已 send job」标记（emit 步据此决定生产者/消费者执行）。
-        pipeEmitStep = (0 until visit.length()).map { visit.getJSONObject(it) }
-            .firstOrNull { it.optString("do") == "emit" }
-        pipeStopStep = (0 until visit.length()).map { visit.getJSONObject(it) }
-            .firstOrNull { it.optString("do") == "stopWhen" }
+        pipeEmitStep = pipeEmit
+        pipeStopStep = pipeStop
         pipeCellJobSent = false
-        // ★ ②safetyGuard 降频：跨格边界失效守卫缓存（格间可能发生 BACK/导航/游戏事件，
-        //   退出确认框只有这些路径能弹；格内连续 clickAt 才允许复用）
+        // ★ ②safetyGuard 降频：跨格边界失效守卫缓存（与原 runVisit 同源）
         safetyGuardCacheValid = false
-        for (i in 0 until visit.length()) {
-            val s = visit.getJSONObject(i)
-            if (visitSkipTail && s.optString("do") !in TAIL_RUN_ALWAYS) {
-                Log.i(TAG, "visit cell($col,$row) idx=$index 已判重 ⇒ 跳过 ${s.optString("do")}")
-                continue
-            }
-            executeVisitStep(s, gridKey, col, row, index, ctx, prof, snapMode)
-        }
+        body(ctx)
     } finally {
         ctx.release()
     }
 }
 
-/**
- * 单格共享帧上下文：click 的面板切换轮询收敛帧 → 后续 panel vote/parsePanel 复用。
- * 每件从 ~12 次抓帧降到 2~4 次（轮询 1~3 + card vote 1）。
- */
-internal suspend fun ScanEngine.executeVisitStep(
+internal suspend fun ScanEngine.visitClick(
     step: JSONObject,
     gridKey: String,
     col: Int,
@@ -880,418 +863,369 @@ internal suspend fun ScanEngine.executeVisitStep(
     prof: ScreenProfile,
     snapMode: Boolean = false,
 ) {
-    // 只读探针：按步骤类型累计耗时（一次跑完即得完整分解，见 PerfProbe）。
-    // 注意：函数名不带 Inner 的那个是"计时外壳"，真正的分发在 executeVisitStepInner。
-    val vop = step.getString("do")
-    val tStep = System.nanoTime()
-    try {
-        executeVisitStepInner(step, vop, gridKey, col, row, index, ctx, prof, snapMode)
-    } finally {
-        PerfProbe.addStep(vop, System.nanoTime() - tStep)
+    if (snapMode) {
+        // §14 A3：snap 遍历点击由 snapTraverse 的固定循环代劳（$cell.center 不适用，
+        // 上弹后网格几何已变），此处只等上弹动画 settle 并抓面板帧供 parsePanel 复用。
+        delay(CLICK_SETTLE_MS)
+        ctx.release()
+        ctx.frame = freshFrame()
+    } else {
+    // fast.at=$cell.center（缺省）/ 字面 [x,y] / profile 引用 $zones.*.*
+    // prof = 页面网格偏移视图（§12.5）：点击坐标随相位平移，panel 类坐标不受影响
+    val cellCenter = prof.cellCenter(gridKey, index)
+    // ★ 2026-09-27 #96 真因：`lockClickAdaptive()` **自己就是一次点击**（点完还 settle 收敛），
+    //   而下面的通用分支会把返回的坐标**再点一次** ⇒ 锁钮被切两下 = 净效果归零，
+    //   锁态回到原样。所以 `verify` 读到"未锁"是**读数正确**、不是判据假阴；
+    //   09-18 真机那条「clickLocal accepted=true 但毫无反应」也是同一件事。
+    //   ⇒ 解析阶段已点过的，这里必须跳过第二次点击。
+    var clickedWhileResolving = false
+    val (cx, cy) = runCatchingCancellable {
+        val fast = step.optJSONObject("fast")
+        when (val at = fast?.opt("at")) {
+            is String -> when {
+                at == "\$cell.center" || at.isEmpty() -> cellCenter.x to cellCenter.y
+                at == "\$zones.artifact.panel.lock" ->
+                    lockClickAdaptive().also { clickedWhileResolving = true }
+                at.startsWith("$") -> {
+                    val r = profile.rect(at.removePrefix("$"))
+                    r.centerX to r.centerY
+                }
+                else -> cellCenter.x to cellCenter.y
+            }
+            is JSONArray -> {
+                val p = profile.scalePoint(at.getInt(0), at.getInt(1))
+                p.x to p.y
+            }
+            else -> cellCenter.x to cellCenter.y
+        }
+    }.getOrElse { e ->
+        Log.w(TAG, "click fast.at 解析失败: ${e.message}，回退 cell center")
+        cellCenter.x to cellCenter.y
+    }
+    Log.i(TAG, "click cell($col,$row) fast.at -> ($cx,$cy)")
+    // §15 P1-1：点击前记录面板名区指纹，点击后轮询至变化（固定延时治不了
+    // 武器面板切换时长波动，恒滞后一格 → 内容指纹去重误杀）
+    // ⚠️ 2026-09-10 修：角色遍历网格 key 是 `char_strip`，但角色面板字段挂在该 key 下
+    // 并不存在（`panels.char_strip.*` 无），旧代码 → nameRect=null → 落到固定 `delay(PANEL_REFRESH_MS)`
+    // 兜底 → 抓帧时右面板「名字/等级」淡入未完成 → parsePanel 读到空（header 在左上瞬时变故正常）。
+    // 回退候选：角色线一律用 `panels.char_profile.name`。
+    val nameRect = listOf("panels.$gridKey.name", "panels.char_profile.name")
+        .firstNotNullOfOrNull { p -> runCatchingCancellable { profile.rect(p) }.getOrNull() }
+    // ★ 2026-09-12 就绪信号直采：优先走"分块签名"轮询（零 Mat / 零 OCR）。
+    //   实测旧路径的 428ms/格 = delay(120×3) 360 + 轮询 OCR(20×3) 60 + 抓帧(3×3) 9
+    //   + 真点击 1ms ⇒ **99.8% 是"等就绪"**（见 IMAGE-PATH-COST.md §11.4）。
+    // §15 P1-1：点击前记录面板名文本（**同时充当"名字 ROI 是否可靠"的探针**）。
+    val gateCached = TimingOverrides.panelSigGateCached && sigGateCached == true
+    val beforeName = if (gateCached) {
+        null // 门已缓存 ⇒ 签名路径下这格不需要"点击前名字"
+    } else {
+        nameRect?.let { r -> ctx.frame?.let { f -> ocr?.readLines(f, listOf(r))?.firstOrNull() } }
+    }
+    // ⚠️ 只用「旧路径的轮询本就可用的流程」（beforeName 可读）启用签名：
+    //   `beforeName == null` ⇒ 该流程的 click 是 visit 首步（ctx.frame 空，如 character_scan），
+    //   旧代码此时走的是**固定 `delay(PANEL_REFRESH_MS)` 兜底**、名字 ROI 在弹窗态常读不到；
+    //   签名路径的"确认 OCR"会频繁读空并重试 ⇒ **比固定等待还慢**（实测角色 556→689ms/格）。
+    //   ⇒ 让这类流程原样走旧分支。
+    // ★ 就绪签名 ROI：默认取**靠后渲染的内容带**（等级/副属性/…），不是名字区。
+    //   `--es timing "sigband=0"` 可回退为名字区（A/B 与回滚用）。
+    val sigRoi = if (TimingOverrides.panelSigBand) {
+        panelReadyBand(gridKey) ?: nameRect
+    } else {
+        nameRect
+    }
+    // 块网格：未显式覆盖（`sigblocks`）时按面板取默认 —— 见 [sigBlocksFor] 的实测理由。
+    val sigBx = if (TimingOverrides.sigBlocksX > 0) TimingOverrides.sigBlocksX else sigBlocksFor(gridKey).first
+    val sigBy = if (TimingOverrides.sigBlocksY > 0) TimingOverrides.sigBlocksY else sigBlocksFor(gridKey).second
+    if (!sigBandLogged && sigRoi != null) {
+        sigBandLogged = true
+        Log.i(
+            TAG,
+            "就绪签名 ROI: band=${TimingOverrides.panelSigBand} " +
+                "rect=[${sigRoi.left},${sigRoi.top},${sigRoi.right},${sigRoi.bottom}] " +
+                "(${sigRoi.width}x${sigRoi.height}) samples=${TimingOverrides.panelSigSamples} " +
+                "confirm=${TimingOverrides.panelSigConfirm}",
+        )
+    }
+    // ★ `siggate=1`（默认）：把"名字 ROI 是否可读"这个**流程级**属性只求值一次并缓存，
+    //   签名路径下**不再逐格做这次点击前 OCR**（省 ~10~20ms/格）。
+    //   ⚠️ 不走签名路径时（或门为 false 时）仍逐格读，行为与改动前逐位一致。
+    if (TimingOverrides.panelSigGateCached && sigGateCached == null && nameRect != null) {
+        sigGateCached = ctx.frame?.let { f ->
+            ocr?.readLines(f, listOf(nameRect))?.firstOrNull()
+        } != null
+    }
+    val sigGateOk = TimingOverrides.panelSigGateCached && sigGateCached == true
+    val sigUsable = sigRoi != null && TimingOverrides.panelSigEnabled &&
+        (sigGateOk || beforeName != null)
+    // ★ 2026-09-19：格点击模式由 [ClickModeOverrides.cellTap] 决定（**A/B 开关**）。
+    //   背景：历史上 tap/微滑的取舍证据来自**华为真机 EMUI**（char_popup 9 格全停首格，
+    //   adb tap 9/9 切换）——那是**真机特性**，不能直接套到 BlueStacks。
+    //   ⇒ 在 BlueStacks 上用免重编开关做受控 A/B（`DEBUG_SET_CELL_CLICK tap|swipe`），
+    //     多轮小样本（2~3 页）比差异，再决定长期取值（默认沿用微滑）。
+    // ★ 2026-09-23：点击**前**先采一张「被点卡片自身」的签名 —— 点击后要靠它区分
+    //   "点击被吞"与"相邻两格内容一模一样"（见 [cardFrameMoved]）。只能在点击前采。
+    val cardBox = cardRoi(prof, gridKey, col, row)
+    val cardSigOk = cardBox != null && frameSource.sampleSignature(
+        cardBox, sigCardBefore, CARD_SIG_BLOCKS, CARD_SIG_BLOCKS,
+    )
+    val clickOk = if (clickedWhileResolving) {
+        Log.i(TAG, "visit cell($col,$row) idx=$index 已在解析阶段点过 ⇒ 跳过重复点击")
+        true
+    } else if (useTapForCell) actions.tap(cx, cy) else actions.click(cx, cy)
+    Log.i(TAG, "visit cell($col,$row) idx=$index click=($cx,$cy) ok=$clickOk")
+    // ⚠️ 收敛帧必须在**所有**退出路径上都是"点击后"的新帧。
+    //   2026-09-12 踩过：把抓帧挪进 confirm 回调 ⇒ helper 走「未变兜底」退出时
+    //   不经过回调 ⇒ ctx.frame 仍是**点击前**的旧帧 ⇒ parsePanel 读到上一件
+    //   ⇒ contentKey 重复 ⇒ 被去重**误杀**（artifact_scan 实测 20 → 18 件，
+    //   丢的正是两件已锁 5★ 未强化件）。
+    //   故用 `panelFrameReady` 标记"确认成功时已抓过帧"，仅在**没抓过**时补抓。
+    var panelFrameReady = false
+    val sigUsed = sigUsable &&
+        frameSource.sampleSignature(sigRoi!!.toIntRect(), sigBefore, sigBx, sigBy)
+    // 采样失败 ⇒ 落到下面的固定等待。不静默：这条回落一旦发生就是"就绪判定退化"，
+    // 每格耗时会被 PANEL_REFRESH_MS 顶住，必须能从日志里看见。
+    if (sigUsable && !sigUsed) {
+        Log.w(
+            TAG,
+            "visit cell($col,$row) idx=$index 签名采样失败 ⇒ 就绪判定回落固定等待 ${PANEL_REFRESH_MS}ms",
+        )
+    }
+    when {
+        clickedWhileResolving -> {
+            // ★ #96 同源第二处：就绪门的兜底动作是「**同坐标重发**」（下方 5104/5142）。
+            //   锁钮点的是面板上的按钮、不是换卡片 ⇒ 面板名字与签名**本就不该变**，
+            //   走门必被判"点击被吞"⇒ 重发 = 又把锁切回去。
+            //   状态收敛已经在 `lockClickAdaptive → settleLockState` 里做完了，
+            //   这里既不等也不重发。
+            Log.i(TAG, "visit cell($col,$row) idx=$index 锁钮已在解析阶段点击并收敛 ⇒ 跳过就绪门与重发")
+        }
+        sigUsed -> {
+            // 计时口径：签名的判据是**墙钟**（含采样/确认），与旧路径的"delay 之和"
+            // 略有不同但更真实（旧口径漏掉每轮的抓帧+OCR 时间）。
+            val tPanel = SystemClock.elapsedRealtime()
+            // ★ 2026-09-16：确认回调提为**具名匿名函数** —— 兜底重发后需要**重复等待**（见下方 while）。
+            val onPanelStable: suspend () -> Boolean = stable@{
+                // ★ 收尾 OCR 确认（整个就绪判定里唯一的一次 OCR）。
+                //
+                // ⚠️ 为什么确认必须能"否决"（2026-09-12 实测教训）：
+                //   面板切件是「上一件 → **空白平台期** → 新件」，空白期像素**静止**，
+                //   签名会误判"已稳定"（character_scan 实测前 4 格全中，读到空天赋 → 写 0）。
+                //   旧路径天然免疫：旧判据比**文本**，空读为 `null` ⇒ 不满足"已变"⇒ 继续等。
+                //   ⇒ 等价做法：把"名字非空"也作为退出条件 —— 返回 false 则由 helper
+                //   以当前签名为新基准再等一轮。正常路径**零额外成本**。
+                ctx.release()
+                ctx.frame = freshFrame()
+                panelFrameReady = true
+                // 确认 OCR 可关（内容带已覆盖"最后渲染的字段" ⇒ 冗余度下降）
+                if (!TimingOverrides.panelSigConfirm) return@stable true
+                val f = ctx.frame ?: return@stable false
+                val nm = ocr?.readLines(f, listOf(nameRect!!))?.firstOrNull()
+                // 名字非空 **且** 面板星级已画出（后者是"面板真正渲染完"的强证据）
+                val stars = countStars(f, gridKey)
+                // ⚠️ 诊断（`sigdebug=1`）：把**退出时刻实际读到的东西**打出来 ——
+                //   只测"等待时长"看不出读到的是新件还是交叉淡入中的旧件（2026-09-12 踩过）。
+                if (TimingOverrides.sigDebug) {
+                    Log.i(TAG, "sigExit cell($col,$row) name='${nm ?: ""}' stars=$stars band=$gridKey")
+                }
+                !nm.isNullOrBlank() && (stars > 0 || !panelHasStarBand(gridKey))
+            }
+            var clickRetry = 0
+            while (true) {
+                val sawChange = waitReadyBySignature(
+                    before = sigBefore,
+                    a = sigA,
+                    b = sigB,
+                    roi = sigRoi!!,
+                    blocksX = sigBx,
+                    blocksY = sigBy,
+                    step = TimingOverrides.panelSigPollMs,
+                    maxMs = PANEL_CHANGE_WAIT_MAX_MS,
+                    minMs = 0L,
+                    fallbackMs = TimingOverrides.panelStableFallbackMs,
+                    what = if (clickRetry == 0) "panel" else "panel-retry$clickRetry",
+                    stableSamples = TimingOverrides.panelSigSamples,
+                    confirm = onPanelStable,
+                )
+                if (sawChange) break
+                // `cardSigOk` 的定义里已含 `cardBox != null`（采样要用它），这里不必再查一遍
+                val selMoved = cardSigOk && cardFrameMoved(cardBox, sigCardBefore)
+                if (clickRetry >= CLICK_RETRY_MAX_ON_NOCHANGE) {
+                    // 放弃：本格将读到**陈旧面板** ⇒ 那件东西从头到尾没被选中过 = 丢件。
+                    dumpStallShot(cx, cy, col, row, index, clickRetry, selMoved, clickOk, "giveup")
+                    break
+                }
+                // ★ 2026-09-23：面板没变**不等于**点击被吞。相邻两格内容完全一样时
+                //   （武器尤其多：同名同等级同精炼）面板像素一模一样、指纹永不变化，
+                //   旧判据一律当吞击 ⇒ 1 页武器 7/21 格白烧 35 次重发（≈15s）。
+                //   选中框能分开两者：点中了高亮框必换格，没送达则一块不动。
+                if (selMoved) {
+                    Log.i(
+                        TAG,
+                        "visit cell($col,$row) idx=$index 面板未变但**选中框已移动** ⇒ 点击已送达，不重发",
+                    )
+                    break
+                }
+                // 本轮首格：游戏打开背包时**已自动选中第一件** ⇒ 面板与选中框都不会变，
+                // 这是正常态而不是吞击（重发 5 次 ≈2s 纯浪费）。
+                if (index == 0 && results.isEmpty() && resultsWeapons.isEmpty() &&
+                    resultsCharacters.isEmpty()
+                ) {
+                    Log.i(TAG, "visit cell($col,$row) idx=$index 本轮首格且选中框未动 ⇒ 已是选中态，不重发")
+                    break
+                }
+                // 全程未见面板变化 ⇒ 极可能**点击被游戏吞掉**（2026-09-16 run6 page3 实证：
+                //   21 格耗时零方差且最快 = 就绪轮询秒过 = 内容从未变化）⇒ **同坐标重发**。
+                //   安全性：坐标完全相同 ⇒ 最坏只是重读同一张卡（幂等），不会误加相邻件。
+                clickRetry++
+                swallowedClickRetries++
+                // 取证：本次等待超时、下一次点击**之前**的画面（开了落图开关才有开销）
+                dumpStallShot(cx, cy, col, row, index, clickRetry, selMoved, clickOk, "retry")
+                Log.w(
+                    TAG,
+                    "visit cell($col,$row) idx=$index 面板全程未见变化（clickOk=$clickOk）" +
+                        " ⇒ 疑似点击被吞 ⇒ 同坐标重发 #$clickRetry",
+                )
+                if (useTapForCell) actions.tap(cx, cy) else actions.click(cx, cy)
+            }
+            tmPanelMs += SystemClock.elapsedRealtime() - tPanel
+        }
+        else -> {
+            // 固定等待：签名不可用（`sigRoi` 取不到 / `sig=0` / 采样失败）或该流程本来就没有
+            // 可读的名字 ROI（character_scan 的 click 是 visit 首步，ctx.frame 为空）。
+            // ⚠️ 历史上这里曾误用 coerceAtMost(panelPollMs) 把 550ms 拖到 120ms ——
+            //   panelPollMs/PANEL_POLL_MS 已于 2026-10-05 连根删除（该常量从未被任何
+            //   生效路径引用），本分支如今就是纯固定等待，不存在可调的步长。
+            // ★ 2026-10-05：原先这里前面还有一条「抓帧 + OCR 读名字轮询」分支
+            //   （`waitPanelNameReady`），在**全部存档真机日志里 0 次命中**（签名分支的
+            //   「面板未变但选中框已移动」有 4956 次），留着只会误导"以为就绪判定还依赖 OCR"。
+            //   ⇒ 已删；签名采样失败这类情形统一落到本分支，由上面的 W 日志暴露。
+            tmPanelMs += PANEL_REFRESH_MS
+            delay(PANEL_REFRESH_MS)
+        }
+    }
+    // 收敛帧兜底：签名路径若从未确认成功（未变兜底/超时），此处补抓一次，
+    // 保证 ctx.frame 一定是"点击后"的新帧（否则 parsePanel 读旧件 → 去重误杀）。
+    if (!panelFrameReady) {
+        ctx.release() // 面板切换，上一格共享帧作废
+        ctx.frame = freshFrame()
+    }
+    if (gridKey == "artifact_backpack") {
+        Log.i(TAG, "visit cell($col,$row) idx=$index freshFrame acquired")
+    } else {
+        val ocrGateway = ocr
+        val fallback = step.optJSONObject("fallback")
+        if (fallback != null && ocrGateway != null) {
+            val region = fallback.optString("region", "").removePrefix("$")
+            if (region.isNotEmpty()) {
+                val regionRect = try { profile.rect(region) } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
+                if (regionRect != null) {
+                    val ok = runCatchingCancellable {
+                        val frame = freshFrame()
+                        try {
+                            val text = ocrGateway.readLines(frame, listOf(regionRect)).joinToString(" ")
+                            StatParser.clean(text).isNotEmpty()
+                        } finally { frame.release() }
+                    }.getOrDefault(true)
+                    if (!ok && !clickedWhileResolving) {
+                        Log.w(TAG, "fallback: panel not detected at $region, retry click")
+                        actions.click(cx, cy)
+                        delay(CLICK_SETTLE_MS)
+                    }
+                }
+            }
+        }
+    }
     }
 }
 
 /**
- * 点格后等「面板名变了且连续两次读数一致」（签名路径不可用时的**旧就绪判据**）。
- *
- * ⚠️ 2026-09-10 的教训保留：判据不能是"名字一变就 break"——面板淡入**早期**名字先变、
- * 等级/属性还没渲染，立刻抓帧会读空。
- *
- * @return 是否**见过**名字变化。全程未变 ⇒ 极可能点击被游戏吞了（面板还停在上一件），
- *   调用方据此同坐标重发；这里不能顺手把它当成"这格本来就是同名件"放行 ——
- *   那正是"漏件且无痕"的形态（读到重复件 ⇒ 被去重吞掉）。
+ * visit 的 `parsePanel` 步（do 原语，从 executeVisitStepInner 的 "parsePanel" 分支**原样**抽出）。
+ * 分派：char_profile 独立解析 / pipe>0 管道路径（parsePanel 头部段 + 裁片 send）/ 同步路径。
  */
-internal suspend fun ScanEngine.executeVisitStepInner(
+internal suspend fun ScanEngine.visitParsePanel(
     step: JSONObject,
-    vop: String,
     gridKey: String,
     col: Int,
     row: Int,
     index: Int,
     ctx: ScanEngine.CellFrameContext,
     prof: ScreenProfile,
-    snapMode: Boolean,
 ) {
-    // §13：D 级逐格埋点（默认关闭——一页 21 格会刷屏，由 RecognitionLog.verbose 开启）
-    RecognitionLog.log(logTag, RecognitionLog.Level.D, "格($col,$row) $vop")
-    when (vop) {
-            "ifMatch" -> {
-                // 计划匹配闸（artifact_lock）：P4 规则层注入 vars.currentTask；无计划则整段跳过
-                if (vars.currentTask == null) {
-                    Log.i(TAG, "ifMatch: no plan injected (vars.currentTask null), then skipped")
-                } else {
-                    // §15 P2：可选 when 布尔表达式（[Expr] 引擎，标识符查 exprVars）→ 不满足则跳过 then。
-                    // 例：when:"curLock == false" 仅对已解锁件执行加锁，避免盲 toggle 误解锁已锁件（数据腐蚀）。
-                    val whenExpr = step.optString("when", "")
-                    val pass = if (whenExpr.isNotEmpty()) {
-                        runCatchingCancellable { Expr.eval(whenExpr, exprVars()) }.getOrElse { e ->
-                            Log.w(TAG, "ifMatch when eval failed: '$whenExpr' ${e.message}")
-                            false
-                        }.also { if (!it) Log.d(TAG, "ifMatch when='$whenExpr' false, then skipped") }
-                    } else true
-                    if (pass) {
-                        val thenSteps = step.getJSONArray("then")
-                        for (i in 0 until thenSteps.length()) {
-                            executeVisitStep(thenSteps.getJSONObject(i), gridKey, col, row, index, ctx, prof, snapMode)
-                            if (vars.stopRequested) break
-                        }
-                    }
-                }
-            }
-            "vote" -> vote(step, gridKey, col, row, ctx, prof)
-            "click" -> {
-                if (snapMode) {
-                    // §14 A3：snap 遍历点击由 snapTraverse 的固定循环代劳（$cell.center 不适用，
-                    // 上弹后网格几何已变），此处只等上弹动画 settle 并抓面板帧供 parsePanel 复用。
-                    delay(CLICK_SETTLE_MS)
-                    ctx.release()
-                    ctx.frame = freshFrame()
-                } else {
-                // fast.at=$cell.center（缺省）/ 字面 [x,y] / profile 引用 $zones.*.*
-                // prof = 页面网格偏移视图（§12.5）：点击坐标随相位平移，panel 类坐标不受影响
-                val cellCenter = prof.cellCenter(gridKey, index)
-                // ★ 2026-09-27 #96 真因：`lockClickAdaptive()` **自己就是一次点击**（点完还 settle 收敛），
-                //   而下面的通用分支会把返回的坐标**再点一次** ⇒ 锁钮被切两下 = 净效果归零，
-                //   锁态回到原样。所以 `verify` 读到"未锁"是**读数正确**、不是判据假阴；
-                //   09-18 真机那条「clickLocal accepted=true 但毫无反应」也是同一件事。
-                //   ⇒ 解析阶段已点过的，这里必须跳过第二次点击。
-                var clickedWhileResolving = false
-                val (cx, cy) = runCatchingCancellable {
-                    val fast = step.optJSONObject("fast")
-                    when (val at = fast?.opt("at")) {
-                        is String -> when {
-                            at == "\$cell.center" || at.isEmpty() -> cellCenter.x to cellCenter.y
-                            at == "\$zones.artifact.panel.lock" ->
-                                lockClickAdaptive().also { clickedWhileResolving = true }
-                            at.startsWith("$") -> {
-                                val r = profile.rect(at.removePrefix("$"))
-                                r.centerX to r.centerY
-                            }
-                            else -> cellCenter.x to cellCenter.y
-                        }
-                        is JSONArray -> {
-                            val p = profile.scalePoint(at.getInt(0), at.getInt(1))
-                            p.x to p.y
-                        }
-                        else -> cellCenter.x to cellCenter.y
-                    }
-                }.getOrElse { e ->
-                    Log.w(TAG, "click fast.at 解析失败: ${e.message}，回退 cell center")
-                    cellCenter.x to cellCenter.y
-                }
-                Log.i(TAG, "click cell($col,$row) fast.at -> ($cx,$cy)")
-                // §15 P1-1：点击前记录面板名区指纹，点击后轮询至变化（固定延时治不了
-                // 武器面板切换时长波动，恒滞后一格 → 内容指纹去重误杀）
-                // ⚠️ 2026-09-10 修：角色遍历网格 key 是 `char_strip`，但角色面板字段挂在该 key 下
-                // 并不存在（`panels.char_strip.*` 无），旧代码 → nameRect=null → 落到固定 `delay(PANEL_REFRESH_MS)`
-                // 兜底 → 抓帧时右面板「名字/等级」淡入未完成 → parsePanel 读到空（header 在左上瞬时变故正常）。
-                // 回退候选：角色线一律用 `panels.char_profile.name`。
-                val nameRect = listOf("panels.$gridKey.name", "panels.char_profile.name")
-                    .firstNotNullOfOrNull { p -> runCatchingCancellable { profile.rect(p) }.getOrNull() }
-                // ★ 2026-09-12 就绪信号直采：优先走"分块签名"轮询（零 Mat / 零 OCR）。
-                //   实测旧路径的 428ms/格 = delay(120×3) 360 + 轮询 OCR(20×3) 60 + 抓帧(3×3) 9
-                //   + 真点击 1ms ⇒ **99.8% 是"等就绪"**（见 IMAGE-PATH-COST.md §11.4）。
-                // §15 P1-1：点击前记录面板名文本（**同时充当"名字 ROI 是否可靠"的探针**）。
-                val gateCached = TimingOverrides.panelSigGateCached && sigGateCached == true
-                val beforeName = if (gateCached) {
-                    null // 门已缓存 ⇒ 签名路径下这格不需要"点击前名字"
-                } else {
-                    nameRect?.let { r -> ctx.frame?.let { f -> ocr?.readLines(f, listOf(r))?.firstOrNull() } }
-                }
-                // ⚠️ 只用「旧路径的轮询本就可用的流程」（beforeName 可读）启用签名：
-                //   `beforeName == null` ⇒ 该流程的 click 是 visit 首步（ctx.frame 空，如 character_scan），
-                //   旧代码此时走的是**固定 `delay(PANEL_REFRESH_MS)` 兜底**、名字 ROI 在弹窗态常读不到；
-                //   签名路径的"确认 OCR"会频繁读空并重试 ⇒ **比固定等待还慢**（实测角色 556→689ms/格）。
-                //   ⇒ 让这类流程原样走旧分支。
-                // ★ 就绪签名 ROI：默认取**靠后渲染的内容带**（等级/副属性/…），不是名字区。
-                //   `--es timing "sigband=0"` 可回退为名字区（A/B 与回滚用）。
-                val sigRoi = if (TimingOverrides.panelSigBand) {
-                    panelReadyBand(gridKey) ?: nameRect
-                } else {
-                    nameRect
-                }
-                // 块网格：未显式覆盖（`sigblocks`）时按面板取默认 —— 见 [sigBlocksFor] 的实测理由。
-                val sigBx = if (TimingOverrides.sigBlocksX > 0) TimingOverrides.sigBlocksX else sigBlocksFor(gridKey).first
-                val sigBy = if (TimingOverrides.sigBlocksY > 0) TimingOverrides.sigBlocksY else sigBlocksFor(gridKey).second
-                if (!sigBandLogged && sigRoi != null) {
-                    sigBandLogged = true
-                    Log.i(
-                        TAG,
-                        "就绪签名 ROI: band=${TimingOverrides.panelSigBand} " +
-                            "rect=[${sigRoi.left},${sigRoi.top},${sigRoi.right},${sigRoi.bottom}] " +
-                            "(${sigRoi.width}x${sigRoi.height}) samples=${TimingOverrides.panelSigSamples} " +
-                            "confirm=${TimingOverrides.panelSigConfirm}",
-                    )
-                }
-                // ★ `siggate=1`（默认）：把"名字 ROI 是否可读"这个**流程级**属性只求值一次并缓存，
-                //   签名路径下**不再逐格做这次点击前 OCR**（省 ~10~20ms/格）。
-                //   ⚠️ 不走签名路径时（或门为 false 时）仍逐格读，行为与改动前逐位一致。
-                if (TimingOverrides.panelSigGateCached && sigGateCached == null && nameRect != null) {
-                    sigGateCached = ctx.frame?.let { f ->
-                        ocr?.readLines(f, listOf(nameRect))?.firstOrNull()
-                    } != null
-                }
-                val sigGateOk = TimingOverrides.panelSigGateCached && sigGateCached == true
-                val sigUsable = sigRoi != null && TimingOverrides.panelSigEnabled &&
-                    (sigGateOk || beforeName != null)
-                // ★ 2026-09-19：格点击模式由 [ClickModeOverrides.cellTap] 决定（**A/B 开关**）。
-                //   背景：历史上 tap/微滑的取舍证据来自**华为真机 EMUI**（char_popup 9 格全停首格，
-                //   adb tap 9/9 切换）——那是**真机特性**，不能直接套到 BlueStacks。
-                //   ⇒ 在 BlueStacks 上用免重编开关做受控 A/B（`DEBUG_SET_CELL_CLICK tap|swipe`），
-                //     多轮小样本（2~3 页）比差异，再决定长期取值（默认沿用微滑）。
-                // ★ 2026-09-23：点击**前**先采一张「被点卡片自身」的签名 —— 点击后要靠它区分
-                //   "点击被吞"与"相邻两格内容一模一样"（见 [cardFrameMoved]）。只能在点击前采。
-                val cardBox = cardRoi(prof, gridKey, col, row)
-                val cardSigOk = cardBox != null && frameSource.sampleSignature(
-                    cardBox, sigCardBefore, CARD_SIG_BLOCKS, CARD_SIG_BLOCKS,
-                )
-                val clickOk = if (clickedWhileResolving) {
-                    Log.i(TAG, "visit cell($col,$row) idx=$index 已在解析阶段点过 ⇒ 跳过重复点击")
-                    true
-                } else if (useTapForCell) actions.tap(cx, cy) else actions.click(cx, cy)
-                Log.i(TAG, "visit cell($col,$row) idx=$index click=($cx,$cy) ok=$clickOk")
-                // ⚠️ 收敛帧必须在**所有**退出路径上都是"点击后"的新帧。
-                //   2026-09-12 踩过：把抓帧挪进 confirm 回调 ⇒ helper 走「未变兜底」退出时
-                //   不经过回调 ⇒ ctx.frame 仍是**点击前**的旧帧 ⇒ parsePanel 读到上一件
-                //   ⇒ contentKey 重复 ⇒ 被去重**误杀**（artifact_scan 实测 20 → 18 件，
-                //   丢的正是两件已锁 5★ 未强化件）。
-                //   故用 `panelFrameReady` 标记"确认成功时已抓过帧"，仅在**没抓过**时补抓。
-                var panelFrameReady = false
-                val sigUsed = sigUsable &&
-                    frameSource.sampleSignature(sigRoi!!.toIntRect(), sigBefore, sigBx, sigBy)
-                // 采样失败 ⇒ 落到下面的固定等待。不静默：这条回落一旦发生就是"就绪判定退化"，
-                // 每格耗时会被 PANEL_REFRESH_MS 顶住，必须能从日志里看见。
-                if (sigUsable && !sigUsed) {
-                    Log.w(
-                        TAG,
-                        "visit cell($col,$row) idx=$index 签名采样失败 ⇒ 就绪判定回落固定等待 ${PANEL_REFRESH_MS}ms",
-                    )
-                }
-                when {
-                    clickedWhileResolving -> {
-                        // ★ #96 同源第二处：就绪门的兜底动作是「**同坐标重发**」（下方 5104/5142）。
-                        //   锁钮点的是面板上的按钮、不是换卡片 ⇒ 面板名字与签名**本就不该变**，
-                        //   走门必被判"点击被吞"⇒ 重发 = 又把锁切回去。
-                        //   状态收敛已经在 `lockClickAdaptive → settleLockState` 里做完了，
-                        //   这里既不等也不重发。
-                        Log.i(TAG, "visit cell($col,$row) idx=$index 锁钮已在解析阶段点击并收敛 ⇒ 跳过就绪门与重发")
-                    }
-                    sigUsed -> {
-                        // 计时口径：签名的判据是**墙钟**（含采样/确认），与旧路径的"delay 之和"
-                        // 略有不同但更真实（旧口径漏掉每轮的抓帧+OCR 时间）。
-                        val tPanel = SystemClock.elapsedRealtime()
-                        // ★ 2026-09-16：确认回调提为**具名匿名函数** —— 兜底重发后需要**重复等待**（见下方 while）。
-                        val onPanelStable: suspend () -> Boolean = stable@{
-                            // ★ 收尾 OCR 确认（整个就绪判定里唯一的一次 OCR）。
-                            //
-                            // ⚠️ 为什么确认必须能"否决"（2026-09-12 实测教训）：
-                            //   面板切件是「上一件 → **空白平台期** → 新件」，空白期像素**静止**，
-                            //   签名会误判"已稳定"（character_scan 实测前 4 格全中，读到空天赋 → 写 0）。
-                            //   旧路径天然免疫：旧判据比**文本**，空读为 `null` ⇒ 不满足"已变"⇒ 继续等。
-                            //   ⇒ 等价做法：把"名字非空"也作为退出条件 —— 返回 false 则由 helper
-                            //   以当前签名为新基准再等一轮。正常路径**零额外成本**。
-                            ctx.release()
-                            ctx.frame = freshFrame()
-                            panelFrameReady = true
-                            // 确认 OCR 可关（内容带已覆盖"最后渲染的字段" ⇒ 冗余度下降）
-                            if (!TimingOverrides.panelSigConfirm) return@stable true
-                            val f = ctx.frame ?: return@stable false
-                            val nm = ocr?.readLines(f, listOf(nameRect!!))?.firstOrNull()
-                            // 名字非空 **且** 面板星级已画出（后者是"面板真正渲染完"的强证据）
-                            val stars = countStars(f, gridKey)
-                            // ⚠️ 诊断（`sigdebug=1`）：把**退出时刻实际读到的东西**打出来 ——
-                            //   只测"等待时长"看不出读到的是新件还是交叉淡入中的旧件（2026-09-12 踩过）。
-                            if (TimingOverrides.sigDebug) {
-                                Log.i(TAG, "sigExit cell($col,$row) name='${nm ?: ""}' stars=$stars band=$gridKey")
-                            }
-                            !nm.isNullOrBlank() && (stars > 0 || !panelHasStarBand(gridKey))
-                        }
-                        var clickRetry = 0
-                        while (true) {
-                            val sawChange = waitReadyBySignature(
-                                before = sigBefore,
-                                a = sigA,
-                                b = sigB,
-                                roi = sigRoi!!,
-                                blocksX = sigBx,
-                                blocksY = sigBy,
-                                step = TimingOverrides.panelSigPollMs,
-                                maxMs = PANEL_CHANGE_WAIT_MAX_MS,
-                                minMs = 0L,
-                                fallbackMs = TimingOverrides.panelStableFallbackMs,
-                                what = if (clickRetry == 0) "panel" else "panel-retry$clickRetry",
-                                stableSamples = TimingOverrides.panelSigSamples,
-                                confirm = onPanelStable,
-                            )
-                            if (sawChange) break
-                            // `cardSigOk` 的定义里已含 `cardBox != null`（采样要用它），这里不必再查一遍
-                            val selMoved = cardSigOk && cardFrameMoved(cardBox, sigCardBefore)
-                            if (clickRetry >= CLICK_RETRY_MAX_ON_NOCHANGE) {
-                                // 放弃：本格将读到**陈旧面板** ⇒ 那件东西从头到尾没被选中过 = 丢件。
-                                dumpStallShot(cx, cy, col, row, index, clickRetry, selMoved, clickOk, "giveup")
-                                break
-                            }
-                            // ★ 2026-09-23：面板没变**不等于**点击被吞。相邻两格内容完全一样时
-                            //   （武器尤其多：同名同等级同精炼）面板像素一模一样、指纹永不变化，
-                            //   旧判据一律当吞击 ⇒ 1 页武器 7/21 格白烧 35 次重发（≈15s）。
-                            //   选中框能分开两者：点中了高亮框必换格，没送达则一块不动。
-                            if (selMoved) {
-                                Log.i(
-                                    TAG,
-                                    "visit cell($col,$row) idx=$index 面板未变但**选中框已移动** ⇒ 点击已送达，不重发",
-                                )
-                                break
-                            }
-                            // 本轮首格：游戏打开背包时**已自动选中第一件** ⇒ 面板与选中框都不会变，
-                            // 这是正常态而不是吞击（重发 5 次 ≈2s 纯浪费）。
-                            if (index == 0 && results.isEmpty() && resultsWeapons.isEmpty() &&
-                                resultsCharacters.isEmpty()
-                            ) {
-                                Log.i(TAG, "visit cell($col,$row) idx=$index 本轮首格且选中框未动 ⇒ 已是选中态，不重发")
-                                break
-                            }
-                            // 全程未见面板变化 ⇒ 极可能**点击被游戏吞掉**（2026-09-16 run6 page3 实证：
-                            //   21 格耗时零方差且最快 = 就绪轮询秒过 = 内容从未变化）⇒ **同坐标重发**。
-                            //   安全性：坐标完全相同 ⇒ 最坏只是重读同一张卡（幂等），不会误加相邻件。
-                            clickRetry++
-                            swallowedClickRetries++
-                            // 取证：本次等待超时、下一次点击**之前**的画面（开了落图开关才有开销）
-                            dumpStallShot(cx, cy, col, row, index, clickRetry, selMoved, clickOk, "retry")
-                            Log.w(
-                                TAG,
-                                "visit cell($col,$row) idx=$index 面板全程未见变化（clickOk=$clickOk）" +
-                                    " ⇒ 疑似点击被吞 ⇒ 同坐标重发 #$clickRetry",
-                            )
-                            if (useTapForCell) actions.tap(cx, cy) else actions.click(cx, cy)
-                        }
-                        tmPanelMs += SystemClock.elapsedRealtime() - tPanel
-                    }
-                    else -> {
-                        // 固定等待：签名不可用（`sigRoi` 取不到 / `sig=0` / 采样失败）或该流程本来就没有
-                        // 可读的名字 ROI（character_scan 的 click 是 visit 首步，ctx.frame 为空）。
-                        // ⚠️ 历史上这里曾误用 coerceAtMost(panelPollMs) 把 550ms 拖到 120ms ——
-                        //   panelPollMs/PANEL_POLL_MS 已于 2026-10-05 连根删除（该常量从未被任何
-                        //   生效路径引用），本分支如今就是纯固定等待，不存在可调的步长。
-                        // ★ 2026-10-05：原先这里前面还有一条「抓帧 + OCR 读名字轮询」分支
-                        //   （`waitPanelNameReady`），在**全部存档真机日志里 0 次命中**（签名分支的
-                        //   「面板未变但选中框已移动」有 4956 次），留着只会误导"以为就绪判定还依赖 OCR"。
-                        //   ⇒ 已删；签名采样失败这类情形统一落到本分支，由上面的 W 日志暴露。
-                        tmPanelMs += PANEL_REFRESH_MS
-                        delay(PANEL_REFRESH_MS)
-                    }
-                }
-                // 收敛帧兜底：签名路径若从未确认成功（未变兜底/超时），此处补抓一次，
-                // 保证 ctx.frame 一定是"点击后"的新帧（否则 parsePanel 读旧件 → 去重误杀）。
-                if (!panelFrameReady) {
-                    ctx.release() // 面板切换，上一格共享帧作废
-                    ctx.frame = freshFrame()
-                }
-                if (gridKey == "artifact_backpack") {
-                    Log.i(TAG, "visit cell($col,$row) idx=$index freshFrame acquired")
-                } else {
-                    val ocrGateway = ocr
-                    val fallback = step.optJSONObject("fallback")
-                    if (fallback != null && ocrGateway != null) {
-                        val region = fallback.optString("region", "").removePrefix("$")
-                        if (region.isNotEmpty()) {
-                            val regionRect = try { profile.rect(region) } catch (e: CancellationException) { throw e } catch (_: Exception) { null }
-                            if (regionRect != null) {
-                                val ok = runCatchingCancellable {
-                                    val frame = freshFrame()
-                                    try {
-                                        val text = ocrGateway.readLines(frame, listOf(regionRect)).joinToString(" ")
-                                        StatParser.clean(text).isNotEmpty()
-                                    } finally { frame.release() }
-                                }.getOrDefault(true)
-                                if (!ok && !clickedWhileResolving) {
-                                    Log.w(TAG, "fallback: panel not detected at $region, retry click")
-                                    actions.click(cx, cy)
-                                    delay(CLICK_SETTLE_MS)
-                                }
-                            }
-                        }
-                    }
-                }
-                }
-            }
-            "parsePanel" -> {
-                // §14 P3：角色概览面板走独立解析分支（字段与圣遗物面板不同构）
-                if (step.optString("panel") == "char_profile") {
-                    // ⚠️ 2026-09-10 修：角色 visit 在 click 与 parsePanel 之间有 navigate(属性) 复位步骤，
-                    // 而 ctx 缓存的是 **navigate 之前**的帧 → 复用会读到旧页（天赋页 → name ROI 读到天赋名）。
-                    // 故角色面板一律取新帧（每次多 1 次抓帧，代价可忽略）。
-                    parseCharacterPanel(step, null)
-                } else if (TimingOverrides.pipeDepth > 0) {
-                    // ★ S2b（#69）管道路径：parsePanel 的**头部段**（指纹闸/取证）在生产者完成，
-                    //   整帧交 pipeOut = 「裁片拷进 job 私有 Mat + send（背压）」，
-                    //   解析/判据/emit 交单消费者协程（job 携带 emit 步）。
-                    //   pipe=0 走下方同步路径（回滚杠杆，§8/S4 不删）。
-                    val panelKey = step.optString("panel")
-                    val cropRect = prof.panelCropRect(panelKey)
-                        ?: throw IllegalStateException(
-                            "pipe=${TimingOverrides.pipeDepth} 需要 panels.$panelKey 裁片并集，但为空",
-                        )
-                    parsePanel(step, ctx, pipeOut = { frame ->
-                        pipeSend(gridKey, col, row, index, cropRect, frame, parseStep = step, panelKey = panelKey)
-                    })
-                } else {
-                    parsePanel(step, ctx)
-                }
-            }
-            "dedupeSkip" -> {
-                // #206：属性页点头像 + 读名是必经（用户 2026-10-03 定），本步只裁命之座/天赋两跳。
-                // 判重口径与 emitCharacter 完全同源：按词典 key，key==null（未解析出身份）不介入
-                // （宁可多扫，CharDupJudge 的误杀教训）。跳过仍放行 stopWhen/emit ⇒
-                // 回卷止扫记账与「重复不入库」语义不变。
-                val key = charKey
-                when {
-                    key == null ->
-                        Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：身份未解析 ⇒ 不跳过")
-                    characterAlreadySeen(key) -> {
-                        visitSkipTail = true
-                        Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：$key 已入库 ⇒ 跳过命之座/天赋")
-                    }
-                    else -> Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：$key 新角色 ⇒ 全程照跑")
-                }
-            }
-            "navigate" -> {
-                navigate(step)
-                // §15 P0-1：有 leftMenu 时已在 navigate 内逐页读；无 leftMenu 才走 read 数组兜底
-                val menuLen = step.optJSONArray("leftMenu")?.length() ?: 0
-                if (menuLen == 0) readAfterNavigate(step)
-            }
-            "dialog" -> dialog(step)
-            "verify" -> verify(step)
-            "assertScreen" -> assertScreen(step)
-        "readConstellation" -> readConstellation(step)
-            "emit" -> {
-                // §14 P3：emit as=GoodCharacter → 角色入库；否则沿用既有 vars 快照上报
-                // ★ S2b：pipe>0 且本格已 send job ⇒ emit 由消费者执行（job 携带本步 JSON）；
-                //   跳过格（visitSkipTail，无 job）仍由生产者执行（重复记账，语义不变）。
-                if (TimingOverrides.pipeDepth > 0 && pipeCellJobSent) {
-                    Log.d(TAG, "emit: 由流水线消费者执行（job 携带）")
-                } else {
-                    emitByStep(step)
-                }
-            }
-            "stopWhen" ->
-                // ★ S2b：本格已发 job ⇒ stopWhen 随 job 在消费者按本格 vars 求值（生产者只做非阻塞观察）
-                if (TimingOverrides.pipeDepth > 0 && pipeCellJobSent) {
-                    Log.d(TAG, "stopWhen: 由流水线消费者求值（本格 job）")
-                } else {
-                    stopWhen(step)
-                }
-            "notify" -> notifyStep(step)
-            // ★ 2026-09-18 单趟扫描：visit 层也要能逐格绑定计划项
-            //   （顶层分派有了 visit 层没加 ⇒ 真机全格 `unknown visit step 'planMatch', skipped`）
-            "planMatch" -> planMatch(step)
-            "planDone" -> planDone(step)
-            else -> {
-                Log.w(TAG, "unknown visit step '$vop', skipped")
-                RecognitionLog.log(logTag, RecognitionLog.Level.W, "未知 visit 步 $vop 已跳过")
-            }
-        }
+    // §14 P3：角色概览面板走独立解析分支（字段与圣遗物面板不同构）
+    if (step.optString("panel") == "char_profile") {
+        // ⚠️ 2026-09-10 修：角色 visit 在 click 与 parsePanel 之间有 navigate(属性) 复位步骤，
+        // 而 ctx 缓存的是 **navigate 之前**的帧 → 复用会读到旧页（天赋页 → name ROI 读到天赋名）。
+        // 故角色面板一律取新帧（每次多 1 次抓帧，代价可忽略）。
+        parseCharacterPanel(step, null)
+    } else if (TimingOverrides.pipeDepth > 0) {
+        // ★ S2b（#69）管道路径：parsePanel 的**头部段**（指纹闸/取证）在生产者完成，
+        //   整帧交 pipeOut = 「裁片拷进 job 私有 Mat + send（背压）」，
+        //   解析/判据/emit 交单消费者协程（job 携带 emit 步）。
+        //   pipe=0 走下方同步路径（回滚杠杆，§8/S4 不删）。
+        val panelKey = step.optString("panel")
+        val cropRect = prof.panelCropRect(panelKey)
+            ?: throw IllegalStateException(
+                "pipe=${TimingOverrides.pipeDepth} 需要 panels.$panelKey 裁片并集，但为空",
+            )
+        parsePanel(step, ctx, pipeOut = { frame ->
+            pipeSend(gridKey, col, row, index, cropRect, frame, parseStep = step, panelKey = panelKey)
+        })
+    } else {
+        parsePanel(step, ctx)
     }
+}
+
+/**
+ * visit 的 `emit` 步（do 原语，从 executeVisitStepInner 的 "emit" 分支**原样**抽出）。
+ * ★ S2b：pipe>0 且本格已 send job ⇒ emit 由消费者执行（job 携带）；跳过格仍由生产者执行。
+ */
+internal suspend fun ScanEngine.visitEmit(step: JSONObject) {
+    // §14 P3：emit as=GoodCharacter → 角色入库；否则沿用既有 vars 快照上报
+    // ★ S2b：pipe>0 且本格已 send job ⇒ emit 由消费者执行（job 携带本步 JSON）；
+    //   跳过格（visitSkipTail，无 job）仍由生产者执行（重复记账，语义不变）。
+    if (TimingOverrides.pipeDepth > 0 && pipeCellJobSent) {
+        Log.d(TAG, "emit: 由流水线消费者执行（job 携带）")
+    } else {
+        emitByStep(step)
+    }
+}
+
+/**
+ * visit 的 `stopWhen` 步（do 原语，从 executeVisitStepInner 的 "stopWhen" 分支**原样**抽出）。
+ * ★ S2b：本格已发 job ⇒ stopWhen 随 job 在消费者按本格 vars 求值（生产者只做非阻塞观察）。
+ */
+internal suspend fun ScanEngine.visitStopWhen(step: JSONObject) {
+    // ★ S2b：本格已发 job ⇒ stopWhen 随 job 在消费者按本格 vars 求值（生产者只做非阻塞观察）
+    if (TimingOverrides.pipeDepth > 0 && pipeCellJobSent) {
+        Log.d(TAG, "stopWhen: 由流水线消费者求值（本格 job）")
+    } else {
+        stopWhen(step)
+    }
+}
+
+/**
+ * visit 的 `dedupeSkip` 步（do 原语，从 executeVisitStepInner 的 "dedupeSkip" 分支**原样**抽出）。
+ * #206：属性页点头像 + 读名是必经（用户 2026-10-03 定），本步只裁命之座/天赋两跳。
+ * 判重口径与 emitCharacter 完全同源：按词典 key，key==null（未解析出身份）不介入
+ * （宁可多扫，CharDupJudge 的误杀教训）。跳过仍放行 stopWhen/emit ⇒
+ * 回卷止扫记账与「重复不入库」语义不变（原生体里后续步用 `if (!visitSkipTail)` 守卫）。
+ */
+internal suspend fun ScanEngine.visitDedupeSkip(col: Int, row: Int, index: Int) {
+    // #206：属性页点头像 + 读名是必经（用户 2026-10-03 定），本步只裁命之座/天赋两跳。
+    // 判重口径与 emitCharacter 完全同源：按词典 key，key==null（未解析出身份）不介入
+    // （宁可多扫，CharDupJudge 的误杀教训）。跳过仍放行 stopWhen/emit ⇒
+    // 回卷止扫记账与「重复不入库」语义不变。
+    val key = charKey
+    when {
+        key == null ->
+            Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：身份未解析 ⇒ 不跳过")
+        characterAlreadySeen(key) -> {
+            visitSkipTail = true
+            Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：$key 已入库 ⇒ 跳过命之座/天赋")
+        }
+        else -> Log.i(TAG, "visit cell($col,$row) idx=$index dedupeSkip：$key 新角色 ⇒ 全程照跑")
+    }
+}
 
 /**
  * 角色判重的**唯一口径**：本轮已入库的词典 key。

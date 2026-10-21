@@ -700,11 +700,11 @@ internal fun ScanEngine.nameMatches(got: String, target: String): Boolean {
  * - ⚠️ ①段的前提是**网格停在首行**（auto_equip 由 sortBtn→排序弹窗确认这条复位链保证）。
  *   复位链断掉时 ①段扫的是"当前可见的顶三行"，不是第 1..9 号卡 —— 会漏，但不会漏得比修前更狠。
  */
-internal suspend fun ScanEngine.snapTraverse(
+/** snap 遍历主体（simple 分支改名自 snapTraverse；visit 消费改走 runner，其余一字未改）。 */
+internal suspend fun ScanEngine.snapTraverseCore(
     gridKey: String,
-    visit: JSONArray,
     advance: JSONObject,
-    step: JSONObject,
+    runCell: NativeVisitRunner,
 ) {
     val peekCols = advance.optJSONArray("peekCols")
     val loopClicks = advance.optJSONArray("loopClicks")
@@ -748,7 +748,7 @@ internal suspend fun ScanEngine.snapTraverse(
             if (vars.stopRequested) break
             val c = profile.cellCenter(gridKey, i)
             actions.click(c.x, c.y)
-            runVisit(visit, gridKey, 0, 0, 0, profile, snapMode = true)
+            runCell(0, 0, 0, profile)
             visited++
         }
     } else {
@@ -758,12 +758,12 @@ internal suspend fun ScanEngine.snapTraverse(
         if (vars.stopRequested) break
         // 每轮 = peek 1 击 + loop 两击（3 击/行，每卡恰点一次）
         clickAt(peek)
-        runVisit(visit, gridKey, 0, 0, 0, profile, snapMode = true)
+        runCell(0, 0, 0, profile)
         visited++
         for (p in loops) {
             if (vars.stopRequested) break
             clickAt(p)
-            runVisit(visit, gridKey, 0, 0, 0, profile, snapMode = true)
+            runCell(0, 0, 0, profile)
             visited++
         }
         if (vars.stopRequested) break
@@ -792,7 +792,7 @@ internal suspend fun ScanEngine.snapTraverse(
             for (i in 1 until peekCols.length()) {
                 if (vars.stopRequested) break
                 clickAt(point(peekCols, i))
-                runVisit(visit, gridKey, 0, 0, 0, profile, snapMode = true)
+                runCell(0, 0, 0, profile)
                 visited++
             }
             break

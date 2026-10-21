@@ -768,12 +768,28 @@ internal fun ScanEngine.planDone(step: JSONObject) {
     Log.i(TAG, "planDone: 第 $i 项 $label \u21d2 $status（剩余未绑定 ${vars.planRemaining()}）")
 }
 
-/** `planSummary`：把**始终没被绑定**的项补记 `NotFound`，然后出汇总（照 `emitManageSummary`）。 */
+/**
+ * `planSummary`：把**始终没被绑定**的项按缺席证明门禁分流后出汇总（照 `emitManageSummary`）。
+ *
+ * ★ P0-A（2026-10-08，GS 对齐 lock_manager.rs 的 missed/skipped 分流）：未绑定项的**处境**
+ *   决定状态，不是一律 NotFound ——
+ * - [ScanVars.lockPlanAborted]（流程异常中止：enterScreen/assertScreen 未达、profile 缺失）
+ *   ⇒ **Skipped**：这一轮结果不可信，需要重跑，而不是"这件不存在"；
+ * - [ScanVars.lockFilterPartial]（P0-C：筛选只勾上了部分目标）⇒ **Skipped**：剩余目标
+ *   在筛选遮蔽的区段里，"没扫到"≠"不存在"；
+ * - 正常走查完整（stopWhen/maxPages/网格到底）且两项都未置位 ⇒ **NotFound**：
+ *   "背包里确实没有这件"（可据此重造方案——equip 侧 manageStatusOf 同款语义）。
+ */
 internal fun ScanEngine.planSummary() {
     val plan = vars.plan ?: return
+    val absenceStatus = when {
+        vars.lockPlanAborted -> "Skipped"
+        vars.lockFilterPartial -> "Skipped"
+        else -> "NotFound"
+    }
     for (i in plan.indices) {
         if (i !in vars.consumedPlanIndexes) {
-            manageResults.add(Triple(i, taskLabel(plan[i]), "NotFound"))
+            manageResults.add(Triple(i, taskLabel(plan[i]), absenceStatus))
         }
     }
     emitManageSummary()
@@ -1279,7 +1295,7 @@ internal fun ScanEngine.longestRunLen(sortedIdx: List<Int>): Int {
  *   拉到阈值误触止扫。
  */
 internal suspend fun ScanEngine.revisitFailedCells(
-    visit: JSONArray,
+    visitBody: NativeVisitRunner,
     gridKey: String,
     prof: ScreenProfile,
     cols: Int,
@@ -1316,7 +1332,7 @@ internal suspend fun ScanEngine.revisitFailedCells(
                 curCellRow = row
                 curCellCol = col
                 curCellIdx = idx
-                runVisit(visit, gridKey, col, row, idx, prof)
+                visitBody(this, col, row, idx, prof)
                 curCellIdx = -1
                 val k = lastCellKey
                 val id = lastCellIdentity
@@ -1410,18 +1426,55 @@ internal suspend fun ScanEngine.vote(
 }
 
 // ---- #10 stopWhen：表达式谓词（D3）----
+
+/**
+ * ★ simple 分支（spec §7）stopWhen 的两个**语义入口**之一：duplicateStreak 止扫**登记**。
+ * 判据本身在 emitCharacter 求值（那里才拿得到刚解析出的角色名与已入库集合）。
+ * [stopWhen] 的 mode=duplicateStreak 分支与原生 visitBody 都走这里（单一事实源）。
+ */
+internal fun ScanEngine.stopWhenRegisterDuplicateStreak(streak: Int, dupPageConfirm: Int) {
+    charDupStreakLimit = streak
+    // 页级确认页数（默认 2）：`1` = 恢复旧的「首次整页重复即停」行为
+    this.dupPageConfirm = dupPageConfirm.coerceIn(1, 5)
+    Log.i(
+        TAG,
+        "stopWhen 登记 mode=duplicateStreak streak=$charDupStreakLimit dupPageConfirm=${this.dupPageConfirm}" +
+            "（判据在 emitCharacter 求值）",
+    )
+}
+
+/**
+ * ★ simple 分支（spec §7）stopWhen 的两个**语义入口**之二：weapon_scan 的 expr `"rarity <= 2"`
+ * 的**原生式**（该条 Expr 退役）。语义与 stopWhen(expr) 逐位对应：
+ * - 哨兵守卫：rarity<0（vote 未判定，如 3★ 蓝卡无金/紫 banner）跳过——否则 `<` 比较对 -1 恒真，
+ *   会把"整页未判定"误判为"全部低星"而立即终止；
+ * - `vars.rarity in 0..2` ⇒ stopRequested=true / stopReason="stopWhen"（scope=page 立即停；
+ *   原 flow 的 action="Stop+flush" 在引擎里**无消费者**——flush 就是扫描结束的自然导出）；
+ * - 命中/未命中对 [ScanEngine.stopWhenCellStreak] 的记账与 Expr 路径同口径（该计数只被
+ *   scope=cell 的连续确认消费，weapon 这条恒 page ⇒ 不改变行为，纯记账一致）。
+ */
+internal fun ScanEngine.stopWhenRarityAtMost2() {
+    // 哨兵保护（与 Expr 路径同款）：rarity=-1 不得触发
+    if (vars.rarity < 0) {
+        Log.d(TAG, "stopWhen skipped: rarity not judged yet (-1 sentinel)")
+        return
+    }
+    if (vars.rarity in 0..2) {
+        stopWhenCellStreak++
+        vars.stopRequested = true
+        vars.stopReason = "stopWhen"
+        Log.i(TAG, "stopWhen triggered (page): rarity <= 2")
+    } else {
+        stopWhenCellStreak = 0
+    }
+}
+
 internal fun ScanEngine.stopWhen(step: JSONObject) {
     // 显式模式优先（不再靠 expr 正则猜分支）：mode=duplicateStreak 的判据在 emitCharacter 求值
     // （那里才拿得到刚解析出的角色名与已入库集合；flow 顺序 emit→stopWhen 时 charName 已被清空）。
     if (step.optString("mode") == "duplicateStreak") {
-        charDupStreakLimit = step.optInt("streak", 3)
-        // 页级确认页数（默认 2）：`1` = 恢复旧的「首次整页重复即停」行为
-        dupPageConfirm = step.optInt("dupPageConfirm", 2).coerceIn(1, 5)
-        Log.i(
-            TAG,
-            "stopWhen 登记 mode=duplicateStreak streak=$charDupStreakLimit dupPageConfirm=$dupPageConfirm" +
-                "（判据在 emitCharacter 求值）",
-        )
+        // ★ simple 分支（spec §7）：duplicateStreak 分支直提为语义入口（原生流程直调；JSON 路径照旧到这）。
+        stopWhenRegisterDuplicateStreak(step.optInt("streak", 3), step.optInt("dupPageConfirm", 2))
         return
     }
     val expr = step.optString("expr")

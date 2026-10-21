@@ -11,7 +11,7 @@ import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.log.RecognitionLog
 import com.bettergi.pocket.bridge.OverlayBridge
 import com.bettergi.pocket.core.FlowSource
-import com.bettergi.pocket.dsl.FlowValidator
+import com.bettergi.pocket.dsl.ScriptStore
 import com.bettergi.pocket.recognition.ocr.OcrFactory
 import com.bettergi.pocket.recognition.name.GoodNames
 import kotlinx.coroutines.CoroutineScope
@@ -196,7 +196,9 @@ class ScriptRunner(
     }
 
     /**
-     * 启动扫描流程。flowName 决定 assets/dsl/flows/<flowName>.json（"artifact_scan" | "weapon_scan"）。
+     * 启动扫描流程。flowName（"artifact_scan" | "weapon_scan" | …）决定分派到 `scan/flows` 包里的
+     * **原生步序** —— ⚠️ 自 simple 阶段3/4 起 flow JSON 已下线，**不再**读 `assets/dsl/flows/` 下的 json
+     * （那个目录也从未进版本库；见 DslAssetsIntegrityTest 头注与 check_dsl_sync.py 的 FLOW_DIRS 移除说明）。
      * 名称词典统一加载（dsl/tools/mappings.json → GoodNames），各原语经 NameMatcher 反查。
      */
     fun startScan(
@@ -280,9 +282,8 @@ class ScriptRunner(
             listener.onFinished("no_frame_size")
             return
         }
-        val validFlows = setOf("artifact_scan", "weapon_scan", "character_scan", "artifact_lock", "auto_equip", "char_calibrate", "setfilter_calibrate")
-        val flowFile = "dsl/flows/$flowName.json"
-        if (flowName !in validFlows) {
+        // flowName 单一事实源 = ScriptStore.KEYS（与 ScanEngine.run() 分派同源，防三处漂移）
+        if (flowName !in ScriptStore.KEYS) {
             Log.w(TAG, "unknown flow $flowName; default to artifact_scan")
             startScan("artifact_scan"); return
         }
@@ -301,30 +302,11 @@ class ScriptRunner(
             try {
                 val profile = ScreenProfile.loadFor(appContext.assets, size.first, size.second)
                 profile.calibrate(size.first, size.second)
-                @Suppress("DEPRECATION")
-                val appVersion = try {
-                    appContext.packageManager.getPackageInfo(appContext.packageName, 0).versionName ?: "0.0.0"
-                } catch (_: Exception) { "0.0.0" }
-                val flowText = FlowSource.open(appContext.assets, flowFile).bufferedReader().use { it.readText() }
-                val flow = try {
-                    JSONObject(flowText)
-                } catch (e: Exception) {
-                    Log.w(TAG, "flow $flowName JSON 解析失败", e)
-                    listener.onFinished("flow_parse_error"); return@launch
-                }
-                // §16.3 S2 门禁：min_host_version 拒跑 + schema 快速校验
-                val info = FlowValidator.parseInfo(flow, flowName)
-                if (!FlowValidator.hostSatisfies(info.minHostVersion, appVersion)) {
-                    Log.w(TAG, "flow $flowName 需宿主 >= ${info.minHostVersion}，当前 $appVersion 过低")
-                    listener.onFinished("host_version_too_low"); return@launch
-                }
-                val issues = FlowValidator.validate(flow)
-                if (issues.isNotEmpty()) {
-                    Log.w(TAG, "flow $flowName schema 非法: ${issues.joinToString { "${it.path}: ${it.message}" }}")
-                    listener.onFinished("flow_schema_invalid"); return@launch
-                }
-                // §15：真机启动路径默认开启前置归位（flow 可显式 returnHome:false 关闭，如标定流）
-                if (!flow.has("returnHome")) flow.put("returnHome", true)
+                // ★ simple 阶段3（spec §1/§4）：flow JSON 装载与 FlowValidator 门禁随 DSL 运行时
+                //   下线 —— 引擎 run() 按 flowName 分派到 scan/flows/* 的原生步序。
+                //   flowJson 只承载 returnHome 语义：真机启动路径默认开启前置归位
+                //   （§15），唯一显式关闭的是 char_calibrate（原 flow returnHome:false）。
+                val flow = JSONObject().put("returnHome", flowName != "char_calibrate")
                 // 模板锚点匹配器：注入 assets 并预读 dsl/templates.json（flow 的 anchor.kind=template 依赖）
                 TemplateMatcher.attach(appContext.assets)
                 // 副词条档位表：flow 的 dict.subStats="rollTable" 依赖（dsl/tools/rollTable.json）

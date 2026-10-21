@@ -3,6 +3,10 @@ package com.bettergi.pocket.scan
 import com.bettergi.pocket.capture.FrameSource
 import com.bettergi.pocket.capture.FrameTimeoutException
 import com.bettergi.pocket.recognition.name.GoodNames
+import com.bettergi.pocket.scan.flows.runArtifactScanNative
+import com.bettergi.pocket.scan.flows.runArtifactSteps
+import com.bettergi.pocket.scan.flows.runWeaponScanNative
+import com.bettergi.pocket.scan.forEachPlanItem
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -387,11 +391,12 @@ class ScanEngineDryRunTest {
         // `dialogs.filterPanel.anchorTitle = [179,50,419,104]`（3200 基坐标；calibrate(3200,1440) 后不变）。
         // 不给这条 ⇒ `panelOpen()` 恒 false ⇒ 复位链走「BACK → 重试 → 放弃」，重置/确认都不会点。
         base[FrameRect(179, 50, 419, 104)] = "圣遗物筛选"
-        // assertScreen 的标题条（profiles.json 3200 基坐标 `screens._common.titleBar` = [157,21,1084,136]）：
+        // assertScreen 的标题条（profiles.json 3200 基坐标 `screens._common.titleBar` = [145,21,1084,136]；
+        // ⚠️ 1d0629a 把 3200 titleBar 左沿 157→145，干跑夹具随之同步——否则锚点 OCR 全读空）：
         // 供「背包/圣遗物」⇒ artifact_scan 的标题锚点 / `assertScreen(expect="圣遗物")` 走通过路径。
         // ⚠️ **与 count 一起受 `withCountLine` 控制**：「anchor 失败应中止」那条用例靠"锚点必失败"验证
         //    abort 路径，而 artifact_scan 的**第一段锚点已改为标题条**（原为 count）⇒ 不喂它才会失败。
-        if (withCountLine) base[FrameRect(157, 21, 1084, 136)] = "背包/圣遗物"
+        if (withCountLine) base[FrameRect(145, 21, 1084, 136)] = "背包/圣遗物"
         return base
     }
 
@@ -402,7 +407,7 @@ class ScanEngineDryRunTest {
      *   · count [2603,60,2846,98]：readCount 走 readNumber 夹具（ocrNumber），不消费本行 —— 仅备查。
      */
     private fun weaponLines(): Map<FrameRect, String> = mapOf(
-        FrameRect(157, 21, 1084, 136) to "背包/武器",
+        FrameRect(145, 21, 1084, 136) to "背包/武器",
         FrameRect(2603, 60, 2846, 98) to "武器 ${CELLS_PER_PAGE}/${CELLS_PER_PAGE}",
     )
 
@@ -450,6 +455,16 @@ class ScanEngineDryRunTest {
          * 失败无法归因（实际就误读过一次，见 design-docs/scan-pipeline-20261006.md §13.2）。
          */
         forceCrop: Boolean = false,
+        /**
+         * ★ simple 分支（spec §5）：非空 = 直调**原生流程入口**（不再走 engine.run()+flow JSON）。
+         * 取值："weapon" / "artifact" / "character" / "lock" / "equip"；此时 flowFile 只用于
+         * 裁片原点的面板键推导（JSON 资产删除后改为 nativePanelKey）。
+         */
+        nativeFlow: String? = null,
+        /** 原生驱动时的面板键（裁片原点推导用）；null = 从 flowFile/nativeFlow 推。 */
+        nativePanelKey: String? = null,
+        /** 原生 artifact 的 pageSkip 注入（对应 JSON 路径的 flowTransformer 注入 pageSkip）。 */
+        nativePageSkipExpr: String? = null,
     ): RunResult {
         // ⚠️ 合成帧里页与页之间**不是平移关系**（只是加/改一条灰带）⇒ fpband 落地条带测量无物理意义，
         //    会走 Reject → 自动回退特征锁（fail-safe，不补滑、不改滑动编排）⇒ "点击数/滑动数"断言不受影响。
@@ -460,8 +475,8 @@ class ScanEngineDryRunTest {
         TimingOverrides.entryIdempotent = false
         val profile = ScreenProfile(JSONObject(File(assetsDir(), "profiles.json").readText()))
         profile.calibrate(3200, 1440)
-        val flow = JSONObject(File(assetsDir(), flowFile).readText())
-        flowTransformer?.invoke(flow)
+        val flow = if (nativeFlow != null) JSONObject() else JSONObject(File(assetsDir(), flowFile).readText())
+        if (nativeFlow == null) flowTransformer?.invoke(flow)  // 原生驱动的注入走独立参数（如 nativePageSkipExpr）
         // 单一名称词典（角色/武器/套装/单件/词条/部位）——与生产同路径
         // 词典解析失败**不许吞成 null**：那会让整批干跑静默换一条代码路径
         // （NameMatcher 全灭但断言照样绿），而随包词典就在那里、坏了一定是改坏了。
@@ -473,7 +488,11 @@ class ScanEngineDryRunTest {
             //   cropRect 的 left/top 作 origin 平移 ROI，夹具另算一份就会和实现对不上。
             cropOrigin = run {
                 if (pipeDepth == 0 && !forceCrop) return@run 0 to 0
-                val panelKey = if (flowFile.contains("weapon")) "weapon_backpack" else "artifact_backpack"
+                val panelKey = nativePanelKey ?: when {
+                    nativeFlow == "weapon" -> "weapon_backpack"
+                    flowFile.contains("weapon") -> "weapon_backpack"
+                    else -> "artifact_backpack"
+                }
                 profile.panelCropRect(panelKey)?.let { it.left to it.top } ?: (0 to 0)
             },
         )
@@ -507,7 +526,33 @@ class ScanEngineDryRunTest {
         TimingOverrides.pipeDepth = pipeDepth
         if (pipeDepth > 0 || forceCrop) TimingOverrides.panelCrop = true
         try {
-            runBlocking { withTimeout(ENGINE_RUN_TIMEOUT_MS) { engine.run() } }
+            runBlocking {
+                withTimeout(ENGINE_RUN_TIMEOUT_MS) {
+                    if (nativeFlow != null) {
+                        // ★ simple 分支（spec §5）：原生驱动——合成帧 + 原生流程入口直调。
+                        when (nativeFlow) {
+                            "weapon" -> engine.runWeaponScanNative()
+                            "artifact" -> {
+                                val p = plan
+                                if (p != null) {
+                                    // 对应 JSON 路径的 flowTransformer 包 foreach（resetScanPerItem 语义）
+                                    engine.runPreamble()
+                                    engine.forEachPlanItem(
+                                        p, "task", resetPerItem = true,
+                                        steps = listOf({ _ -> engine.runArtifactSteps(nativePageSkipExpr) }),
+                                    )
+                                    engine.runPostamble()
+                                } else {
+                                    engine.runArtifactScanNative(nativePageSkipExpr)
+                                }
+                            }
+                            else -> error("未支持的原生驱动: $nativeFlow")
+                        }
+                    } else {
+                        engine.run()
+                    }
+                }
+            }
         } finally {
             TimingOverrides.pipeDepth = prevPipe
             TimingOverrides.panelCrop = prevCrop
@@ -532,6 +577,7 @@ class ScanEngineDryRunTest {
             listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
             pipeDepth = pipe,
             forceCrop = true,
+            nativeFlow = "artifact",
         )
         val sync = run(0)
         val piped = run(2)
@@ -562,6 +608,7 @@ class ScanEngineDryRunTest {
         val r = runEngine(
             listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
             pipeDepth = 2,
+            nativeFlow = "artifact",
         )
         assertEquals("整页必须先全量入库，否则下面两条 0 是空跑出来的", CELLS_PER_PAGE, r.engine.results.size)
         assertEquals(
@@ -599,6 +646,7 @@ class ScanEngineDryRunTest {
                 },
                 pipeDepth = pipe,
                 forceCrop = true,
+                nativeFlow = "artifact",
             )
             assertEquals("pipe=$pipe：只应入库已点过的 10 格", 10, engine.results.size)
             assertEquals("pipe=$pipe", ENTER_CHAIN_CLICKS + 10, h.clicks.size)
@@ -616,6 +664,7 @@ class ScanEngineDryRunTest {
                 Page(syntheticFrame(5, page = 2), pageLines("Lv.90"), 1034),
             ),
             dedupe = true,
+            nativeFlow = "artifact",
         )
         // 页 1 入 21 件；页 2 同内容 → **整页零新增（第 1 次）⇒ 按 dupPageConfirm=2 不停止**，再翻一页；
         // 页 3 仍同内容（mock 页索引钳在末页）→ 连续第 2 个整页零新增 ⇒ 断言回卷 → stopWhen 停止。
@@ -668,6 +717,7 @@ class ScanEngineDryRunTest {
             dedupe = true,
             flowTransformer = wrapInForeach,
             plan = listOf(JSONObject(), JSONObject()), // 两个"相同内容"目标
+            nativeFlow = "artifact",
         )
         // 裁决语义（2026-10-01）：目标 1 入库 21 件；目标 2 复扫同件全部撞 seen 键被去重
         // ⇒ results 不增长也不被清 ⇒ 最终 = 物理件数（21 件不丢不重）。
@@ -680,7 +730,10 @@ class ScanEngineDryRunTest {
     fun `full flow produces one page of artifacts`() {
         // 计数器 = 一页件数 ⇒ 收尾走**新的主判据**（已入库 ≥ 计数器），不再靠"翻页指纹不变"那条
         // 已在 2026-09-26 删除的重发回路收尾（它当时顺带充当了本用例的终止条件）。
-        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)))
+        val (engine, h) = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
+            nativeFlow = "artifact",
+        )
         assertEquals(CELLS_PER_PAGE, engine.results.size)
         assertEquals("completed", h.finished)
         // 点击数：enterScreen 链 4 击（bagpack + filterRoundBtn + filterPanel.reset + filterPanel.ok）+ 21 格 = 25
@@ -706,7 +759,10 @@ class ScanEngineDryRunTest {
     fun countBelowOnePageBoundsTheClicksAndSkipsPaging() {
         // 第三参是 `ocrNumber`（readCount 的读数），格数由网格几何固定给 21 ⇒
         // "表头说 6 件、屏幕上一页 21 格"这个真机形状正好复现。
-        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 6)))
+        val (engine, h) = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 6)),
+            nativeFlow = "artifact",
+        )
         assertEquals(6, engine.results.size)
         assertEquals(ENTER_CHAIN_CLICKS + 6, h.clicks.size)
         assertEquals(0, h.swipes.size)
@@ -727,6 +783,7 @@ class ScanEngineDryRunTest {
         val (engine, h) = runEngine(
             listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
             firstCellNameStuck = true,
+            nativeFlow = "artifact",
         )
         assertEquals(ENTER_CHAIN_CLICKS + CELLS_PER_PAGE, h.clicks.size)
         assertEquals(CELLS_PER_PAGE, engine.results.size)   // 豁免 ≠ 跳过：首格仍要入库
@@ -774,7 +831,10 @@ class ScanEngineDryRunTest {
         //    而第 2 页 `pageIndex` 钳在末页 ⇒ 同格名字不变 ⇒ 每格都打满
         //    `PANEL_CHANGE_WAIT_MAX_MS(6000)` ⇒ 本用例实测 166.6s（改后 ~15s，与
         //    `full flow produces one page of artifacts` 同量级）。断言不变，只是不再白扫一页。
-        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)))
+        val (engine, h) = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
+            nativeFlow = "artifact",
+        )
         val a = engine.results[0]
         assertEquals("plume", a.slotKey)                       // "死之羽"
         assertEquals(5, a.rarity)                              // banner 橙 + 星带 5 格
@@ -795,7 +855,10 @@ class ScanEngineDryRunTest {
     @Test
     fun `set_key reverse-derived from piece name via dictionary`() {
         // 计数器同 `first artifact fields…`：给可达值，别让用例白扫一页（那页每格等满 6s 超时）。
-        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)))
+        val (engine, h) = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
+            nativeFlow = "artifact",
+        )
         val a = engine.results[0]
         // "晨光的明誓" → pieceToSetId（词典 276 件）
         assertTrue("setKey should be reverse-derived, got ${a.setKey}", a.setKey != null && a.setKey.isNotEmpty())
@@ -807,6 +870,7 @@ class ScanEngineDryRunTest {
         val (engine, h) = runEngine(
             listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)),
             maxPages = 1,
+            nativeFlow = "artifact",
         )
         assertEquals(1026, engine.vars.total)
         // 首击 = 背包锚点（2026-09-13 晚：BS@3200 实机复核后**回退为实测值** (2824,80)——交集中心 (2830,93) 只对 2244 档（双机）成立）；其后 3 击 = 筛选复位链（filterRoundBtn → filterPanel.reset → filterPanel.ok）
@@ -836,7 +900,10 @@ class ScanEngineDryRunTest {
     @Test
     fun `crafted flag detected via purple banner`() {
         // 计数器同上：祝圣紫在页 1 的每一格里都会被投出来，不需要第二页。
-        val (engine, h) = runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)))
+        val (engine, h) = runEngine(
+            listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
+            nativeFlow = "artifact",
+        )
         // 合成帧画了祝圣紫三点 → crafted=true；emit 进度含 crafted
         assertTrue(engine.vars.crafted)
         assertTrue(h.progress.isNotEmpty())
@@ -852,7 +919,7 @@ class ScanEngineDryRunTest {
         //   那一刻复读一次以挡住非零欠读（#84），所以两页必须给同一个数 —— 原先页2 给 1030
         //   等于让夹具扮演"总数会变大"，真机上不存在这种计数器。
         val page2 = Page(syntheticFrame(3, page = 1), pageLines("Lv.0"), 2 * CELLS_PER_PAGE)
-        val (engine, h) = runEngine(listOf(page1, page2))
+        val (engine, h) = runEngine(listOf(page1, page2), nativeFlow = "artifact")
 
         // 页 1：满页 5★；页 2：3★（starCount=3）→ 正常 emit ⇒ 共 2 页
         assertEquals(2 * CELLS_PER_PAGE, engine.results.size)
@@ -870,6 +937,7 @@ class ScanEngineDryRunTest {
             listOf(Page(syntheticFrame(5), pageLines("Lv.90"), 1026)),
             numberScript = listOf(0, 1026),
             maxPages = 1,   // 同 `readCount and enterScreen wiring`：只验入口链，计数器 1026 是断言对象
+            nativeFlow = "artifact",
         )
         assertEquals(1026, engine.vars.total)
         // 重进后 clicks 应多出 enterScreen 链一轮（1 击；filterReset 不重跑，见 ENTER_CHAIN_REENTRY_CLICKS）
@@ -881,7 +949,10 @@ class ScanEngineDryRunTest {
     fun `anchor assertion failure aborts scan`() {
         // 页面无 count 文本 → anchor 正则不匹配 → 3 次重试后抛 ScanAbortedException
         val e = runCatching {
-            runEngine(listOf(Page(syntheticFrame(5), pageLines("Lv.90", withCountLine = false), 1026)))
+            runEngine(
+                listOf(Page(syntheticFrame(5), pageLines("Lv.90", withCountLine = false), 1026)),
+                nativeFlow = "artifact",
+            )
         }.exceptionOrNull()
         assertTrue("expected ScanAbortedException, got $e", e is ScanAbortedException)
     }
@@ -915,6 +986,7 @@ class ScanEngineDryRunTest {
                 probes += 1
                 probes <= allowed
             },
+            nativeFlow = "artifact",
         )
         assertEquals("首页应正常入库", CELLS_PER_PAGE, engine.results.size)
         // 第 2 页一格未点（只有入口链 + 首页 21 格）
@@ -941,6 +1013,7 @@ class ScanEngineDryRunTest {
                 probes += 1
                 probes <= allowed
             },
+            nativeFlow = "artifact",
         )
         assertEquals("只应入库已点过的 10 格", 10, engine.results.size)
         assertEquals(ENTER_CHAIN_CLICKS + 10, h.clicks.size)
@@ -959,7 +1032,8 @@ class ScanEngineDryRunTest {
     fun `weapon scan finishes without fake total mismatch`() {
         val (engine, h) = runEngine(
             listOf(Page(syntheticFrame(5), weaponLines(), CELLS_PER_PAGE)),
-            flowFile = "flows/weapon_scan.json",
+            // ★ simple 分支：weapon 原生化后干跑直调 runWeaponScanNative（spec §5，17 场景语义逐条保留）
+            nativeFlow = "weapon",
             weaponNames = weaponDictNames(),
         )
         assertEquals("武器应整页入库", CELLS_PER_PAGE, engine.resultsWeapons.size)
@@ -989,6 +1063,7 @@ class ScanEngineDryRunTest {
             listOf(Page(syntheticFrame(5), pageLines("Lv.90"), CELLS_PER_PAGE)),
             dedupe = true,
             freezeCells = 2,
+            nativeFlow = "artifact",
         )
         assertEquals("completed", h.finished)
         assertEquals(
@@ -1021,15 +1096,9 @@ class ScanEngineDryRunTest {
         val (engine, h) = runEngine(
             pages,
             maxPages = 6,
-            flowTransformer = { flow ->
-                val steps = flow.getJSONArray("steps")
-                for (i in 0 until steps.length()) {
-                    val s = steps.getJSONObject(i)
-                    if (s.optString("do") == "pagedGrid") {
-                        s.put("pageSkip", JSONObject().put("expr", "pageMinLevel < 20"))
-                    }
-                }
-            },
+            nativeFlow = "artifact",
+            // ★ simple 分支：pageSkip 注入改为原生参数（等价于 JSON 路径的 flowTransformer 注入）
+            nativePageSkipExpr = "pageMinLevel < 20",
         )
         assertEquals("前两页正常入库", 2 * CELLS_PER_PAGE, engine.results.size)
         assertEquals("应按正常止扫语义收尾（非报错/非 maxPages）", "stopWhen", h.finished)

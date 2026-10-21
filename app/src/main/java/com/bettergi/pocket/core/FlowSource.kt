@@ -14,9 +14,14 @@ import java.io.InputStream
  *   1. `filesDir/scripts/installed/<relPath>` 存在则读（adb push 覆盖，免重编）
  *   2. 否则 `assets/<relPath>`（APK 内置）
  *
- * `<relPath>` 保留 assets 子目录结构，例如 `dsl/flows/weapon_scan.json`。
- * 真机调参：`adb push weapon_scan.json /sdcard/Android/data/<pkg>/files/scripts/installed/dsl/flows/`
- * → 下一轮扫描按新流程执行。
+ * `<relPath>` 保留 assets 子目录结构，当前实际走这条路的有 `dsl/profiles.json` /
+ * `dsl/profiles_<WxH>.json`、`dsl/templates.json` 与模板文件、`dsl/tools/rollTable.json`、`dsl/tools/mappings.json`。
+ * 真机调参（例：改 2244 档 profile 后免重编）：
+ * `adb push profiles_2244x1080.json /sdcard/Android/data/<pkg>/files/scripts/installed/dsl/`
+ * → 下一次加载读 override 副本（日志 `override hit: …`）。
+ *
+ * ⚠️ flow JSON **不走这里**：`dsl/flows` 目录下的 json 随 DSL 运行时下线（引擎按 flowName 分派到
+ *   `scan/flows` 包里的原生步序），assets 侧也不再有那个目录 ⇒ 别照本注释去补拷 `dsl/flows/`。
  *
  * 兼容：未 [install] 时（如 JVM 单测）直走传入的 [AssetManager]，调用方签名不变。
  */

@@ -11,6 +11,9 @@ import java.io.File
  * DSL 资产完整性守门（防复发：2026-09-02 曾因 assets/dsl 文件静默丢失
  * 导致 APK 缺 profiles.json、真机报 error: dsl/profiles.json）。
  *
+ * ★ simple 阶段3/4（spec §4）：flows 目录下的 flow JSON 随 DSL 运行时下线，本类收缩为
+ * **profiles 完整性小断言**（标定坐标 + 运行时词典/档位表仍在 assets，必须守）。
+ *
  * testDebugUnitTest 挂在 assembleDebug 前，文件缺失/损坏时构建直接红。
  */
 class DslAssetsIntegrityTest {
@@ -28,10 +31,11 @@ class DslAssetsIntegrityTest {
 
     private fun requiredFiles() = listOf(
         "profiles.json",
-        "flows/artifact_scan.json",
         // 单一名称词典（由 dsl/scripts/gen_mappings.py 一步生成并同步）：GoodNames 运行时唯一依赖。
         // fix45 教训：文件放在 app/assets/（无 src/main 前缀）不进 APK → 词典全部 unavailable。
         "tools/mappings.json",
+        // 副词条档位表（flow dict.subStats="rollTable" 依赖）
+        "tools/rollTable.json",
     )
 
     /**
@@ -78,13 +82,6 @@ class DslAssetsIntegrityTest {
                 assertTrue("profiles.json missing '$path'", node != null)
             }
         }
-    }
-
-    @Test
-    fun `flow json references supported profile`() {
-        val flow = JSONObject(File(assetsDir(), "flows/artifact_scan.json").readText())
-        assertTrue(flow.getString("profile") == "android_3200x1440")
-        assertTrue(flow.getJSONArray("steps").length() > 0)
     }
 
     @Test
@@ -184,15 +181,12 @@ class DslAssetsIntegrityTest {
                 drifted += "tools/$rel ≠ assets/tools/$rel"
             }
         }
-        val cf = File(json, "flows"); val af = File(assets, "flows")
-        if (cf.isDirectory && af.isDirectory) {
-            for (f in cf.listFiles()?.filter { it.name.endsWith(".json") }.orEmpty()) {
-                val g = File(af, f.name)
-                if (!g.isFile || f.readBytes().contentEquals(g.readBytes()).not()) {
-                    drifted += "flows/${f.name} ≠ assets/flows/${f.name}"
-                }
-            }
-        }
+        // 本类**不再**比对 `assets/dsl/flows/`：flow JSON 已随 DSL 运行时下线（引擎按 flowName 分派到
+        // scan/flows/*，`FlowSource.open` 的调用点只有 profiles / templates / rollTable / GoodNames），
+        // 且那份目录从未进版本库 ⇒ 新构建的 APK 里根本没有它。
+        // 原先这段带 `if (cf.isDirectory && af.isDirectory)` 守卫，看着无害，实为**定时炸弹**：
+        // 谁把目录重建出来（例如照着 check_dsl_sync 的旧 FLOW_DIRS 手工补拷），这段就会重新生效，
+        // 于是开始守一份没人读的死资产 —— 2026-10-08 就是重建后又清掉的。
         org.junit.Assert.assertTrue(
             "DSL 双侧漂移（跑 dsl/scripts/check_dsl_sync.py 看方向；本次已验证的修复在 assets 侧时用 --fix-rev）：\n  " +
                 drifted.joinToString("\n  "),

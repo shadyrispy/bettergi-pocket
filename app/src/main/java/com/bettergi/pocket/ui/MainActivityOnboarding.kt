@@ -9,8 +9,6 @@ import android.widget.Button
 import androidx.core.content.ContextCompat
 import com.bettergi.pocket.R
 import com.bettergi.pocket.notice.NoticeCenter
-import com.bettergi.pocket.dsl.ScriptStore
-import com.bettergi.pocket.dsl.ScriptIcons
 import com.bettergi.pocket.input.InputAccessibilityService
 import com.bettergi.pocket.input.SwipeMethod
 import com.bettergi.pocket.input.SwipeTestRunner

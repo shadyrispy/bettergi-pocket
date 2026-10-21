@@ -24,6 +24,13 @@ import org.opencv.core.CvType
 import org.opencv.core.Mat
 import org.opencv.core.Rect
 import org.opencv.imgcodecs.Imgcodecs
+import com.bettergi.pocket.scan.flows.runArtifactSteps
+import com.bettergi.pocket.scan.flows.runCharacterSteps
+import com.bettergi.pocket.scan.flows.runCharCalibrateSteps
+import com.bettergi.pocket.scan.flows.runEquipSteps
+import com.bettergi.pocket.scan.flows.runLockSteps
+import com.bettergi.pocket.scan.flows.runSetFilterCalibrateSteps
+import com.bettergi.pocket.scan.flows.runWeaponSteps
 
 /**
  * ★ Stage 3.3 拆分地图（2026-10-01）：ScanEngine 曾 8592 行，现按域拆出（均为**扩展函数**，
@@ -162,8 +169,38 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     }
 
     suspend fun run() {
+        runPreamble()
+        // ★ simple 分支（spec §1/§4，2026-10-07）：DSL 运行时已下线 —— 按 flowName 分派到
+        //   原生步序（weapon/artifact/character/lock/equip + 两条标定流；dict/vars/步序常量
+        //   已由 scan/flows/* 携带）。未知名字回落 artifact_scan（与 ScriptRunner 同口径）。
+        when (flowName) {
+            "weapon_scan" -> runWeaponSteps()
+            "artifact_scan" -> runArtifactSteps()
+            "character_scan" -> runCharacterSteps()
+            "artifact_lock" -> runLockSteps()
+            "auto_equip" -> runEquipSteps()
+            "char_calibrate" -> runCharCalibrateSteps()
+            "setfilter_calibrate" -> runSetFilterCalibrateSteps()
+            else -> {
+                Log.w(TAG, "unknown flow '$flowName'; default to artifact_scan")
+                runArtifactSteps()
+            }
+        }
+        runPostamble()
+    }
+
+    /**
+     * run() 的**前半段**（simple 分支抽出，一字未改）：计时/观察计数复位、PerfProbe.reset、
+     * §15 流程前置归位（returnHome）。原生入口（runWeaponScanNative 等）与 JSON 路径共用。
+     *
+     * @param returnHomeOverride 原生流程的显式归位声明（null = 读 flowJson.returnHome，JSON 路径）。
+     *   标定流 char_calibrate 原 flow 显式 `returnHome:false`、setfilter_calibrate 未声明
+     *   （真机启动路径默认 true）—— 原生层以此参数平移该语义。
+     */
+    internal suspend fun runPreamble(returnHomeOverride: Boolean? = null) {
         tmStartMs = clock()
         tmCells = 0; tmPages = 0; tmNavMs = 0; tmPanelMs = 0; tmSettleMs = 0
+        RollSolver.resetMissCount() // P0-B：solver 未解计数随 run 复位（同观察类计数口径）
         // ★ 2026-09-24：观察类计数在此复位。它们的 KDoc 一直写着"随 run 重置"，但此前**没有任何复位点**
         //   ⇒ 同进程连跑两轮时第二轮的 `scan finished` 摘要会把上一轮的数一起算进去。
         dupRevisits = 0; dupRevisitRecovered = 0; pageFreezeAbandoned = 0; swallowedClickRetries = 0
@@ -183,7 +220,8 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         // §15 流程前置归位：GOODScanner `GenshinGameController::return_to_main_ui` 同思想
         // （循环点返回直至主界面），各流程启动前统一回到 game_home，避免残留弹窗/界面错位。
         // 默认 false：仅 ScriptRunner 真机启动路径显式开启（干跑单测不注入 → 不产生归位点击/取帧）
-        if (flowJson.optBoolean("returnHome", false)) {
+        val returnHome = returnHomeOverride ?: flowJson.optBoolean("returnHome", false)
+        if (returnHome) {
             val tHome = System.nanoTime()
             try {
                 returnToHome()
@@ -194,15 +232,13 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 PerfProbe.addStep("returnToHome", System.nanoTime() - tHome)
             }
         }
-        val steps = flowJson.getJSONArray("steps")
-        for (i in 0 until steps.length()) {
-            val step = steps.getJSONObject(i)
-            // `planSummary` 是结果契约的出口，不能被 stopRequested 跳过：flow 用
-            // `stopWhen planRemaining == 0` 正常收尾、以及回卷止扫/安全中止都会置该标志，
-            // 原先一 break 就连汇总都不出 ⇒「全部达成」与「什么都没报」在结果上同形。
-            if (vars.stopRequested && step.optString("do") != "planSummary") break
-            executeStep(step)
-        }
+    }
+
+    /**
+     * run() 的**后半段**（simple 分支抽出，一字未改）：endConditions 的 total 核对、
+     * `scan finished` 摘要行、probe 行、listener.onFinished。原生入口与 JSON 路径共用。
+     */
+    internal suspend fun runPostamble() {
         // endConditions：total 核对。
         // ★ A10：对账口径必须与 pagedGrid 的「件数达标」判据**同源**（那边就是三者之和）。
         //   单轮扫描只有一个 flow 域的容器在增长（weapon_scan 只进 resultsWeapons、artifact_scan
@@ -258,6 +294,9 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 // ★ #104：只观测、已照常入库 —— 对账"多 N 件"时先看这个数，别把它算成丢件或真多出来的装备
                 (if (weaponOverlapRepeats > 0) "武器重叠重读=${weaponOverlapRepeats}件(已入库) " else "") +
                 "页级冻结放弃=${pageFreezeAbandoned}格 未知套装=${unknownSetPieces}件 " +
+                // ★ P0-B（2026-10-08）：solver 不可解率观测 —— >0 ⇒ 有件按"原样导出"走（roll 未解出），
+                //   持续 >0 就是补图像级重试链的依据（GS 对齐 P0-2，见 simple-conversion-spec §3.6）。
+                (if (RollSolver.missCount > 0) "roll未解=${RollSolver.missCount}件 " else "") +
                 // ★ #156：身份未解析的位数（照常入库、导出无 key）。>0 就说明昵称表又漏人了，
                 //   对账侧会同时报"多 N 条未解析 + 缺 N 个真角色"。
                 "未解析身份=${charUnresolved}位 " +
@@ -284,90 +323,6 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         //   没有这一对，"这一轮慢"就分不清是代码慢还是中途被 EMUI 压了频。
         Log.i(TAG, "probe ${PerfProbe.summary()} | sigSamples=$tmSigSamples | ${CpuTelemetry.snapshot()}")
         listener.onFinished(reason)
-    }
-
-    internal suspend fun executeStep(step: JSONObject) {
-        // 只读探针：顶层步骤按类型累计（与 executeVisitStep 同法）。真分发在 executeStepInner。
-        val op = step.getString("do")
-        val t0 = System.nanoTime()
-        try {
-            executeStepInner(step, op)
-        } finally {
-            PerfProbe.addStep("top:$op", System.nanoTime() - t0)
-        }
-    }
-
-    private suspend fun executeStepInner(step: JSONObject, op: String) {
-        // §13：埋点打在原语分发层——加锁/装备/角色流程接 runner 后自动继承，无需各流程另写
-        RecognitionLog.log(logTag, RecognitionLog.Level.I, "步骤 $op")
-        when (op) {
-            "enterScreen" -> enterScreen(step)
-            "clicks" -> step.optJSONArray("chain")?.let { arr ->
-                for (i in 0 until arr.length()) clickChainEntry(arr.getString(i))
-            } ?: Log.w(TAG, "clicks: 缺 chain")
-            "dualStateButton" -> dualStateButton(step)
-            "filterReset" -> filterReset(step)
-            "assertScreen" -> assertScreen(step)
-            "readConstellation" -> readConstellation(step)
-            "readCount" -> readCount(step)
-            "pagedGrid" -> pagedGrid(step)
-            "dialog" -> dialog(step)
-            "ocrWithRetry" -> ocrWithRetry(step)
-            "navigate" -> navigate(step)
-            "foreach" -> foreach(step)
-            "rosterFind" -> rosterFind(step)
-            "setFilter" -> setFilter(step)
-            "clickSlotTab" -> clickSlotTab(step)
-            "planMatch" -> planMatch(step)
-            "planDone" -> planDone(step)
-            "planSummary" -> planSummary()
-            "exit" -> exitStep(step)
-            "verify" -> verify(step)
-            "emit" -> listener.onProgress("emit", vars.snapshot())
-            "notify" -> notifyStep(step)
-            else -> {
-                Log.w(TAG, "unknown step '$op', skipped")
-                RecognitionLog.log(logTag, RecognitionLog.Level.W, "未知原语 $op 已跳过")
-            }
-        }
-    }
-
-    /**
-     * `notify` 原语（P4）：脚本随时推一条重点信息给用户。
-     *
-     * ```json
-     * { "do": "notify", "level": "warn", "text": "已入库 $total 件，重复过多提前结束" }
-     * ```
-     * `text` 支持 `$var` 插值（复用 DSL 既有的「`$` 前缀 = 引用」约定）；
-     * 可用的变量 = [ScanVars.snapshot] 里的字段（total / level / rarity / locked / favorited /
-     * crafted / gridLocked / charDupStreak / stopRequested），未知名字替换成空串。
-     */
-    internal fun notifyStep(step: JSONObject) {
-        val raw = step.optString("text", "")
-        if (raw.isBlank()) return
-        val level = step.optString("level", "info").lowercase()
-        val text = interpolateVars(raw)
-        RecognitionLog.log(logTag, RecognitionLog.Level.I, "notify[$level] $text")
-        listener.onNotice(level, text)
-    }
-
-    /** `$name` → 会话变量值；非标量转 JSON 串；未知名字 → 空串。 */
-    private fun interpolateVars(raw: String): String {
-        if (!raw.contains('$')) return raw
-        val snapshot = vars.snapshot()
-        val sb = StringBuilder()
-        var i = 0
-        while (i < raw.length) {
-            val c = raw[i]
-            if (c != '$') { sb.append(c); i++; continue }
-            var j = i + 1
-            while (j < raw.length && (raw[j].isLetterOrDigit() || raw[j] == '_')) j++
-            val name = raw.substring(i + 1, j)
-            if (name.isEmpty()) { sb.append('$'); i++; continue }
-            sb.append(snapshot[name]?.toString() ?: "")
-            i = j
-        }
-        return sb.toString()
     }
 
     // ---- #1 enterScreen：入口链跳转 + anchor OCR 断言（重试 3 次）----

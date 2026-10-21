@@ -12,8 +12,6 @@ class ScanVars {
     var rarity: Int = -1
     var locked: Boolean? = null
     var favorited: Boolean? = null
-    /** ocrWithRetry 命中写入（fuzzy 词典匹配 key）。 */
-    var ocrMatch: String? = null
     /** vote as=curLock 快照（artifact_lock ifMatch 的 verify toggle 依据）。 */
     var curLock: Boolean? = null
     /**
@@ -84,6 +82,23 @@ class ScanVars {
      * 处理完加进本集合 ⇒ 既没有"重走"，也没有"累积冲突"，耗时还从 N× 降到 1×。
      */
     val consumedPlanIndexes: MutableSet<Int> = mutableSetOf()
+
+    /**
+     * ★ 缺席证明门禁（P0-A，2026-10-08）：lock 流程**异常中止**（enterScreen/assertScreen
+     * 未达、面板 profile 损坏等 ScanAbortedException/IllegalStateException 路径）。
+     * 置位后 `planSummary` 把未绑定项记 **Skipped** 而不是 NotFound —— 用户据此区分
+     * "这件确实不在背包里"（NotFound，可重造方案）与"流程没走完，这一轮结果不可信"
+     * （Skipped，需要重跑）。正常止扫（stopWhen/maxPages/网格到底）**不置位** ⇒
+     * 走查完整时的缺席仍是 NotFound（equip 侧 manageStatusOf 同款语义，GS 对齐 P0）。
+     */
+    var lockPlanAborted: Boolean = false
+
+    /**
+     * ★ 筛选部分命中（P0-C，2026-10-08）：`setFilter` 勾上了部分目标（selected>0 且
+     * pending 非空）⇒ 剩余目标在"看不见"的区段里（筛选遮蔽）。置位后 `planSummary`
+     * 把未绑定项记 **Skipped**（需要清筛重跑），不再谎报 NotFound。
+     */
+    var lockFilterPartial: Boolean = false
 
     /** 本格绑定到的计划项下标（-1 = 未命中）。由 `planMatch` 写入，`planDone` 消费。 */
     var planMatchedIndex: Int = -1

@@ -41,8 +41,6 @@ import androidx.core.graphics.drawable.DrawableCompat
 import androidx.core.widget.ImageViewCompat
 import com.bettergi.pocket.R
 import com.bettergi.pocket.bilibili.BilibiliSpaceOpener
-import com.bettergi.pocket.dsl.FlowValidator
-import com.bettergi.pocket.dsl.ScriptIcons
 import com.bettergi.pocket.dsl.ScriptStore
 import com.bettergi.pocket.feature.autopick.AutoPickFeature
 import com.bettergi.pocket.feature.autoskip.AutoSkipEvents
