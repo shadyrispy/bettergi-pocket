@@ -23,11 +23,12 @@ import java.util.concurrent.atomic.AtomicInteger
  * ScriptRunner 抽出的**纯 JVM** 逻辑单测（轨 D1：A13/A14/A15，2026-09-30）。
  *
  * ⚠️ 范围说明：ScriptRunner 本体硬依赖 Context / Handler(Looper) / FrameSource 等 Android
- * 运行时，JVM 单测构造不出可用实例 ⇒ 三个工单的可测核心被抽成 ScriptRunner.kt 文件内的
+ * 运行时，JVM 单测构造不出可用实例 ⇒ 各工单的可测核心被抽成 ScriptRunner.kt 文件内的
  * 无 Android 依赖单元，本文件直接驱动：
  * - A14 游离点击 → [MainDispatchGate]（超时取消标记 / 原子终结权 CAS）
  * - A15 双引擎 → [ScanLifecycle]（单飞状态机：忙拒绝、有界 join、超时放行）
  * - A13 CME → [ResultsSnapshot]（有界重试快照）
+ * - #197 现问有界重试 → [StartGateLiveAsk]（重试次数 / 总预算截断 / 落回缓存计数）
  *
  * 「exportNow 整体 runCatching 不杀线程」无法在 JVM 稳定构造引擎桩（engine 是 ScanEngine
  * 具体类，构造需 assets/OCR 管线）——验证方式：真机 DEBUG_SCAN_FLOW 注入挂死触发看门狗
@@ -205,6 +206,161 @@ class ScriptRunnerTest {
             }
             assertEquals(listOf(1), out)
             assertTrue(Thread.currentThread().isInterrupted) // 标记保留（不吞）
+        } finally {
+            Thread.interrupted() // 清标记，避免污染同线程后续测试
+        }
+    }
+
+    // ---- #197：起扫闸现问的有界重试 + 「落回缓存」计数 ----
+    //
+    // 实测前提（不许推翻，2026-10-04 华为 EML-AL00）：点 ▶ 那一刻现问恒为 null
+    // （`:a11y` 报 `rootInActiveWindow 为空（焦点切换中）`），旧实现问一次就落回事件缓存。
+    // 「焦点切换中」是会自己好的瞬态 ⇒ 判定之前重试；fail-open 照旧开着，但回退要可数。
+    //
+    // 负对照（打算怎么证明旧实现会红）：旧实现是 `val live = genshinActiveNow()` ——
+    //   ① 只调探针**一次**，且没有重试/预算/计数这些概念。本组用例把探针做成
+    //      「第一次 null、第二次给值」的桩，并断言 `calls==2` / `attempts==2` / `live==true`：
+    //      旧实现调一次就返回 null ⇒ 三条断言同时红（第二次的真值旧实现永远拿不到）。
+    //   ② `StartGateLiveAsk` / `cacheFallbacks` 在旧代码里根本不存在 ⇒ 旧实现连
+    //      `compileTestKotlin` 都过不去（红在编译期，比跑起来再红更强）。
+    //   ③ 若有人把旧逻辑（问一次就落回缓存、不计数）原样套进新签名：
+    //      `ask all null ⇒ attempts==ASK_ATTEMPTS_MAX 且 cacheFallbacks+1` 这条会双双红。
+    // 跑法（由统一门禁执行，本次不跑 Gradle）：
+    //   ./gradlew :app:testDebugUnitTest --tests '*ScriptRunnerTest*'
+
+    /** 桩时钟/桩睡眠：耗时全部由注入的 fakeNow 推进，用例不真等 200ms。 */
+    private class FakeClock {
+        var now = 0L
+            private set
+        val sleeps = ArrayList<Long>()
+        val clock: () -> Long = { now }
+
+        /** 记一次重试间隔（生产侧对应 Thread.sleep）。 */
+        fun sleep(ms: Long) {
+            sleeps.add(ms)
+            now += ms
+        }
+
+        /** 模拟「现问这一次本身花了 ms」——预算用例用它制造慢探针。 */
+        fun advance(ms: Long) {
+            now += ms
+        }
+    }
+
+    @Test
+    fun `live ask takes the second answer when the first is null`() {
+        val calls = AtomicInteger(0)
+        val fake = FakeClock()
+        val before = StartGateLiveAsk.cacheFallbacks
+        val out = StartGateLiveAsk.ask(
+            probe = { if (calls.incrementAndGet() == 1) null else true }, // 瞬态一次，第二次焦点已落
+            sleep = fake::sleep,
+            clockMs = fake.clock,
+        )
+        assertEquals(true, out.live)
+        // ★ 旧实现红点：它只问一次（calls==1、live==null），第二次的答案永远用不上
+        assertEquals(2, calls.get())
+        assertEquals(2, out.attempts)
+        assertEquals(listOf(StartGateLiveAsk.ASK_INTERVAL_MS), fake.sleeps) // 只睡了一次就停
+        assertEquals("第2次问到(200ms)", out.describe())
+        // 问到了就不算回退 ⇒ 观察计数不动
+        assertEquals(before, StartGateLiveAsk.cacheFallbacks)
+    }
+
+    @Test
+    fun `live ask that hits on the first shot does not sleep at all`() {
+        val calls = AtomicInteger(0)
+        val fake = FakeClock()
+        val out = StartGateLiveAsk.ask(probe = { calls.incrementAndGet(); true }, sleep = fake::sleep, clockMs = fake.clock)
+        assertEquals(true, out.live)
+        assertEquals(1, calls.get())
+        assertTrue(out.firstShot)
+        assertEquals(emptyList<Long>(), fake.sleeps)
+        assertEquals("一次问到(0ms)", out.describe())
+    }
+
+    @Test
+    fun `a non-null answer that says not-genshin is used as-is and never retried`() {
+        // 重试只治"问不到"（null），绝不把"问到但结论不利"磨成"再问几次直到有利"。
+        val calls = AtomicInteger(0)
+        val fake = FakeClock()
+        val out = StartGateLiveAsk.ask(probe = { calls.incrementAndGet(); false }, sleep = fake::sleep, clockMs = fake.clock)
+        assertEquals(false, out.live)
+        assertEquals(1, out.attempts)
+        assertEquals(emptyList<Long>(), fake.sleeps)
+    }
+
+    @Test
+    fun `live ask all null exhausts retries and counts one cache fallback`() {
+        val calls = AtomicInteger(0)
+        val fake = FakeClock()
+        val before = StartGateLiveAsk.cacheFallbacks
+        val out = StartGateLiveAsk.ask(probe = { calls.incrementAndGet(); null }, sleep = fake::sleep, clockMs = fake.clock)
+        assertNull(out.live)
+        // ★ 旧实现红点：只问一次 ⇒ calls==1 / attempts==1；旧代码也没有 cacheFallbacks
+        assertEquals(StartGateLiveAsk.ASK_ATTEMPTS_MAX, out.attempts)
+        assertEquals(StartGateLiveAsk.ASK_ATTEMPTS_MAX, calls.get())
+        assertEquals(before + 1, StartGateLiveAsk.cacheFallbacks) // 「落回缓存」被记了一笔
+        // 快失败路径（华为/BS 实测每次数 ms 就报 null）问满次数上限、只付 (n-1) 个间隔，
+        // 且没被预算截。⚠️ 这几个数**从常数推导**，别再写死 —— 上一版写死 5 次/800ms，
+        // 于是"按实测把 5 降到 2"这件正事会把测试撞红，看起来像改坏了。
+        val n = StartGateLiveAsk.ASK_ATTEMPTS_MAX
+        val expectedMs = (n - 1) * StartGateLiveAsk.ASK_INTERVAL_MS
+        assertEquals(expectedMs, out.elapsedMs)
+        assertTrue("预算必须容得下快失败路径问满", expectedMs <= StartGateLiveAsk.ASK_BUDGET_MS)
+        assertFalse(out.budgetCut)
+        assertEquals("${n}次都没问到(${expectedMs}ms)⇒落回缓存", out.describe())
+    }
+
+    @Test
+    fun `live ask is cut by the total budget before it can burn five slow shots`() {
+        // 单次现问最长可等 1s（:a11y 主线程忙，liveActivePackage 的 latch.await）：桩里让探针自身耗时 500ms
+        val calls = AtomicInteger(0)
+        val fake = FakeClock()
+        val before = StartGateLiveAsk.cacheFallbacks
+        // ⚠️ 这条测的是"预算能截断"这个**机制**，与生产选了几个次数无关 ⇒ 显式传参，
+        //    不去引用 ASK_ATTEMPTS_MAX / ASK_BUDGET_MS（否则调参就等于改测试意图）。
+        val out = StartGateLiveAsk.ask(
+            probe = { calls.incrementAndGet(); fake.advance(500); null },
+            sleep = fake::sleep,
+            clockMs = fake.clock,
+            attemptsMax = 5,
+            intervalMs = 200L,
+            budgetMs = 1_200L,
+        )
+        assertTrue("budget must cut the loop: attempts=${out.attempts}", out.attempts < 5)
+        assertEquals(2, out.attempts)
+        assertTrue(out.budgetCut)
+        assertTrue("worst case must stay bounded: ${out.elapsedMs}ms", out.elapsedMs <= 1_200L)
+        assertEquals(1200L, out.elapsedMs)
+        assertEquals(before + 1, StartGateLiveAsk.cacheFallbacks) // 预算截断也是"没问到⇒落回缓存"
+        assertEquals("2次都没问到(1200ms/预算截断)⇒落回缓存", out.describe())
+    }
+
+    @Test
+    fun `each exhausted live ask adds exactly one fallback count`() {
+        // 计数器是本进程累计（起跑闸每次起跑各打一行日志，n 与行数之比即回退率）——一次起跑只 +1
+        val before = StartGateLiveAsk.cacheFallbacks
+        val fake = FakeClock()
+        repeat(3) { StartGateLiveAsk.ask(probe = { null }, sleep = fake::sleep, clockMs = fake.clock) }
+        assertEquals(before + 3, StartGateLiveAsk.cacheFallbacks)
+    }
+
+    @Test
+    fun `interrupt during retry sleep stops asking without swallowing the flag`() {
+        val calls = AtomicInteger(0)
+        val before = StartGateLiveAsk.cacheFallbacks
+        val out = StartGateLiveAsk.ask(
+            probe = { calls.incrementAndGet(); null },
+            attemptsMax = 3,
+            sleep = { throw InterruptedException("simulated cancel") },
+        )
+        try {
+            assertNull(out.live)
+            assertEquals(1, out.attempts) // 被打断后不补试剩余次数
+            assertEquals(1, calls.get())
+            assertEquals(before + 1, StartGateLiveAsk.cacheFallbacks)
+            assertTrue(Thread.currentThread().isInterrupted) // 标记保留（与 ResultsSnapshot 同口径）
         } finally {
             Thread.interrupted() // 清标记，避免污染同线程后续测试
         }

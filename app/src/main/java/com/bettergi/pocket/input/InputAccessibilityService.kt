@@ -19,6 +19,7 @@ import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -262,13 +263,28 @@ class InputAccessibilityService : AccessibilityService() {
          * 真正的理由是现问读的是 `rootInActiveWindow`（**持输入焦点**的窗口根），而悬浮球/面板是
          * NOT_FOCUSABLE 的 TYPE_ACCESSIBILITY_OVERLAY（见 [activePackageOnMain]），成不了活动窗口。
          * "面板挡住识别区"是另一件事，归 [selfUiCover] 管。
+         *
+         * ★ #197（2026-10-04 华为 EML-AL00 实测）：这台机器上点 ▶ 的那一刻现问**恒为 null**
+         * （三轮面板起跑都是「现问=null 缓存=true」，:a11y 侧每次报 `rootInActiveWindow 为空（焦点切换中）`）
+         * —— 现问只在小米 15/HyperOS 那种"缓存被角标改写"的场景才真正起作用，在这台机器上它只是"每次都问不到"。
+         *
+         * ⚠️ **本函数固定是单次直读，不要在这里面加重试**：起跑闸的有界重试住在
+         * `scan/ScriptRunner.StartGateLiveAsk`（只在起跑那一次上重试）。本函数还被 [allowInject]
+         * 每次点击/滑动调用（热路径），重试下沉到这里等于给每次注入都加 200ms×N。
          */
         fun activeWindowPackage(): String? {
             if (instance != null) return liveActivePackage()
             return remoteCall(A11yProtocol.M_ACTIVE_WINDOW)?.getString(KEY_ACTIVE_PACKAGE)
         }
 
-        /** 起扫闸用：现问活动窗口是不是原神。`null` = 现问不出来（交给事件缓存的结论）。 */
+        /**
+         * 起扫闸用：现问活动窗口是不是原神。`null` = 现问不出来（交给事件缓存的结论）。
+         *
+         * 调用方（`ScriptRunner.startScan`）拿到 null **不是**"结论未知就不许跑"：fail-open 保持
+         * 开着（硬关会把华为 EML-AL00 上所有起跑全部拒掉，见 [activeWindowPackage] 的 #197 实测），
+         * 改为落回 [isGenshinInForeground] 的事件缓存并**计数**（`StartGateLiveAsk.cacheFallbacks`，
+         * 打在 `起扫前台闸:` 那行决策日志里），让"这台机器一直在吃缓存"变得可见。
+         */
         fun genshinActiveNow(): Boolean? {
             val live = activeWindowPackage() ?: return null
             return GenshinPackages.isGenshinPackage(live)
@@ -297,18 +313,51 @@ class InputAccessibilityService : AccessibilityService() {
         }
 
         private fun activePackageOnMain(service: AccessibilityService): String? = try {
-            // 用 rootInActiveWindow 而不是 service.windows：后者在 Kotlin 里会解析到
-            // Context.getWindows()（返回 android.view.Window，没有包名），拿不到我们要的东西。
-            // rootInActiveWindow 语义就是"当前持输入焦点的窗口根节点"，自家悬浮球/面板是
+            // rootInActiveWindow 优先：语义就是"当前持输入焦点的窗口根节点"，自家悬浮球/面板是
             // NOT_FOCUSABLE ⇒ 焦点始终留在游戏上，不会被自己骗到。
             service.rootInActiveWindow?.packageName?.toString()?.takeIf { it.isNotEmpty() }
+                ?: activePackageFromWindows(service)
                 ?: run {
-                    Log.d(TAG, "现问活动窗口：rootInActiveWindow 为空（焦点切换中）")
+                    // 焦点正在切、窗口根还没落 —— 瞬态，会自己好（#197：起跑闸为此做有界重试，
+                    // 见 scan/ScriptRunner.StartGateLiveAsk；本函数本身仍是单次直读）。
+                    Log.d(TAG, "现问活动窗口：rootInActiveWindow 为空，windows 也没给出活动应用窗口")
                     null
                 }
         } catch (e: Exception) {
             Log.w(TAG, "现问活动窗口失败：${e.message}")
             null
+        }
+
+        /**
+         * 第二条现问途径：`AccessibilityService.getWindows()`（API 21，本服务 capability=32
+         * 已含 RETRIEVE_WINDOW_CONTENT）。**只在 rootInActiveWindow 为空时兜底**。
+         *
+         * 为什么需要它（2026-10-05 小米15 / HyperOS 3 / Android 16 实测）：起跑时闸门每次都拿到
+         * `rootInActiveWindow 为空`，而事件缓存又被 HyperOS「游戏加速」(`com.miui.securitycenter`)
+         * 在游戏已前台**之后**补发的那条 WINDOW_STATE_CHANGED 顶成 false ⇒ 现问与缓存双双失效，
+         * 起跑被永久拒（`isGenshinInForeground=false`，重试 2 次全 null）。`windows` 不依赖焦点
+         * 落点，此刻仍有完整窗口列表 ⇒ 这是唯一还能问出答案的口子。
+         *
+         * ⚠️ 公开 SDK 上 `AccessibilityWindowInfo` **没有** `getPackageName()` / `isActivity()`
+         *   （android-36.1 的 android.jar 实测只有 getType/isFocused/isActive/getRoot/getTitle，
+         *   前两个是 @hide）⇒ 包名只能经 `getRoot()?.packageName` 拿，"是不是 activity 窗口"
+         *   用 `isActive()` 近似。
+         * 只取 `TYPE_APPLICATION` ⇒ 自家 NOT_FOCUSABLE 悬浮层（TYPE_ACCESSIBILITY_OVERLAY）
+         * 天然被排除，不破坏"不会被自己骗到"这条性质。
+         */
+        private fun activePackageFromWindows(service: AccessibilityService): String? {
+            val ws: List<AccessibilityWindowInfo> = service.getWindows() ?: return null
+            // 一次性把窗口清单打出来：这条判据到底选没选对人，要靠它验，不靠推理。
+            Log.d(
+                TAG,
+                "现问 windows 兜底：" + ws.joinToString(" | ") {
+                    "type=${it.type} act=${it.isActive} foc=${it.isFocused} " +
+                        (it.getRoot()?.packageName?.toString() ?: "无根节点")
+                }
+            )
+            val app = ws.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+            return (app.firstOrNull { it.isActive } ?: app.firstOrNull { it.isFocused } ?: app.firstOrNull())
+                ?.getRoot()?.packageName?.toString()?.takeIf { it.isNotEmpty() }
         }
 
         fun isConnected(): Boolean {

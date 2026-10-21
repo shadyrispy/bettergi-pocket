@@ -775,6 +775,18 @@ internal suspend fun ScanEngine.snapTraverse(
             frame.release()
         }
         if (reachedEnd(thumb, lastThumb)) {
+            // ★ #213（2026-10-04）：这条出口**就是**"网格到底"，必须置 gridExhausted。
+            //   以前这里不置 ⇒ `ScanControlDomain:542` 那道 foreach 守卫（要求
+            //   `gridExhausted && !matchHit`）**永不触发** —— 那正是 #141 错装事故的成因
+            //   （见本文件 237 行附近记的那次：peek 消失收尾 ⇒ 照读「替换」照点 ⇒ 把屏幕上
+            //   碰巧选中的 Lv0 角斗士死之羽装给了目标角色，回执还写 NotFound）。
+            //   #141 当时是把守卫改成"不挂 gridExhausted"来兜底的（`isEquipAction && !matchHit`），
+            //   那是对的**但不是这条数据的正确值**：到底了就该说到底。
+            //   顺带让 `ScanEngine` 的总数核对覆盖这条收尾（本流程走 auto_equip，
+            //   `vars.total` 通常没读到 ⇒ 那条今天仍不会响；真实收益在守卫侧）。
+            //   ⚠️ 只在 reachedEnd 这一处置：循环另两种出口（SNAP_MAX 轮数兜底 / stopRequested）
+            //   都是**中途放弃**，不是到底，置 true 会把守卫骗开。
+            vars.gridExhausted = true
             Log.i(TAG, "snap[$gridKey]: peek 消失（指纹不变）→ 补点遮挡槽残余卡 → 停止（已遍历 $visited）")
             // 补点：遮挡槽残余卡（peekCols 第 2 列起）
             for (i in 1 until peekCols.length()) {
@@ -966,7 +978,7 @@ internal suspend fun ScanEngine.parseCharacterPanel(step: JSONObject, ctx: ScanE
         while ((key == null || level <= 0 || level < CHAR_LEVEL_MIN_PLAUSIBLE) && nTry < CHAR_NAME_MAX_TRIES) {
             nTry++
             delay(CHAR_NAME_REREAD_MS)
-            val f2 = runCatchingCancellable { freshFrame() }.getOrNull() ?: break
+            val f2 = runCatchingCancellable { settleFrame() }.getOrNull() ?: break
             // ★ A7/G：OCR 引擎不可用 ≠ 读失败。「重读失败 ⇒ break 放弃该格」只该作用于
             //   真读失败，引擎没就绪必须 loud（放行见下方 catch 链），否则静默出脏数据。
             val t2 = try {
@@ -1093,7 +1105,7 @@ internal suspend fun ScanEngine.readConstellation() {
         var polls = 0
         for (poll in 0 until CONSTELLATION_POLL_MAX) {
             if (poll > 0) delay(CONSTELLATION_POLL_GAP_MS)
-            val f = if (poll == 0) frame else runCatchingCancellable { freshFrame() }.getOrNull() ?: break
+            val f = if (poll == 0) frame else runCatchingCancellable { settleFrame() }.getOrNull() ?: break
             try {
                 val s = sampleOnce(f)
                 polls++
@@ -1171,7 +1183,7 @@ internal suspend fun ScanEngine.readConstellation() {
  */
 internal suspend fun ScanEngine.charPanelLooksWrongPage(): Boolean {
     val g = ocr ?: return false
-    val f = runCatchingCancellable { freshFrame() }.getOrNull() ?: return false
+    val f = runCatchingCancellable { settleFrame() }.getOrNull() ?: return false
     return try {
         val rects = listOf(
             profile.rect("panels.char_profile.bottomBar"),
@@ -1257,7 +1269,7 @@ internal suspend fun ScanEngine.readTalent() {
         if (attempts > 0 && charTalents.none { it <= 0 } && !talentSamplesTied(samples)) break
         attempts++
         delay(TALENT_REREAD_DELAY_MS)
-        val f2 = runCatchingCancellable { freshFrame() }.getOrNull() ?: break
+        val f2 = runCatchingCancellable { settleFrame() }.getOrNull() ?: break
         // ★ A7/G：重读循环的「读失败 ⇒ continue」只该作用于真读失败；引擎不可用必须 loud。
         val t2 = try {
             gateway.readRois(f2, rects)
@@ -1339,7 +1351,7 @@ internal suspend fun ScanEngine.readTalent() {
                 r3.right,
                 r3.bottom + pitch,
             )
-            val f3 = runCatchingCancellable { freshFrame() }.getOrNull()
+            val f3 = runCatchingCancellable { settleFrame() }.getOrNull()
             if (f3 != null) {
                 val t3 = runCatchingCancellable { gateway.readRois(f3, listOf(shifted)) }.getOrNull()?.firstOrNull()
                 f3.release()

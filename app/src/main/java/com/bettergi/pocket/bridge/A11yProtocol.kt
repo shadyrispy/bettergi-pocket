@@ -51,6 +51,12 @@ object A11yProtocol {
      * 现问活动窗口包名。**单独一条 method，不并进 [M_STATUS]**：
      * 状态读是高频的（管理器页显示、每次派发前的连接自检都读），而现问要在 :a11y 主线程上做
      * 节点查询、binder 线程等它最多 1s —— 挂在 status 上等于让每次状态读都可能付这一秒。
+     *
+     * ★ #197（2026-10-04）调用频次口径：起跑闸会**有界重试**这条（至多 5 次、间隔 200ms、
+     * 总预算 1200ms，参数与实测依据见 `scan/ScriptRunner.StartGateLiveAsk`），注入闸
+     * `InputAccessibilityService.allowInject` 仍是每次一单直读。也就是最坏是"一次起跑 5 条"，
+     * 不会变成高频轮询；重试的动机是华为 EML-AL00 上点 ▶ 那刻 rootInActiveWindow 恒空
+     * （焦点切换中的瞬态），不是因为"多问几次更安全"。
      */
     const val M_ACTIVE_WINDOW = "active_window"
     const val M_CLICK = "click"

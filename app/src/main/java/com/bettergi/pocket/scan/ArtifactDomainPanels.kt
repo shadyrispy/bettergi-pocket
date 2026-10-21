@@ -5,6 +5,7 @@ import android.util.Log
 import org.json.JSONArray
 import org.json.JSONObject
 import org.opencv.core.Mat
+import com.bettergi.pocket.log.RecognitionLog
 import com.bettergi.pocket.scan.ScanEngine.Companion.TAG
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_SHOT_JPEG_QUALITY
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_SHOT_MAX_PER_RUN
@@ -16,7 +17,11 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_FP_DUP_WAIT_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_FP_POLL_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_RAW_DUMP
 import com.bettergi.pocket.scan.ScanEngine.Companion.STAR_GOLD_THRESHOLD
+import com.bettergi.pocket.scan.ScanEngine.Companion.STOP_REASON_MATERIAL
 import com.bettergi.pocket.scan.ScanEngine.Companion.STOP_MARKER_RARITY
+import com.bettergi.pocket.scan.ScanEngine.Companion.ARTIFACT_STOP_NAMES
+import com.bettergi.pocket.scan.ScanEngine.Companion.WEAPON_FORGING_STOP_NAMES
+import com.bettergi.pocket.scan.ScanEngine.Companion.hitsStopName
 import com.bettergi.pocket.scan.ScanEngine.Companion.WEAPON_PANEL_DELAY_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.WEAPON_SAME_IDENTITY_CAP
 import com.bettergi.pocket.scan.ScanEngine.Companion.DEFAULT_SET_DICT
@@ -289,7 +294,7 @@ internal suspend fun ScanEngine.parsePanel(step: JSONObject, ctx: ScanEngine.Cel
             while (waited < fpWaitMs) {
                 delay(PANEL_FP_POLL_MS)
                 waited += PANEL_FP_POLL_MS
-                val f2 = runCatchingCancellable { freshFrame() }.getOrNull() ?: break
+                val f2 = runCatchingCancellable { settleFrame() }.getOrNull() ?: break
                 val fp2 = PanelFingerprint.capture(f2, fpRects)
                 if (fp2 != null && !PanelFingerprint.same(fp2, panelFpSnapshot)) {
                     Log.i(TAG, "面板指纹：等 ${waited}ms 后新面板就绪（陈旧帧已修复）⇒ 换用新帧解析")
@@ -368,6 +373,23 @@ internal fun ScanEngine.evaluatePanelMatch(step: JSONObject): Boolean {
     return hit
 }
 
+/**
+ * 命中**素材停止标识** ⇒ 置止扫。调用方形如
+ * `hitsStopName(...)?.let { stopAtMaterialMarker(…); return }`（名字命中与否由
+ * [hitsStopName] 回，这里不回值）。#216
+ *
+ * 名单与"为什么必须按名字、为什么不照抄 GOODScanner 的低星武器名单"都写在
+ * [ScanEngine.WEAPON_FORGING_STOP_NAMES] 的 KDoc 里，这里只放执行侧。
+ * 走 `vars.stopReason` 而不是新开计数器：命中即整轮收尾，摘要行 `scan finished: <reason>`
+ * 天然会带出来，多一个字段只会多一个没人看的数。
+ */
+internal fun ScanEngine.stopAtMaterialMarker(kind: String, hit: String, detail: String) {
+    vars.stopRequested = true
+    vars.stopReason = STOP_REASON_MATERIAL
+    Log.i(TAG, "$kind 止扫标识命中「$hit」⇒ 停止扫描（素材不是装备）$detail")
+    RecognitionLog.log(logTag, RecognitionLog.Level.I, "$kind 止扫标识「$hit」⇒ 停止")
+}
+
 internal suspend fun ScanEngine.parseWeaponPanel(frame: Mat, ocr: OcrGateway, dict: JSONObject? = null) {
     val yShift = 0
     // ★ 2026-09-12：**5 次单槽 `readLines` → 1 次批量 `readRois`**（多 ROI 同帧、一次推理）。
@@ -398,6 +420,16 @@ internal suspend fun ScanEngine.parseWeaponPanel(frame: Mat, ocr: OcrGateway, di
             "武器面板原文: " + listOf(pieceName ?: "-", levelText ?: "-", refineText ?: "-", equipText ?: "-")
                 .joinToString(" | "),
         )
+    }
+    // ★★ #216 素材停止标识：走到强化矿就**整轮收尾**。
+    //   放在查词典**之前**：这三条名字本来就不在词典里，走下去只会得到一条
+    //   "not found in mappings.weapons" 的 W 日志（以前每轮固定刷 4 条），
+    //   而那既不是缺件也不是错误 —— 判据混在噪声里就等于没有判据。
+    //   ⚠️ 它必须排在 `rarity<=2` 页级止扫**之后**才被走到 —— 那条已随本单从 flow 里摘掉，
+    //     否则第一个 1★ 武器就把扫描截断，这条标识在这台账号上永远跑不到（死判据）。
+    hitsStopName(pieceName, WEAPON_FORGING_STOP_NAMES)?.let {
+        stopAtMaterialMarker("武器", it, "（page=$curPageNo r${curCellRow}c$curCellCol 原文=${levelText ?: "-"}）")
+        return
     }
     // 词典/模糊开关取自 flow 的 dict.name / dict.fuzzy（weapon_scan 已声明 mappings.weapons + fuzzy=1）
     val nameDict = dict?.optString("name")?.takeIf { it.isNotEmpty() }
@@ -715,6 +747,19 @@ internal suspend fun ScanEngine.parseArtifactPanel(
             )
             return
         }
+    }
+    // ★★ #216 素材停止标识（圣遗物侧）。**必须按名字**：实测「祝圣精华」星带读数是 rarity=4，
+    //   上面 `rarity < STOP_MARKER_RARITY` 那条挡不住它；再往下走会一路撞到
+    //   setKey 反查失败 → "丢弃读失败条目（词条 0 条）" → **交「空读格回读」再点一次**
+    //   （20260925_2244_artifact_64fix.log：page=51/52 global=948 就是这一格，白读白点）。
+    //   位置证据：素材排在列表最末（该轮最后一件真圣遗物是 global=947）⇒ 命中即停是安全的。
+    hitsStopName(pieceName, ARTIFACT_STOP_NAMES)?.let {
+        stopAtMaterialMarker(
+            "圣遗物",
+            it,
+            "（page=$curPageNo r${curCellRow}c$curCellCol rarity=$rarity level=${vars.level}）",
+        )
+        return
     }
     // §14 dict.subStats：OCR 数值吸附到标准档位（rollTable），使导出值与游戏内一致
     dict?.optString("subStats")?.takeIf { it.isNotEmpty() }?.let { subDict ->

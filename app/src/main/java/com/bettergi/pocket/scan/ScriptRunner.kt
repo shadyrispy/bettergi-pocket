@@ -250,14 +250,24 @@ class ScriptRunner(
         //   窗口**，现问不出来才退回缓存；自家面板不会把现问骗走 —— 但理由不是"它不发
         //   window-state"（它发，runlogs 里 27 条 com.bettergi.pocket/…FrameLayout），而是它是
         //   NOT_FOCUSABLE 的 a11y 悬浮窗、成不了 rootInActiveWindow（见 activeWindowPackage 的注释）。
+        // ★ #197（2026-10-04 华为 EML-AL00 实测）：现问从"只问一次"改成**有界重试**，并把
+        //   "问不到就落回缓存"这条降级**变成可见计数**（降级口径一字未改，见下）。
+        //   依据：这台机器三轮面板 ▶ 起跑（10-03 23:16 / 23:25、10-04 08:24）打的都是
+        //   「现问=null 缓存=true」，:a11y 侧每次都报 `rootInActiveWindow 为空（焦点切换中）`
+        //   ⇒ 单次直读 100% 落回缓存。"焦点切换中"是一个会自己好的瞬态，重试是在等它好，
+        //   不是在"多试几次就更安全"。参数与预算的定法见 [StartGateLiveAsk] 的类注释。
+        //   ⚠️ 不关 null fail-open：硬关掉会把这台机器上**所有**起跑全部拒掉（现问恒 null）。
         val selfUi = InputAccessibilityService.ourActivityOnTop()
         val cached = InputAccessibilityService.isGenshinInForeground()
-        val live = InputAccessibilityService.genshinActiveNow()
+        val ask = StartGateLiveAsk.ask { InputAccessibilityService.genshinActiveNow() }
+        val live = ask.live
         val detected = live ?: cached
         val foreground = if (selfUi == true) false else detected
         Log.i(
             TAG,
-            "起扫前台闸: isGenshinInForeground=$foreground flow=$flowName（现问=$live 缓存=$cached 自家界面=$selfUi）",
+            "起扫前台闸: isGenshinInForeground=$foreground flow=$flowName" +
+                "（现问=$live 缓存=$cached 自家界面=$selfUi 现问重试=${ask.describe()} " +
+                "回退累计=${StartGateLiveAsk.cacheFallbacks}）",
         )
         if (foreground == false) {
             listener.onFinished("not_in_genshin")
@@ -733,5 +743,142 @@ internal class ScanLifecycle(private val stopJoinTimeoutMs: Long) {
             if (job === j) job = null
         }
         return if (joined) StopOutcome.Settled else StopOutcome.LooseEnd
+    }
+}
+
+/**
+ * #197（2026-10-04）：起扫闸**现问**的有界重试 + 回退计数。
+ * 纯 JVM（探针/睡眠/时钟全部注入，无 Android 依赖）⇒ ScriptRunnerTest 直接驱动桩探针。
+ *
+ * ### 为什么要重试（实测依据，不要写成"更严格=更安全"）
+ * 华为 EML-AL00 三轮面板 ▶ 起跑（2026-10-03 23:16 / 23:25、10-04 08:24）打的都是
+ * 「现问=null 缓存=true」，`:a11y` 侧每次都报 `现问活动窗口：rootInActiveWindow 为空（焦点切换中）`
+ * —— 这台机器**单次直读 100% 落回缓存**。`rootInActiveWindow` 为空是"焦点正在切、还没落"的
+ * **瞬态**，它会在下一次焦点回调后自己好；旧实现把瞬态当成了终态，问一次就放弃。
+ * 重试买的是"等这个瞬态过去"，不是"多问几次更稳妥"。现问真正不可替代的场景是小米 15 /
+ * HyperOS 那条角标改写缓存的坑（#200）——⚠️ **那条路径至今没被量过**（小米 15 一直离线），
+ * "那边一次就能问到值"是推断，不是实测。
+ *
+ * ★ 2026-10-04 上机把这条的**收益侧**证伪了一半：BlueStacks 新包打的是
+ * `现问重试=5次都没问到(834ms)⇒落回缓存` ⇒ 华为与模拟器**两台都是五次全空**，
+ * 至今没有观测到任何一次"第 2 次及以后问到"。也就是说重试的**代价是实测的**
+ * （起跑时主线程白等 ~834ms），**收益是未证实的**。
+ * ⇒ 预算按下调到"仍覆盖一次焦点回调往返"的下限（见下），而不是留着一个没有数据支撑的 5 次。
+ * 若将来任何一台设备打出 `第2次问到(...)`，就是把次数抬回去的**直接证据**。
+ *
+ * ### 参数怎么定的
+ * - **间隔 200ms**：与「一次 binder 往返 + :a11y 主线程一次节点查询」的量级同阶，短到焦点
+ *   变化（数百 ms）内必被覆盖，长到不会变成对 :a11y 主线程的轮询轰炸。
+ * - **至多 2 次（[ASK_ATTEMPTS_MAX]）**：从 5 次降下来的，依据就是上面那条"五次全空"。
+ *   留 2 次而不是 1 次，是因为"瞬态在下一次回调内自好"这个原始假设还没被**否证**——
+ *   否证它需要一次"第 2 次问到"或"第 2 次仍 null 但第 3 次问到"的观测；1 次就放弃会把
+ *   这条判据直接测死。再多就是在为"点了 ▶ 没反应"加时长了。
+ * - **总预算 500ms（[ASK_BUDGET_MS]）**：单次现问在 :a11y 主线程卡住时最长等 1s
+ *   （`liveActivePackage` 的 latch.await），只按次数封顶的话最坏是 2×1s + 1×200ms ≈ 2.2s
+ *   ——startScan 在调用方线程上同步跑（实测路径：服务的 settingsListener / onStartCommand，
+ *   可能就是主线程），那已经不是"稍慢"而是可能 ANR。预算只管**总耗时**，
+ *   快失败路径（华为实测每次数 ms 就报 null）不受影响，仍会问满次数上限。
+ * - 任一次拿到**非 null**（含 `false`，即"现问说不是原神"）立即采用并停止重试 ⇒ 重试只在
+ *   "问不到"时发生，绝不把"问到但结论不利"磨成"多问几次直到有利"。
+ *
+ * ### null 时的降级口径（保持 fail-open，但让它可见）
+ * 判定仍是 `live ?: cached`：**没有**关掉 fail-open。关掉等于在这台华为上把所有起跑全部拒掉
+ * （现问恒 null）。代价是"这台机器其实一直在吃缓存"这件事原本是隐藏的 ⇒ 这里补一个观察计数器
+ * [cacheFallbacks]：本进程内"重试耗尽 ⇒ 判定落回事件缓存"的累计次数，打在那条既有的
+ * `起扫前台闸:` 决策日志上（`回退累计=n`；这一行每次起跑各打一条，所以 n 与出现过的行数之比
+ * 就是回退率，华为 10-04 实测 3/3）。计数**只观测**，不参与放行判定。
+ *
+ * ⚠️ 重试只给**起跑**用。注入闸 `InputAccessibilityService.allowInject` 每次点击/滑动都要过
+ * （热路径），必须维持单次直读 —— 所以本类自己不调 `activeWindowPackage()`，探针由调用方注入。
+ * 探针抛异常按原语义冒泡（与 #200 的单次直读同口径，这里不改错误处理）。
+ */
+internal object StartGateLiveAsk {
+
+    /**
+     * 现问最多问几次（含第一次）。见类注释「参数怎么定的」。
+     * 5 ⇒ 2 的降幅是**代价实测、收益未证实**的结果，不是"调参更稳"。
+     */
+    const val ASK_ATTEMPTS_MAX = 2
+
+    /** 两次现问之间的等待（ms）。 */
+    const val ASK_INTERVAL_MS = 200L
+
+    /** 整轮现问的**总耗时**上限（ms）：只管超时截断，不削减快失败路径的次数。 */
+    const val ASK_BUDGET_MS = 500L
+
+    private val fallbacks = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /** 本进程累计「现问重试耗尽 ⇒ 判定落回事件缓存」的次数（观察用，不参与放行判定）。 */
+    val cacheFallbacks: Int get() = fallbacks.get()
+
+    /**
+     * @param live       现问结论；`null` = 问满也没问到（调用方按 `live ?: cached` 落回缓存）
+     * @param attempts   实际问了几次（≥1）
+     * @param elapsedMs  现问总耗时（含重试间隔），用于判断它有没有拖慢起跑
+     * @param budgetCut  true = 因总预算提前停止（没问满 [ASK_ATTEMPTS_MAX] 次）
+     */
+    data class Outcome(
+        val live: Boolean?,
+        val attempts: Int,
+        val elapsedMs: Long,
+        val budgetCut: Boolean,
+    ) {
+        /** true = 一次就问到了（没有任何重试）。 */
+        val firstShot: Boolean get() = live != null && attempts == 1
+
+        /** 日志片段：三种结局（一次问到 / 重试后问到 / 耗尽落回缓存）一眼可分。 */
+        fun describe(): String = when {
+            firstShot -> "一次问到(${elapsedMs}ms)"
+            live != null -> "第${attempts}次问到(${elapsedMs}ms)"
+            else -> "${attempts}次都没问到(${elapsedMs}ms${if (budgetCut) "/预算截断" else ""})⇒落回缓存"
+        }
+    }
+
+    /**
+     * 有界重试地现问一次。探针返回 null 才重试；返回非 null（true 或 false）即刻采用。
+     *
+     * ⚠️ `probe` 放在**最后一个参数**：调用点是尾随 lambda（`ask { genshinActiveNow() }`），
+     * 尾随 lambda 绑的是末位形参 —— 顺序写反了它绑到 `clockMs` 上，类型直接不匹配。
+     *
+     * @param attemptsMax 最多问几次（含第一次）
+     * @param intervalMs  两次之间的等待
+     * @param budgetMs    整轮总耗时上限（超了就带 [Outcome.budgetCut] 收手）
+     * @param sleep       间隔实现（生产侧 = Thread.sleep，测试侧注入记录器）
+     * @param clockMs     耗时基准（生产侧 = System.currentTimeMillis，测试侧注入假钟）
+     * @param probe       现问（生产侧 = `InputAccessibilityService.genshinActiveNow()`）
+     */
+    fun ask(
+        attemptsMax: Int = ASK_ATTEMPTS_MAX,
+        intervalMs: Long = ASK_INTERVAL_MS,
+        budgetMs: Long = ASK_BUDGET_MS,
+        sleep: (Long) -> Unit = { Thread.sleep(it) },
+        clockMs: () -> Long = { System.currentTimeMillis() },
+        probe: () -> Boolean?,
+    ): Outcome {
+        require(attemptsMax >= 1) { "attemptsMax must be >= 1" }
+        val t0 = clockMs()
+        var attempts = 0
+        var live: Boolean? = null
+        var budgetCut = false
+        while (attempts < attemptsMax) {
+            attempts++
+            live = probe()
+            if (live != null) break
+            if (attempts >= attemptsMax) break
+            // 预算只裁"还要不要再等一轮"，不裁已经问到的次数（快失败路径照问满）
+            if (clockMs() - t0 + intervalMs > budgetMs) {
+                budgetCut = true
+                break
+            }
+            try {
+                sleep(intervalMs)
+            } catch (_: InterruptedException) {
+                // 起跑线程被打断（服务销毁/取消路径）：保留中断标记、不再补试，按"问不到"处理
+                Thread.currentThread().interrupt()
+                break
+            }
+        }
+        if (live == null) fallbacks.incrementAndGet()
+        return Outcome(live, attempts, clockMs() - t0, budgetCut)
     }
 }

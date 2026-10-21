@@ -164,6 +164,11 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         weaponDictMiss = 0; weaponDictMissNames.clear()
         panelShotSeq = 0; panelShotDropped = 0; panelShotWriteFailures = 0
         panelShotSpaceCheckedAt = 0; panelShotSpaceOk = true
+        // 帧新鲜性四个计数以前**不在这里**复位（引擎目前每轮新建 ⇒ 没暴露成 bug）。
+        // 一并纳进来：它们和上面那批一样是"每轮独立"的观察量，靠构造函数默认值撑着，
+        // 谁哪天改成复用引擎就会重演 2026-09-24 那次"第二轮把上一轮的数一起报"。
+        freshFrameTimeouts = 0; frameRefusedTotal = 0
+        settleFrameTimeouts = 0; settleStaleFramesUsed = 0
         PerfProbe.reset() // 只读探针：每轮扫描独立统计
         Log.i(TAG, "timing: ${TimingOverrides.summary()}")
         // §15 流程前置归位：GOODScanner `GenshinGameController::return_to_main_ui` 同思想
@@ -198,15 +203,25 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         // ★ #188（2026-10-04）：豁免条件从「只要 stopRequested 就不查」收窄成
         //   「**提前收工**才不查」。旧条件把「回卷止扫」也当成异常中断一并豁免了，而回卷
         //   （连续重复件 ≥ 阈值）与「连续整页跳过」恰恰是全量扫描**正常遍历完**的收尾方式 ——
-        //   于是 10-03 那轮武器 读到 206 / 实收 204（尾页 5 格解析成空、静默丢 2 件）
-        //   一声不响。判"到底"用现成的 `gridExhausted`（只有那两处置 true），
+        //   于是 10-03 那轮武器 读到 206 / 实收 203 一声不响。
+        //   （订正：原记"尾页 5 格解析成空、静默丢 2 件"是拿一个**武器路径从不赋值**的日志栏
+        //     下的判决，2026-10-04 复盘已推翻，真因见 #188/#216；差额本身是真的，成因不是它。）
+        //   判"到底"用现成的 `gridExhausted`（只有那两处置 true），
         //   再叠 `!matchHit` 与 foreach 那道"到底但没命中目标"的守卫同口径。
-        //   ⚠️ 仍有一个已知缺口：`pagedGrid` 以「peek 消失（指纹不变）」收尾时
-        //   `gridExhausted=false`（见 ScanJudgmentDomain:237 记的那次事故），那条路今天**照旧豁免** ——
-        //   要一并覆盖得先改那条路径的置位语义，不属本单，别把这里当成已全覆盖。
+        // ★ #216（2026-10-04）：命中**素材停止标识**也算"看到尽头"。强化素材排在列表最末
+        //   （武器：学徒笔记 → 魔矿/良矿/杂矿；圣遗物：最后一件真圣遗物 global=947 → 祝圣精华 948），
+        //   所以撞到素材 = 装备读完了 ⇒ 总数必须对得上。这一条同时是 #216 自己的**验收判据**：
+        //   标识若误触发在装备中间，这里会立刻报"总数不符"而不是悄悄少一批。
+        //   ✅ #213（2026-10-04 同日补）：`pagedGrid`/`snapTraverse` 以「peek 消失（指纹不变）」
+        //     收尾时以前不置 `gridExhausted`（见 ScanJudgmentDomain:237 记的那次错装事故）⇒ 那条路
+        //     照旧豁免。现在那条出口会置 `gridExhausted=true`（只在 reachedEnd 那一支；
+        //     轮数兜底/stopRequested 两个"中途放弃"出口不置），所以也被这条核对覆盖了。
+        //     ⚠️ 但覆盖到不等于量到：走 snap 的只有 `select_3col`（auto_equip），而它不读背包
+        //     计数器 ⇒ `total==null`，这里今天仍然不会为它报警。真实收益在 foreach 那道守卫上。
         val collected = results.size + resultsWeapons.size + resultsCharacters.size
         val total = vars.total
-        val sawWholeList = !vars.stopRequested || (vars.gridExhausted && !vars.matchHit)
+        val sawWholeList = !vars.stopRequested || (vars.gridExhausted && !vars.matchHit) ||
+            vars.stopReason == STOP_REASON_MATERIAL
         if (total != null && sawWholeList && total != collected) {
             Log.w(TAG, "total mismatch: readCount=$total scanned=$collected stopReason=${vars.stopReason}")
             RecognitionLog.log(
@@ -244,7 +259,13 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
                 // ★ 批2-A：帧新鲜性计数，同样只在非 0 时打。`旧帧顶替>0` 就意味着那一格
                 //   识别的是**动作之前**的画面 —— 与"画面真的没变"在下游同形，是静默错读的口。
                 (if (freshFrameTimeouts > 0) {
-                    "| 帧新鲜性 超时=${freshFrameTimeouts}次 旧帧顶替=${staleFramesUsed}次 无帧可退=${frameRefusedTotal}次 "
+                    "| 帧新鲜性 超时=${freshFrameTimeouts}次 不回退旧帧=${frameRefusedTotal}次 "
+                } else "") +
+                // ★ #196：判稳侧单独一档。它非 0 **不算问题**（静止画面本来就不推新帧），
+                //   报出来是为了和上面那条对照 —— 以前两类共用一个名字，`旧帧顶替=1`
+                //   到底是"某格拿过期画面做了识别"还是"静止页上判稳等了一下"分不开。
+                (if (settleFrameTimeouts > 0) {
+                    "判稳无新帧=${settleFrameTimeouts}次(用缓存帧 ${settleStaleFramesUsed}次) "
                 } else "") +
                 "perCell=${perCell}ms perPage=${perPage}ms | waits nav=${tmNavMs} panel=${tmPanelMs} settle=${tmSettleMs}",
         )
@@ -692,14 +713,34 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     var freshFrameTimeouts: Int = 0
         internal set
 
-    /** [freshFrameTimeouts] 里**真的**用旧帧顶上去了的次数（>0 就意味着那一格识别的是过期画面）。 */
-    @Volatile
-    var staleFramesUsed: Int = 0
-        internal set
-
-    /** 超时且连旧帧也没有、最终抛给上层次数（这是唯一会走到"本轮失败"的那一档）。 */
+    /**
+     * 超时后**按策略不回退**（识别用帧）或**无缓存帧**（判稳用帧）⇒ 最终抛给上层的次数。
+     *
+     * ★ #196 第二版（2026-10-04）改了语义：以前只有"连旧帧都没有"才计这里，
+     *   有旧帧就静默顶上去（那一栏叫 `旧帧顶替`）。现在识别侧**一律不回退** ⇒
+     *   华为那种退化轮里这个数会从 0 变成 >0，而**这正是想要的现象**：
+     *   失败变响，而不是拿动作之前的画面做 OCR 当成新格入库。
+     *   `旧帧顶替` 那一栏因此被删 —— 它已经结构性不可能 >0，留着一个永不动的计数
+     *   就是我们都反对的那种"看着有监控、其实没人读"的死判据。
+     */
     @Volatile
     var frameRefusedTotal: Int = 0
+        internal set
+
+    /**
+     * #196 拆分（2026-10-04）：**判稳/重读**侧的对应两个计数，与上面两个**不是一回事**，别合并。
+     *
+     * 在判稳语义下"没有新帧"是**证据**（画面没再动）而不是故障 ⇒ 这两个数非 0 不代表有问题。
+     * 它们存在的意义是给识别侧那两条当**对照组**：以前两件事共用 `freshFrame` 一个名字，
+     * 所以摘要里 `旧帧顶替=1` 到底是"某格拿过期画面做了识别"还是"静止页上判稳等了一下"
+     * **根本分不开** —— 这正是 #196 的原始症状。
+     */
+    @Volatile
+    var settleFrameTimeouts: Int = 0
+        internal set
+
+    @Volatile
+    var settleStaleFramesUsed: Int = 0
         internal set
 
     /**
@@ -1135,18 +1176,15 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         const val GRID_TOP_STABLE_ROUNDS = 2
 
         /**
-         * 「按件数推算的翻页数上限」的余量（2026-09-26 方案 C）：`ceil(total / 每页格数) + 本值`。
-         *
-         * 这是 pagedGrid 收尾的**唯一兜底**（连续零新增那条链已降级成诊断，见 `noteDupAndMaybeStop`）。
-         * 取 5 的根据：一次滑动没落地只会白读一页（实测约 1/17 页），5 页余量足够吸收偶发连续滑空；
-         * 而计数器比列表实际能扫到的件数偏大时（已知计数器与抓包真值可差 ~8 件），最多多花 5 页 ≈ 半分钟。
-         */
-        const val PAGE_CAP_MARGIN = 5
-
-        /**
          * 页级看门狗（2026-09-16）：真机偶发「主滑派发后无任何后续日志」的硬挂
-         * （本轮实测卡死 >5min，整轮扫描报废）。正常单页 ~6s ⇒ 超过本阈值即判挂死，
-         * 置 stopRequested 让 pagedGrid 正常收尾（**已入库结果照常导出**，不白跑）。
+         * （本轮实测卡死 >5min，整轮扫描报废）。置 stopRequested 让 pagedGrid 正常收尾
+         * （**已入库结果照常导出**，不白跑）。
+         *
+         * ⚠️ 2026-10-04：判据已从「本页累计耗时」改成「**距上一格走完的间隔**」
+         * （见 `ScanGridDomain` 的 `lastProgressAt`）。原来的写法把"机器慢"判成"挂死"：
+         * 注释里的"正常单页 ~6s"是 BlueStacks 的数，麒麟 970 上圣遗物 perCell=11.0s、
+         * 一页 12 格 = 132s ⇒ 每页必越 90s 线，实测 945 件跑到第 11 件就整轮 `watchdog` 中止。
+         * 按间隔量之后这个值与机器速度无关：BS 单格 ~0.5s（180× 余量）、华为 11.0s（8× 余量）。
          */
         const val PAGE_WATCHDOG_MS = 90_000L
 
@@ -1430,6 +1468,48 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
          * 条数真值校验见 design-docs/good-diff-20260916.md。
          */
         const val STOP_MARKER_RARITY = 4 // 3★/2★ = 止扫标识不解析（flow 语义 rarity < 4，即低于 4★ 止扫）
+
+        /**
+         * 尾区**强化素材**的停止标识（#216，2026-10-04，参照 GOODScanner）。
+         *
+         * 为什么必须按**名字**而不是按稀有度：这两类素材的星带读数会落进"真装备"区间。
+         *   · 圣遗物：实测「祝圣精华」面板 `rarity=4` ⇒ `rarity < STOP_MARKER_RARITY` 那条挡不住它，
+         *     于是它一路走到 setKey 反查 → 词典未命中 → 「丢弃读失败条目（词条 0 条）」→
+         *     **再被「空读格回读」重取一遍**（白点一格 + 白跑一次 OCR）。
+         *   · 武器：「精锻用魔矿」实测星带 `rarity=3` ⇒ 同理挡不干净。
+         *
+         * 名单来源与**刻意不照抄**的部分（deepwiki 实查 `Anyrainel/GOODScanner`）：
+         *   GOODScanner 有两张武器名单：
+         *     `WEAPON_FORGING_STOP_NAMES` = 精锻用魔矿/良矿/杂矿 —— **照抄**（素材不是武器，GT 也不收）；
+         *     `WEAPON_STOP_NAMES` = 无锋剑/银剑/猎弓/学徒笔记/… 共 10 件 1★/2★ 武器 —— **不照抄**：
+         *       它把"碰到第一件低星武器"当列表尽头，但我们这边**抓包真值不这么看**：
+         *       `dsl/verify/sweeps/gt_20261003_bs.json` 里 `ApprenticesNotes|1|1` 是货真价实的一件
+         *       （rarity 分布 {1:1, 3:77, 4:112, 5:16}）。跟着它在这里止扫就会**永久少这一件**。
+         *       ⇒ 低星武器照常入库（词典 A' 段已补齐），只有真的走到素材才停。
+         *
+         * 位置证据（决定"命中即停"是安全的）：素材排在**列表最末**——
+         *   圣遗物 `20260925_2244_artifact_64fix.log`：page=51（该轮共 52 页）global=947 是最后一件
+         *   Instructor 沙子，紧接着 global=948 就是「祝圣精华」；
+         *   武器 `20261003_bs_run_bettergi.log`：page=10 尾行 黎明神剑 → 学徒笔记 → 魔矿/良矿/杂矿。
+         */
+        val WEAPON_FORGING_STOP_NAMES = listOf("精锻用魔矿", "精锻用良矿", "精锻用杂矿")
+        val ARTIFACT_STOP_NAMES = listOf("祝圣油膏", "祝圣精华")
+
+        /**
+         * 命中素材停止标识时写进 `vars.stopReason` 的值。
+         * 收尾原因不是自由文案：total 核对要靠它区分"提前收工"与"读到尽头"（见 run() 里的
+         * `sawWholeList`），所以钉成常量。
+         */
+        const val STOP_REASON_MATERIAL = "stopName"
+
+        /**
+         * 名字命中停止标识 ⇒ 置止扫并返回 true（调用方**直接 return，不入库**）。
+         *
+         * 用 `contains` 而不是 `==`：与 GOODScanner 同口径，且 OCR 读素材名常带尾巴
+         * （实测原文第 2 槽是"圣遗物强化素"这种被切断的描述行）。
+         */
+        internal fun hitsStopName(name: String?, list: List<String>): String? =
+            list.firstOrNull { cand -> name != null && name.contains(cand) }
 
         /** chain 锚名 → profile rect 路径（P1-a 固定映射；P3 收敛为 chain 机读格式）。 */
         val CHAIN_ANCHOR_PATHS = mapOf(

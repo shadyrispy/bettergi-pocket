@@ -97,7 +97,7 @@ stage_grant() {
   log "  无障碍服务: $(adb shell settings get secure enabled_accessibility_services)"
   log "  无障碍开关: $(adb shell settings get secure accessibility_enabled)"
   # 启动 app（有 overlay 权限即自动拉起前台服务 + 悬浮球）
-  adb shell am start -n "$PKG/.MainActivity" 2>&1 | tee -a "$LOG"
+  adb shell am start -n "$PKG/.ui.MainActivity" 2>&1 | tee -a "$LOG"
   sleep 3
   adb shell dumpsys activity services "$PKG" | grep -c "$PKG" | tee -a "$LOG"
 }
@@ -150,7 +150,7 @@ stage_projection() {
     log "  投影已就绪（服务内部拉起授权页）"
   else
     log "  内部拉起未就绪，走 MainActivity 兜底"
-    adb shell am start -n "$PKG/.MainActivity" --ez auto_request_capture true 2>&1 | tee -a "$LOG"
+    adb shell am start -n "$PKG/.ui.MainActivity" --ez auto_request_capture true 2>&1 | tee -a "$LOG"
     sleep 4
   fi
   log "  点系统授权弹窗确认…"

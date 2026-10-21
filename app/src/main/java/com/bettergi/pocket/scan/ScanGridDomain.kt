@@ -18,7 +18,6 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.GRID_SIMILAR_DIFF
 import com.bettergi.pocket.scan.ScanEngine.Companion.GRID_TOP_STABLE_ROUNDS
 import com.bettergi.pocket.scan.ScanEngine.Companion.MAX_SCROLL_TOP_ROUNDS
 import com.bettergi.pocket.scan.ScanEngine.Companion.OVERLAP_ANCHOR_COUNT
-import com.bettergi.pocket.scan.ScanEngine.Companion.PAGE_CAP_MARGIN
 import com.bettergi.pocket.scan.ScanEngine.Companion.PAGE_WATCHDOG_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_FP_GATE_ENABLED
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_CHANGE_WINDOW_MS
@@ -38,6 +37,16 @@ import com.bettergi.pocket.capture.FrameTimeoutException
 /*
  * Stage 3.3 步④：ScanGridDomain（do 原语按族拆分，扩展函数，函数体一字未改）。
  */
+
+/**
+ * 页级看门狗判据（纯函数）。量的是「距**上一次走完一格**的间隔」，不是「本页累计耗时」。
+ *
+ * 拆出来只为一条断言：一台**慢但一直在前进**的机器不许被判成挂死。
+ * 华为 EML-AL00（麒麟 970）实测 perCell=11.0s、一页 12 格 ⇒ 累计 132s > 90s，
+ * 旧的累计口径每页必触发，945 件的量跑到第 11 件就整轮中止。
+ */
+internal fun pageWatchdogFired(prevProgressAt: Long, nowAt: Long, budgetMs: Long): Boolean =
+    nowAt - prevProgressAt > budgetMs
 
 internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
     val gridKey = step.getString("grid")
@@ -117,8 +126,8 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
     var pageNo = 0
     var pageMinLevel: Int? = null
     // ★ A9：**连续整页跳过**计数。skip 页不点格 ⇒ 无该页最低等级读数来源，页级下界不可推进
-    //   （旧方案「命中页也推进页级下界」因此被否决）⇒ 若列表尾部全是低价值页，翻页永不终止：
-    //   artifact_lock 无 readCount（total=null ⇒ pagesByCount=Int.MAX_VALUE）、生产 maxPages 无上限。
+    //   （旧方案「命中页也推进页级下界」因此被否决）⇒ 若列表尾部全是低价值页，翻页没有内容侧的
+    //   终止点：artifact_lock 无 readCount（total=null ⇒ 件数主判据不启用）、生产 maxPages 无上限。
     //   收尾上限见下方 skip 分支（TimingOverrides.pageSkipLimit，默认 3）。
     var consecutiveSkipPages = 0
     // ★ 2026-09-16（审计 P0-2 修）：**跨页**主滑记账 —— 必须声明在页循环**外**，否则每页重建，
@@ -135,18 +144,22 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
     //   为什么从 `cols×traverseRows` 抬到 + 一行：单次滑动没落地只会造出一整页（=cols×rows 个）
     //   重复件，正好卡在旧阈值上 ⇒ 一次滑空就能误停整轮；抬一行之后至少要**连续两次**滑空才凑得满。
     dupLimitEffective = cols * (traverseRows + 1)
-    // 按件数推算的翻页数上限（**后备**；主判据是"已入库 ≥ 计数器"，见翻页块开头）
-    val cellsPerPage = cols * traverseRows
-    val pagesByCount = vars.total?.takeIf { it > 0 }?.let {
-        Math.ceil(it.toDouble() / cellsPerPage).toInt() + PAGE_CAP_MARGIN
-    } ?: Int.MAX_VALUE
+    // ★ 2026-10-04：**删掉「按件数推算的翻页数上限」这条判据**（原 `pagesByCount` / `pageCap`）。
+    //   立项理由（2026-09-26 注释）是"回卷链等于从没被验证过"，这条已被数据推翻：
+    //   `回卷判据：连续 2 个整页零新增 ≥ 2` 历史确认 **15 次**。而本判据自身只触发过 **1 次**，
+    //   那一次就是华为 2244 档圣遗物全量 —— 误伤 21 件尾巴。
+    //   根因是**单位错**：它数的是"翻了几页"，而欠滚是设计上允许的（回卷阈值特意抬到"一页+一行"
+    //   就是为了容忍一次滑动不满一页）。用页数当进度尺 ⇒ 滑得越少越早被截，等于**惩罚欠滚**。
+    //   它声称要防的两件事，现有链已各自覆盖：
+    //     · 计数器偏大 / 列表真到底 ⇒ 回卷（连续整页零新增）
+    //     · 列表卡住一直翻        ⇒ 下方 `maxTotalSwipes`（与设备、与档位无关的硬闸）
     dupPageStreak = 0
     dupPageDecided = false
     Log.i(
         TAG,
         "pagedGrid[$gridKey]: 回卷阈值 = 一页+一行 $cols×($traverseRows+1) = $dupLimitEffective" +
             "，页级确认（flow `stopWhen.dupPageConfirm` 在本页之后才登记，此处打印恒为默认 2）；" +
-            "收尾主判据 = 已入库 ≥ 计数器，后备 = 翻页数 > ${if (pagesByCount == Int.MAX_VALUE) "无(计数器未读到)" else pagesByCount}",
+            "收尾主判据 = 已入库 ≥ 计数器，兜底 = 回卷 / 素材标识，硬闸 = 总滑动 ${TimingOverrides.maxTotalSwipes}",
     )
 
     while (true) {
@@ -166,8 +179,8 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
         //   正常 onFinished，不是报错）。依据：背包按等级降序，连续 K 页全跳 ⇒ 余下所有页
         //   都低于目标阈值（与 GOODScanner fast-mode page-skip 的止扫同源）；K 默认 3 是为
         //   容忍滑动欠滚/排序抖动造成的 1~2 页偶发误跳（pageMinLevel 反复读到同一低值）。
-        //   ⚠️ 判据**独立于** vars.total（pagesByCount）与 maxPages：artifact_lock 无 readCount
-        //   （total=null ⇒ pagesByCount=Int.MAX_VALUE）、生产 maxPages=Int.MAX_VALUE；
+        //   ⚠️ 判据**独立于** vars.total（件数主判据）与 maxPages：artifact_lock 无 readCount
+        //   （total=null ⇒ 主判据不启用）、生产 maxPages=Int.MAX_VALUE；
         //   且必须在页首**抢帧之前**终止 —— skip 页每页的 freshFrame 打点会喂会话看门狗
         //   （ScriptRunner 侧），引擎层必须自己终止。
         if (skip) {
@@ -231,9 +244,12 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                 "pagedGrid[$gridKey]: page=$pageNo 前台压着 $held（通知栏/权限页）⇒ 本局注入可能被吞，闸门按设计仍放行",
             )
         }
-        val pageCellFrame = runCatchingCancellable { freshFrame() }.getOrNull()
+        val pageCellFrame = runCatchingCancellable { settleFrame() }.getOrNull()
         // ★ 页级看门狗起点（挂死时中止并保留已入库结果）
         val pageWall0 = clock()
+        // ★ 2026-10-04 华为 EML-AL00：看门狗量的是「**距上一次走完一格**」，不是「本页累计耗时」。
+        //   起点与 `pageWall0` 重合（本页第一格之前没有进度可言）。
+        var lastProgressAt = pageWall0
         // ★ 翻页后**清空面板指纹快照**（GOODScanner `reset_panel_fingerprint`）★
         //   保证**新页第一格必被当作"新的"** ⇒ 必然等待面板变化 ⇒ 不会解析到上一页遗留的面板 ✓
         //   （此前只在 pageNo==0 清 ⇒ 页首格容易读到上一页遗留 ✗，实测页首格重复现象支持这一点）
@@ -392,12 +408,20 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                             lastCellFp = cf
                         }
                     }
-                    // ★ 页级看门狗：单页耗时超阈值 ⇒ 判挂死，中止扫描（已入库仍导出）
-                    if (clock() - pageWall0 > PAGE_WATCHDOG_MS) {
+                    // ★ 页级看门狗：**上一格走完到现在**超过阈值 ⇒ 判挂死，中止扫描（已入库仍导出）。
+                    //   2026-10-04 华为实测：判据原来量的是 `clock() - pageWall0`（**本页累计**），
+                    //   而注释里的"正常单页 ~6s"是 BlueStacks 的数 —— 麒麟 970 上圣遗物
+                    //   perCell=11.0s × 12 格/页 = 132s，**每一页都必然越 90s 线**：
+                    //   实测 `scan finished: watchdog cells=11 pages=1`，945 件的量跑到第 11 件就整轮中止。
+                    //   累计量把"机器慢"判成"挂死"，是设备速度依赖的写死常量；而这条链真正要防的
+                    //   「主滑派发后无任何后续日志」是**单格不前进**，与本页已花多久无关 ⇒ 改成量间隔。
+                    //   两机都留足量级：BS 单格 ~0.5s（180× 余量）、华为 11.0s（8× 余量）。
+                    val wdNow = clock()
+                    if (pageWatchdogFired(lastProgressAt, wdNow, PAGE_WATCHDOG_MS)) {
                         Log.w(
                             TAG,
-                            "pagedGrid[$gridKey]: page=$pageNo 单页已耗时 ${clock() - pageWall0}ms " +
-                                "> ${PAGE_WATCHDOG_MS}ms ⇒ 判挂死，中止扫描（已入库 " +
+                            "pagedGrid[$gridKey]: page=$pageNo 上一格走完至今已 ${wdNow - lastProgressAt}ms " +
+                                "> ${PAGE_WATCHDOG_MS}ms（本页累计 ${wdNow - pageWall0}ms）⇒ 判挂死，中止扫描（已入库 " +
                                 "${results.size + resultsWeapons.size + resultsCharacters.size} 件仍正常导出）",
                         )
                         vars.stopRequested = true
@@ -405,6 +429,7 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
                         dupWrapped = true // 复用一个"跳出本页"的开关（语义：本页提前收尾）
                         break
                     }
+                    lastProgressAt = wdNow
                     val idx = row * cols + col
                     val beforeCell = results.size + resultsWeapons.size + resultsCharacters.size
                     if (col == 0 && row == 0) tmPages++
@@ -683,7 +708,11 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
         //   不是跳行（前进仅 14 件/21，结构性跳不了）。重访代价 ~250ms/格，只在失败时付。
         //   失败格也解释了行级闭环的 SKIP 误报（锚点那格恰好空读）⇒ **顺序必须是先回读、再判定**。
         //   守卫：整页产出过少（< 5 件）时不重试（可能是 pageSkip / 列表尾的空格）。
-        if (pageKeys.count { it.isEmpty() } > 0 && pageKeys.count { it.isNotEmpty() } >= 5) {
+        //   ⚠️ #216 追加 `!vars.stopRequested`：本页若已命中**素材停止标识**，那些空格是
+        //     "本来就不是装备"而不是"没读到"，回读它们等于白点白跑一整轮 OCR。
+        if (pageKeys.count { it.isEmpty() } > 0 && pageKeys.count { it.isNotEmpty() } >= 5 &&
+            !vars.stopRequested
+        ) {
             val emptyIdx = pageKeys.indices.filter { pageKeys[it].isEmpty() }
             var recovered = 0
             Log.i(TAG, "pagedGrid[$gridKey] 空读格回读: page=$scannedPage ${emptyIdx.size} 格 idx=$emptyIdx")
@@ -1149,24 +1178,10 @@ internal suspend fun ScanEngine.pagedGrid(step: JSONObject) {
         landingBand = null
         pagesAdvanced++
         Log.i(TAG, "pagedGrid 翻页#$pagesAdvanced（已扫 $pageNo 页, maxPages=$maxPages）")
-        // ★ 2026-09-26 方案 C 的**后备**上限：按件数推算"最多该翻几页"，超出即收尾。
-        //   为什么还要它：`整页重复第…` 与 `回卷止扫（确认…` 在 3200/2244/2560/华为四轮全量里
-        //   计数**都是 0** —— 每次都是刚被删掉的那条指纹回路先收的尾 ⇒ 回卷链等于从没被验证过。
-        //   ⇒ 三条链分工：**件数 = 主判据**（GOODScanner 同构），**回卷 = 正常兜底**，
-        //     **本上限 = 回卷也失灵时的最后一道**（计数器偏大 / 列表卡住一直翻）。
-        if (pagesAdvanced > pagesByCount) {
-            Log.w(
-                TAG,
-                "pagedGrid[$gridKey]: 翻页数 $pagesAdvanced > 按件数推算的上限 $pagesByCount" +
-                    "(计数器=${vars.total ?: "?"} ÷ 每页 $cellsPerPage + $PAGE_CAP_MARGIN) ⇒ 收尾",
-            )
-            vars.stopRequested = true
-            vars.stopReason = "pageCap"
-            break
-        }
-        // ★ A9 双保险：**总滑动次数上限**（独立于计数器）。计数器读不到时 pagesByCount=
-        //   Int.MAX_VALUE、生产 maxPages 无上限 ⇒ 这是「列表卡住一直翻」的最后一道闸。
-        //   默认 240 ≈ 2× 满背包（2400 件 ÷ 21 件/页 ≈ 115 页）翻页量，正常扫描远够用。
+        // ★ A9 硬闸：**总滑动次数上限**（与计数器、与档位、与设备速度全都无关）。
+        //   2026-10-04 起它是"列表卡住一直翻"的**唯一**硬闸 —— 原来排在前面的
+        //   「按件数推算的翻页数上限」已删除，理由见函数体开头 `dupLimitEffective` 处。
+        //   默认 240 ≈ 2× 满背包（2400 件 ÷ 每页 ~21 件 ≈ 115 页）翻页量，正常扫描远够用。
         if (pagesAdvanced >= TimingOverrides.maxTotalSwipes) {
             Log.w(
                 TAG,
@@ -1369,7 +1384,7 @@ internal suspend fun ScanEngine.awaitCrossPageSettle(gridKey: String) {
     try {
         while (clock() - start < ANCHOR_SETTLE_MAX_MS && stablePairs < ANCHOR_SETTLE_STABLE_PAIRS) {
             delay(ANCHOR_SETTLE_POLL_MS); tmSettleMs += ANCHOR_SETTLE_POLL_MS
-            val f = runCatchingCancellable { freshFrame(SETTLE_FRAME_TIMEOUT_MS) }.getOrNull() ?: break
+            val f = runCatchingCancellable { settleFrame(SETTLE_FRAME_TIMEOUT_MS) }.getOrNull() ?: break
             val g = grayOf(f)
             f.release()
             if (g == null) continue
@@ -1426,15 +1441,64 @@ internal suspend fun ScanEngine.awaitCrossPageSettle(gridKey: String) {
     }
 }
 
-internal suspend fun ScanEngine.freshFrame(timeoutMs: Long = 2500L): Mat {
-    // 只读探针：freshFrame **包含「等一个新帧」的等待**（投影 ~30fps ⇒ 平均 ~33ms），
+/**
+ * #196 拆分（2026-10-04，**第一版：只分名字与计数，不改行为**）。
+ *
+ * 这两件事以前挤在一个函数里，所以既不能说"回退是 bug"、也不能说"回退在骗人"：
+ *  · **识别**用帧 —— 要的是"动作**之后**那一帧"。拿不到新帧却改用旧帧 = 拿动作之前的画面
+ *    去 OCR，与"画面真的没变"在下游**完全同形** ⇒ 静默错读的口。
+ *  · **判稳/重读**用帧 —— 要的是"画面还在动吗"。这里"拿不到新帧"**本身就是答案**
+ *    （BlueStacks 虚拟屏静止不推帧 ⇒ 等不到新帧在静止画面上是常态，不是故障）。
+ * 第一份真实样本就是反例：11-A 那轮摘要 `帧新鲜性 超时=1 旧帧顶替=1`，
+ * 发生在**静止的管理器页**上 —— 当初设计回退正是让 settle 循环把"没新帧"当"没再动"的证据用。
+ *
+ * ★ 第二版（2026-10-04）已落地：**识别侧的旧帧回退删了**，处置表抽成 [frameOnNoFresh]
+ *   （含"为什么设备上量不到、只能靠单测钉住"的实测依据）。判稳侧保留回退——那里"没新帧"
+ *   本来就是答案的一部分。
+ *   两版共同的依据：第一份真实样本恰好是反例，华为退化轮 `超时=16 旧帧顶替=16 无帧可退=0`
+ *   ⇒ 每次超时都静默退了旧帧；而 BlueStacks 健康轮 46 条摘要里这两个计数全 0。
+ */
+internal suspend fun ScanEngine.freshFrame(timeoutMs: Long = 2500L): Mat =
+    grabFrameOrNull(timeoutMs, use = FrameUse.RECOGNITION)
+        ?: throw FrameTimeoutException(0L, timeoutMs) // 识别路径无帧可退 ⇒ 交给格/页处置层
+
+/** 判稳/重读用帧（见 [freshFrame] 的 KDoc）。允许"没新帧"，但**单独计数**，不再与识别混账。 */
+internal suspend fun ScanEngine.settleFrame(timeoutMs: Long = 2500L): Mat =
+    grabFrameOrNull(timeoutMs, use = FrameUse.SETTLE)
+        ?: throw FrameTimeoutException(0L, timeoutMs)
+
+internal enum class FrameUse { RECOGNITION, SETTLE }
+
+/**
+ * #196 第二版的**决策表**（2026-10-04）：拿不到"动作之后的新帧"时，两种用途怎么处置。
+ *
+ * 抽成纯函数是因为这就是整版的全部内容，而它**没法在设备上验**：
+ *   · BlueStacks 2026-10-04 全天 46 条摘要里 `帧新鲜性`/`判稳无新帧` 出现 **0 次**
+ *     ⇒ 健康轮根本走不到这条分支，拿它做 A/B 是恒等、是空跑。
+ *   · 唯一走过的是华为的退化轮：`超时=16次 旧帧顶替=16次 无帧可退=0次`
+ *     （`ui_scan_20261003_231618_..._weapon_scan.logcat.log`，`scan finished: watchdog cells=13`）
+ *     ⇒ **16/16 每一次超时都退了旧帧**，那 13 格识别的画面全部可能是动作之前的。
+ *     而"投影卡住"这种条件不可按需复现 ⇒ 这条只能在真实退化轮出现时靠日志事后确认
+ *     （届时应看到 `无帧可退` 从 0 变成 >0、且失败是**响**的而不是静默错读）。
+ *
+ * 选"识别侧不回退"的理由：识别用帧的后果是**拿旧画面做 OCR 并当成新格入库**，
+ * 与"画面真的没变"在下游完全同形 ⇒ 静默错读，事后对账只能看到一个"缺/错"却查不到成因
+ * （#188 那轮就是这么绕了一圈）。判稳用帧没有这个问题：它要的就是"还在不在动"。
+ */
+internal fun frameOnNoFresh(use: FrameUse, cached: Mat?): Mat? =
+    if (use == FrameUse.SETTLE) cached else null
+
+/**
+ * 两条路径共用的取帧实现。★ #196 第二版：**识别用帧不再回退旧帧**（处置表见 [frameOnNoFresh]）。
+ * 计数与日志按 [use] 分流：识别侧继续打 W，判稳侧打 D（那里"没新帧"是常态）。
+ */
+private suspend fun ScanEngine.grabFrameOrNull(timeoutMs: Long, use: FrameUse): Mat? {
+    // 只读探针：本函数**包含「等一个新帧」的等待**（投影 ~30fps ⇒ 平均 ~33ms），
     // 这部分不计入 nav/panel/settle ⇒ 是「其它」里最易被忽略的大块（见 IMAGE-PATH-COST.md §8）。
     //
     // ★ 批2-B（2026-10-03）：看门狗心跳挪到**确实拿到动作后新帧之后**再打。
     //   原来打在第一行 ⇒ 投影停摆、每轮都超时回退旧帧时它照样前进，120s 会话看门狗
     //   永远不会因"取不到帧"触发（`ScanEngine.lastProgressAtMs` 的注释与此相反，已一并订正）。
-    //   基线（13:12 全量 945 格）实测这条回退**一次都没走到** ⇒ 健康轮不受影响；
-    //   只有真正拿不到帧的轮次会开始被看门狗收，而那正是以前被伪装成"画面没变"的那些。
     val t0 = System.nanoTime()
     try {
         return try {
@@ -1442,19 +1506,34 @@ internal suspend fun ScanEngine.freshFrame(timeoutMs: Long = 2500L): Mat {
             lastProgressAtMs = android.os.SystemClock.elapsedRealtime()
             fresh
         } catch (e: FrameTimeoutException) {
-            freshFrameTimeouts += 1
-            val stale = frameSource.acquireLatestBgr()
-            if (stale == null) {
+            if (use == FrameUse.RECOGNITION) freshFrameTimeouts += 1 else settleFrameTimeouts += 1
+            val cached = frameSource.acquireLatestBgr()
+            val kept = frameOnNoFresh(use, cached?.bgr)
+            if (kept == null) {
+                // ⚠️ 不用的那一帧必须自己 release：以前这条分支要么返回 cached.bgr（交给调用方），
+                //    要么 cached 本来就是 null（没东西可放）。现在识别侧会**主动丢弃**拿到的缓存帧，
+                //    漏掉这一步就是每格泄漏一帧全幅 BGR。
+                cached?.bgr?.release()
                 frameRefusedTotal += 1
-                Log.w(TAG, "grabFresh timeout 且无缓存帧可回退 ⇒ 抛给上层")
-                throw e
+                Log.w(
+                    TAG,
+                    "grabFresh timeout(${timeoutMs}ms) ⇒ ${
+                        if (use == FrameUse.RECOGNITION) {
+                            "识别用帧**不回退**旧帧（退了就是拿动作之前的画面做 OCR）⇒ 抛给上层，" +
+                                "由格/页处置层决定重访或放弃"
+                        } else {
+                            "判稳侧也无缓存帧 ⇒ 抛给上层"
+                        }
+                    }（frameRefusedTotal=$frameRefusedTotal）",
+                )
+                return null
             }
-            // ⚠️ 这条回退按构造拿到的就是被 isFresh 拒掉的那一帧（同一 publishedBgr 槽、
-            //   同一个 threshold），所以**不**打看门狗心跳。彻底删掉它要先审 ~20 个调用点
-            //   （settle 循环里把 null 当 break/continue 用，语义会变），列为后续单独一步。
-            staleFramesUsed += 1
-            Log.w(TAG, "grabFresh timeout, falling back to latest frame (staleFramesUsed=$staleFramesUsed)")
-            stale.bgr
+            settleStaleFramesUsed += 1
+            Log.d(
+                TAG,
+                "settleFrame: 无新帧 ⇒ 按『画面没变』用缓存帧（settleStaleFramesUsed=$settleStaleFramesUsed）",
+            )
+            kept
         }
     } finally {
         PerfProbe.addFrame(System.nanoTime() - t0)
