@@ -50,6 +50,10 @@ class ProfileGridAuditTest {
         Triple("profiles.json", 3200, 1440),
         Triple("profiles_2560x1440.json", 2560, 1440),
         Triple("profiles_2244x1080.json", 2244, 1080),
+        // ★ 2026-10-19 加：后台模式虚拟屏统一档（由 2560 换算，未上机标定）。
+        //   纳入本表的目的是让**结构类**不变式（列数/行数契约、单列网格、点号 zone 可解…）
+        //   对新档同样成立；坐标是否准仍只能上机验（本表不验绝对位置）。
+        Triple("profiles_1280x720.json", 1280, 720),
     )
 
     // ---- 1) 1 列网格可用 ----
@@ -86,9 +90,10 @@ class ProfileGridAuditTest {
 
     @Test
     fun `dotted zone key resolves via path`() {
-        for ((file, _, _) in profiles) {
-            val p = profile(file, if (file.contains("2560")) 2560 else if (file.contains("2244")) 2244 else 3200,
-                if (file.contains("1080")) 1080 else 1440)
+        for ((file, w, h) in profiles) {
+            // 档尺寸取自 profiles 列表本身（旧写法按文件名嗅探，加新档时会静默给错尺寸——
+            // 1280x720 被当成 3200x1440 缩放，rect 直接越界，本用例就是这样先红了一次）。
+            val p = profile(file, w, h)
             // 点分路径须能解出（char_popup.collapse 键自身含点号）
             val r = try {
                 p.rect("zones.char_popup.collapse.rect")
@@ -269,7 +274,10 @@ class ProfileGridAuditTest {
         // dsl/json 为源，assets/dsl 为产物；drift 会导致真机与文档不一致
         val dsl = File(assetsDir().parentFile!!.parentFile!!.parentFile!!.parentFile!!, "dsl/json")
         if (!dsl.isDirectory) return   // CI 下无 dsl/ 时跳过
-        for (name in listOf("profiles.json", "profiles_2560x1440.json", "profiles_2244x1080.json")) {
+        for (name in listOf(
+            "profiles.json", "profiles_2560x1440.json", "profiles_2244x1080.json",
+            "profiles_1280x720.json",
+        )) {
             val a = File(dsl, name); val b = File(assetsDir(), name)
             if (a.exists() && b.exists()) {
                 assertTrue("$name: dsl/json 与 assets/dsl 不一致", a.readText() == b.readText())

@@ -231,14 +231,18 @@
                     android:textSize="12sp" />
             </LinearLayout>
 
+            <!-- 虚拟屏监视窗 ★ 2026-10-19：不设固定高度 + adjustViewBounds ⇒ 高度自动跟随
+                 画面宽高比（VD 恒 16:9）⇒ 横向铺满、零黑边（竖屏同改，见 layout/）。 -->
             <ImageView
                 android:id="@+id/vd_preview"
                 android:layout_width="match_parent"
-                android:layout_height="200dp"
+                android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
+                android:adjustViewBounds="true"
                 android:background="@color/black"
-                android:scaleType="fitCenter"
-                android:contentDescription="虚拟屏画面预览" />
+                android:contentDescription="虚拟屏画面预览"
+                android:minHeight="120dp"
+                android:scaleType="fitCenter" />
 
             <TextView
                 android:id="@+id/vd_preview_hint"

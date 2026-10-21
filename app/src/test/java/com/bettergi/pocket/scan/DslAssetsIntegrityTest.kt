@@ -167,6 +167,8 @@ class DslAssetsIntegrityTest {
             "profiles.json" to "profiles.json",
             "profiles_2560x1440.json" to "profiles_2560x1440.json",
             "profiles_2244x1080.json" to "profiles_2244x1080.json",
+            // ★ 2026-10-19：后台模式虚拟屏统一档（换算档，生成器见 dsl/scripts/）
+            "profiles_1280x720.json" to "profiles_1280x720.json",
         )
         val drifted = ArrayList<String>()
         for ((c, a) in pairs) {

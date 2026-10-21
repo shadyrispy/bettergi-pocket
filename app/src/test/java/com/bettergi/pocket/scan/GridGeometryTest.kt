@@ -166,6 +166,7 @@ class GridGeometryTest {
             Triple("profiles.json", 3200, 1440),
             Triple("profiles_2560x1440.json", 2560, 1440),
             Triple("profiles_2244x1080.json", 2244, 1080),
+            Triple("profiles_1280x720.json", 1280, 720),
         )) {
             val g = profileOf(file, w, h).gridGeometryFor("set_filter_popup")
             assertNotNull("$file: set_filter_popup 未注册卡片几何", g)
@@ -421,6 +422,7 @@ class GridGeometryTest {
             Triple("profiles.json", 3200, 1440),
             Triple("profiles_2560x1440.json", 2560, 1440),
             Triple("profiles_2244x1080.json", 2244, 1080),
+            Triple("profiles_1280x720.json", 1280, 720),
         )) {
             val p = ScreenProfile(JSONObject(File(dir, file).readText()))
                 .apply { calibrate(w, h) }

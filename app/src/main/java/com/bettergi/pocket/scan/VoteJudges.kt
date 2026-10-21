@@ -76,10 +76,14 @@ object VoteJudges {
         val gold = countMatches(frame, rect, GOLD)
         val red = countMatches(frame, rect, RED_LOCK)
         val best = maxOf(gold, red)
-        return Result(best >= Thresholds.PANEL_LOCK_GOLD, best)
+        return Result(best >= profile.countThreshold(Thresholds.PANEL_LOCK_GOLD), best)
     }
 
     object Thresholds {
+        // ⚠️ 本对象里的像素**计数**门限一律是「标定档（3200/2560，同为 1440 高）」的值：
+        //   判据处的 ROI 随档缩放，面积按线性比² 走 ⇒ 调用方**必须**过
+        //   `profile.countThreshold(...)`（见 ScreenProfile.countScale），否则小档上恒判不中。
+        //   比例类（BANNER_*）与强度类（EQUIPPED_SAT_*）不受影响，直接比较即可。
         const val CARD_LOCK_PINK = 60      // pink>60=已锁
         const val PANEL_LOCK_GOLD = 40     // gold>=40=已锁
         const val PANEL_LOCK_DARK = 400    // 未锁兜底：gold==0 且 dark>400
@@ -148,8 +152,11 @@ object VoteJudges {
      *
      * 返回：true=待激活；false=激活；null=行内没有可判文字（3 词条件第 4 行为空）。
      * 判据只读像素，不改扫描语义；调用方把 true 翻译成与 OCR 时代相同的「（待激活）」标记。
+     *
+     * @param profile 本档 profile（门槛按 [ScreenProfile.countThreshold] 缩放到本档面积）。
+     *   省略 = 标定档门槛原值（既有单测/离线复算的调用点行为逐位不变）。
      */
-    fun substatRowPending(frame: Mat, rect: FrameRect): Boolean? {
+    fun substatRowPending(frame: Mat, rect: FrameRect, profile: ScreenProfile? = null): Boolean? {
         if (frame.empty()) return null
         val x0 = rect.left.coerceIn(0, frame.cols() - 1)
         val y0 = rect.top.coerceIn(0, frame.rows() - 1)
@@ -175,8 +182,10 @@ object VoteJudges {
             }
         }
         return when {
-            dark + light < Thresholds.SUBSTAT_MIN_TEXT_PIXELS -> null
-            dark < Thresholds.SUBSTAT_PENDING_DARK_MAX -> true
+            dark + light < (profile?.countThreshold(Thresholds.SUBSTAT_MIN_TEXT_PIXELS)
+                ?: Thresholds.SUBSTAT_MIN_TEXT_PIXELS) -> null
+            dark < (profile?.countThreshold(Thresholds.SUBSTAT_PENDING_DARK_MAX)
+                ?: Thresholds.SUBSTAT_PENDING_DARK_MAX) -> true
             else -> false
         }
     }
@@ -221,13 +230,17 @@ object VoteJudges {
         val rel = intArrayOf(8, 6, 48, 46) // profiles zones artifact.card.lockBadge.rel
         val rect = profile.cardRelRect(gridKey, rel, col, row)
         val count = countMatches(frame, rect, PINK_LOCK)
-        return Result(count > Thresholds.CARD_LOCK_PINK, count)
+        return Result(count > profile.countThreshold(Thresholds.CARD_LOCK_PINK), count)
     }
 
     /**
      * 武器金条 vote：zone rel/divisor 优先读 profiles，缺省回退 3200x1440 base（[30,170,170,212], 555）。
      * 2244x1080 等 native profile 必须提供 device-native rel，否则硬编码 rel 会落出卡外。
      * counts 1/3/5★ 样本 ~561/1600/2700 像素（profiles.sample.samples 字段，未在代码内固化）。
+     *
+     * ⚠️ 除数按**面积**缩放：divisor 是「一颗星对应多少金像素」，随 ROI 面积走
+     * （2244 档实测 112 ≈ 555×(1080/1440)²×0.5 量级，正是这个来源）。zone 未带 divisor 时
+     * 用本档 countScale 折算，否则小档会把 1★ 读成 0★。
      */
     fun weaponStarStrip(frame: Mat, profile: ScreenProfile, gridKey: String, col: Int, row: Int): Result {
         val zone = profile.zone("weapon.card.starStrip")
@@ -237,7 +250,11 @@ object VoteJudges {
         } else {
             intArrayOf(30, 170, 170, 212)
         }
-        val divisor = zone?.optDouble("divisor", 555.0) ?: 555.0
+        val divisor: Double = if (zone != null && zone.has("divisor")) {
+            zone.optDouble("divisor", 555.0)
+        } else {
+            profile.countThreshold(555).toDouble()
+        }
         val rect = profile.cardRelRect(gridKey, rel, col, row)
         val count = countMatches(frame, rect, GOLD_STRIP)
         val stars = Math.round(count / divisor).coerceIn(0, 5).toInt()
@@ -266,7 +283,7 @@ object VoteJudges {
         val r = obj.getJSONArray("rect")
         val rect = profile.scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3))
         val gold = countMatches(frame, rect.shiftedBy(yShiftFrame), GOLD)
-        if (gold >= Thresholds.PANEL_LOCK_GOLD) return Result(true, gold)
+        if (gold >= profile.countThreshold(Thresholds.PANEL_LOCK_GOLD)) return Result(true, gold)
         // 未锁判定：gold==0 且暗像素>400（深灰图形）——简化为 gold 低即未锁，dark 兜底 P1-b 补
         return Result(false, gold)
     }
@@ -277,7 +294,7 @@ object VoteJudges {
         val r = obj.getJSONArray("rect")
         val rect = profile.scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3))
         val gold = countMatches(frame, rect.shiftedBy(yShiftFrame), GOLD)
-        return Result(gold >= Thresholds.ASTRAL_GOLD, gold)
+        return Result(gold >= profile.countThreshold(Thresholds.ASTRAL_GOLD), gold)
     }
 
     /**

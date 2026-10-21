@@ -488,6 +488,8 @@ internal suspend fun ScanEngine.charChipRowPresent(): Boolean {
         val x1 = profile.scale(arr.getInt(2), profile.scaleX)
         val y0 = profile.scale(arr.getInt(1), profile.scaleY)
         val y1 = profile.scale(arr.getInt(3), profile.scaleY)
+        // ⚠️ 10 是**像素计数**门限（采样步长 3px）⇒ 随 ROI 面积缩（见 ScreenProfile.countScale）。
+        val redMin = profile.countThreshold(10)
         var red = 0
         var y = y0
         while (y < y1) {
@@ -502,7 +504,7 @@ internal suspend fun ScanEngine.charChipRowPresent(): Boolean {
             }
             y += 3
         }
-        red >= 10
+        red >= redMin
     } finally {
         frame.release()
     }

@@ -102,12 +102,17 @@ class BgiRemoteService : IBgiRemoteService.Stub {
     private var frameGuard: com.bettergi.pocket.vd.VdBlackFrameGuard? = null
 
     override fun createDisplay(): Int {
+        // ★ 2026-10-19：VD 统一 1280×720@160（原 2560×1440@240）。尺寸常量取自
+        //   BackgroundSession，避免两处各写一份后再次漂移——本轮就是来修这种漂移的。
+        val w = com.bettergi.pocket.vd.BackgroundSession.WIDTH
+        val h = com.bettergi.pocket.vd.BackgroundSession.HEIGHT
+        val d = com.bettergi.pocket.vd.BackgroundSession.DPI
         val fs = com.bettergi.pocket.vd.VirtualDisplayFrameSource(
-            displayId = -1, width = 2560, height = 1440,
+            displayId = -1, width = w, height = h,
         ).also { it.start() }
         vdFrameSource = fs
         // frameSourceGenerationProbe：fps 估计器经它读代数（KeepAlive 轮询 → estimator）
-        val id = vd().create(2560, 1440, 240, fs.surface()) { fs.frameGeneration() }
+        val id = vd().create(w, h, d, fs.surface()) { fs.frameGeneration() }
         // M5：VD 建成后起黑帧 Guard（服务进程内自守——MAA StaleFrameGuard 机制）。
         // create 失败（id<0）也要起 Guard：它内部靠 isAppOnDisplay 判不出即保守不动作，
         // 等 repin/重建把显示救回来后自然恢复观测。

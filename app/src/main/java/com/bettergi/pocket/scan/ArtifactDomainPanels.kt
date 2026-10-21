@@ -16,6 +16,7 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_FP_GATE_ENABLED
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_FP_WAIT_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_FP_DUP_WAIT_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_FP_POLL_MS
+import com.bettergi.pocket.scan.ScanEngine.Companion.BG_GATE_RECLICK_MAX
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_RAW_DUMP
 import com.bettergi.pocket.scan.ScanEngine.Companion.STAR_GOLD_THRESHOLD
 import com.bettergi.pocket.scan.ScanEngine.Companion.STOP_REASON_MATERIAL
@@ -321,12 +322,40 @@ internal suspend fun ScanEngine.parsePanel(
         val fp0 = PanelFingerprint.capture(frame, fpRects)
         if (fp0 != null && PanelFingerprint.same(fp0, panelFpSnapshot)) {
             var waited = 0L
-            while (waited < fpWaitMs) {
+            var bgReclicked = 0
+            while (true) {
+                // ★ #317（后台补偿）：指纹等了 [fpWaitMs] 仍与上一格相同 —— 后台 VD 帧是内容驱动，
+                //   点击可能还没被游戏消化。此时**同坐标重击一次**（幂等）再等一轮，而不是直接
+                //   按原样解析（那会读到上一格的旧件）。r5 实证：「空读格回读」重点击后能读对。
+                //   仅后台启用（[backgroundFrameCompensation]），且坐标有效、重击未超上限。
+                if (waited >= fpWaitMs) {
+                    // ⚠️ r6 实测：列表尾**素材格**（祝圣油膏等非装备）本来就不会弹面板，
+                    //   重击它们纯属白点（r6 page56 连点 5 次）。`vars.stopRequested` 已在
+                    //   本页命中素材停止标识后置位 ⇒ 直接不重击。
+                    val canReclick = backgroundFrameCompensation &&
+                        bgReclicked < BG_GATE_RECLICK_MAX &&
+                        lastCellClickX >= 0 &&
+                        !vars.stopRequested
+                    if (!canReclick) break
+                    bgReclicked++
+                    Log.w(
+                        TAG,
+                        "面板指纹：${fpWaitMs}ms 未变化 ⇒ 后台补偿：同坐标重击 " +
+                            "#$bgReclicked ($lastCellClickX,$lastCellClickY)（page=$curPageNo r${curCellRow}c${curCellCol}）",
+                    )
+                    actions.click(lastCellClickX, lastCellClickY)
+                    waited = 0L
+                    continue
+                }
                 delay(PANEL_FP_POLL_MS)
                 waited += PANEL_FP_POLL_MS
                 val f2 = runCatchingCancellable { settleFrame() }.getOrNull() ?: break
                 val fp2 = PanelFingerprint.capture(f2, fpRects)
                 if (fp2 != null && !PanelFingerprint.same(fp2, panelFpSnapshot)) {
+                    // ⚠️ 2026-10-19 r6 实测否决「变化后加稳定确认」：把放行从「指纹一变」推迟到
+                    //   「变化 + 再确认一拍」会让 138 格（13.5%）都晚 120ms 换帧 ⇒ 整轮节拍整体后移，
+                    //   反而与 BS 的周期吞击窗口对齐 ⇒ 漏件 6 → 30（差 5 倍）。稳定性由后续
+                    //   `空读格回读` + 内容键去重兜底，闸门**只做等待**、不做二次确认。
                     Log.i(TAG, "面板指纹：等 ${waited}ms 后新面板就绪（陈旧帧已修复）⇒ 换用新帧解析")
                     panelFpSnapshot = fp2
                     lastPanelAppeared = true
@@ -779,7 +808,8 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     val panelObj = profile.rawObject(base)
         ?: throw IllegalStateException("parsePanel: profile 缺少 '$base' 节点（面板未标定或 panelKey 拼写错误）")
     val subStatsArr = panelObj.getJSONArray("subStats")
-    val subRects = (0 until subStatsArr.length()).map { i ->
+    // ★ #316：var —— 祝圣 yShift 误判自愈时要整组换回**原位** rects（见 level 段的后备校验）。
+    var subRects = (0 until subStatsArr.length()).map { i ->
         val r = subStatsArr.getJSONArray(i)
         sh(profile.scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3)).shiftedBy(yShift))
     }
@@ -807,6 +837,7 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     val parseRects = listOf(nameRect, mainNameRect, levelRect) + subRects +
         (if (setNameRect != null) listOf(setNameRect) else emptyList()) +
         (if (equippedRect != null) listOf(equippedRect) else emptyList())
+    // ★ #316：MutableList —— 祝圣 yShift 误判自愈时要原位重读并替换 level/subStats 行（见下）。
     val lines = readRoisLabelled(
         ocr,
         frame,
@@ -815,7 +846,7 @@ internal suspend fun ScanEngine.parseArtifactPanel(
         listOf("name", "mainName", "level") + subRects.indices.map { "sub$it" } +
             (if (setNameRect != null) listOf("setName") else emptyList()) +
             (if (equippedRect != null) listOf("equipped") else emptyList()),
-    )
+    ).toMutableList()
 
     // 件名 + 主词条（blank → null，保持原单槽 readLines 语义）
     val pieceName = lines.getOrNull(0)?.takeIf { it.isNotBlank() }?.let { StatParser.clean(it) }
@@ -827,15 +858,59 @@ internal suspend fun ScanEngine.parseArtifactPanel(
         Log.i(TAG, "面板原文: " + lines.joinToString(" | ") { it })
     }
 
-    // 等级（祝圣面板 yShift）；下标 2 = name(0) 之后（slot/mainValue 槽已删）
-    val levelText = lines.getOrNull(2)?.takeIf { it.isNotBlank() }
-    val parsedLevel = levelText?.let { StatParser.extractValue(it)?.toInt() }
+// 等级（祝圣面板 yShift）；下标 2 = name(0) 之后（slot/mainValue 槽已删）
+    var levelText = lines.getOrNull(2)?.takeIf { it.isNotBlank() }
+    var parsedLevel = levelText?.let { StatParser.extractValue(it)?.toInt() }
+
+    // ★★ #316（2026-10-19）yShift 后备校验：crafted 误判的自愈路径 ★★
+    //   误判链：上一格祝圣横幅未褪尽的过渡帧让 zhusheng 投票误报 ⇒ 本格被当作祝圣件
+    //   施加 yShift ⇒ 整组 ROI 下移恰好一行（zhushengYShiftFrame 每档都==副词条行距）
+    //   ⇒ level 徽标位读到上一行残留（如「·暴击」）、首条副词条丢失 ⇒ 身份键变化计为漏件。
+    //   校验：**施加了 yShift 且 level 读不出**时，在**未移位**的 level ROI 补一次单槽读——
+    //   读得出数字 ⇒ 本格根本不是祝圣件（移位错了），回退 yShift=0 用原位 ROI 重读整块。
+    //   真祝圣件不受影响：移位后 level 恰好落在真徽标上（yShift 就是为此标定的），不会进此分支。
+    //   开销：仅「误判格」触发一次单槽 rec（scaledW≈97px，最便宜的槽）；正常格零开销。
+    if (yShift > 0 && parsedLevel == null && pieceName != null) {
+        val unshiftedLevel = runCatchingCancellable {
+            ocr.readRois(frame, listOf(sh(profile.rect("$base.level"))))
+        }.getOrNull()?.firstOrNull()?.takeIf { it.isNotBlank() }
+        val unshiftedParsed = unshiftedLevel?.let { StatParser.extractValue(it)?.toInt() }
+        if (unshiftedParsed != null) {
+            Log.w(
+                TAG,
+                "祝圣 yShift 疑似误判 ⇒ 回退原位重读（page=$curPageNo r${curCellRow}c${curCellCol} " +
+                    "件=${pieceName ?: "?"} 移位后 level 原文=${levelText ?: "-"} ⇒ 原位读出 $unshiftedParsed）",
+            )
+            // 原位重读 level + 副词条整块（yShift=0 的 rects）
+            val unshiftedSubRects = (0 until subStatsArr.length()).map { i ->
+                val r = subStatsArr.getJSONArray(i)
+                sh(profile.scaleRect(r.getInt(0), r.getInt(1), r.getInt(2), r.getInt(3)))
+            }
+            val retryRects = listOf(sh(profile.rect("$base.level"))) + unshiftedSubRects
+            val retryLines = runCatchingCancellable { ocr.readRois(frame, retryRects) }.getOrNull()
+            if (retryLines != null) {
+                levelText = retryLines.getOrNull(0)?.takeIf { it.isNotBlank() }
+                parsedLevel = levelText?.let { StatParser.extractValue(it)?.toInt() }
+                // 副词条行替换进 lines（下标 3.. = level 之后的 subStats 行）
+                for (i in 0 until (subStatsArr.length().coerceAtMost(4))) {
+                    val newText = retryLines.getOrNull(1 + i)
+                    if (newText != null) {
+                        val idx = 3 + i
+                        if (idx < lines.size) lines[idx] = newText
+                    }
+                }
+                // 判据 ROI 同步换原位（substatRowPending 读的是这个 rects）
+                subRects = unshiftedSubRects
+            }
+        }
+    }
+
     if (parsedLevel == null && pieceName != null) {
         // 有件名却读不出等级 ⇒ 和「读对一个 0 级件」在导出里长得一模一样（0 会一路喂进 RollSolver
         // 的 vars.level），必须出声。只在件名非空时报，避免最后一夜半空格的空读格刷屏。
         Log.w(
             TAG,
-            "artifact level 读不出 ⇒ 回退 0（page=$curPageNo r${curCellRow}c$curCellCol " +
+            "artifact level 读不出 ⇒ 回退 0（page=$curPageNo r${curCellRow}c${curCellCol} " +
                 "件=${pieceName ?: "?"} 字段=level 原文=${levelText ?: "-"}）",
         )
     }
@@ -868,7 +943,7 @@ internal suspend fun ScanEngine.parseArtifactPanel(
     //   截断后缀既不污染数值也不与颜色判据冲突（2244 档短标签行一直如此，实测无害）。
     val judgedSubLines = (0 until subRects.size).map { i ->
         val t = lines.getOrNull(3 + i).orEmpty()
-        if (t.isBlank()) t else when (VoteJudges.substatRowPending(frame, subRects[i])) {
+        if (t.isBlank()) t else when (VoteJudges.substatRowPending(frame, subRects[i], profile)) {
             true -> if (t.contains("待激活")) t else "$t（待激活）"
             else -> t
         }
@@ -1021,7 +1096,7 @@ internal suspend fun ScanEngine.parseArtifactPanel(
             for (i in rollIn.indices) {
                 val t = retryTexts.getOrNull(i).orEmpty()
                 if (t.isBlank()) continue
-                val line = if (VoteJudges.substatRowPending(frame, subRects[i]) == true && !t.contains("待激活")) "$t（待激活）" else t
+                val line = if (VoteJudges.substatRowPending(frame, subRects[i], profile) == true && !t.contains("待激活")) "$t（待激活）" else t
                 val parsed = StatParser.parse(line, names) ?: continue
                 // ★ #269：重裁候选必须过**和首读同一个**档位吸附，否则两个候选口径不同：
                 //   首读那条在 :941 已被 `snapSubstats` 吸到 rollTable 格点（容差 SNAP_TOL=0.06），
@@ -1272,6 +1347,9 @@ internal fun ScanEngine.readManageIcons(frame: Mat) {
     val pm = profile.rawObject("panels.artifact_manage") ?: return
     val lock = pm.optJSONObject("lockChip")?.optJSONArray("roi")
     val star = pm.optJSONObject("starChip")?.optJSONArray("roi")
+    // ⚠️ 150/100 是**像素计数**门限（采样步长 2px）⇒ 随 ROI 面积缩（见 ScreenProfile.countScale）。
+    val lockMin = profile.countThreshold(150)
+    val starMin = profile.countThreshold(100)
     if (lock != null && lock.length() >= 4) {
         var red = 0
         var y = profile.scale(lock.getInt(1), profile.scaleY)
@@ -1287,8 +1365,8 @@ internal fun ScanEngine.readManageIcons(frame: Mat) {
             }
             y += 2
         }
-        vars.locked = red > 150
-        Log.i(TAG, "manage lockChip: red=$red → locked=${vars.locked}")
+        vars.locked = red > lockMin
+        Log.i(TAG, "manage lockChip: red=$red (min=$lockMin) → locked=${vars.locked}")
     }
     if (star != null && star.length() >= 4) {
         var gold = 0
@@ -1305,8 +1383,8 @@ internal fun ScanEngine.readManageIcons(frame: Mat) {
             }
             y += 2
         }
-        vars.favorited = gold >= 100
-        Log.i(TAG, "manage starChip: gold=$gold → favorited=${vars.favorited}")
+        vars.favorited = gold >= starMin
+        Log.i(TAG, "manage starChip: gold=$gold (min=$starMin) → favorited=${vars.favorited}")
     }
 }
 
@@ -1331,7 +1409,12 @@ internal fun ScanEngine.cellFingerprintRect(
     prof.scaleRect(cx - 36, cy - 36, cx + 36, cy + 36)
 }.getOrNull()
 
-/** 星带逐格采样：格内金像素>100 → 该星点亮（profiles starBand.judge 固化阈值）。星带不随祝圣 yShift 移动。 */
+/** 星带逐格采样：格内金像素>100 → 该星点亮（profiles starBand.judge 固化阈值）。星带不随祝圣 yShift 移动。
+ *
+ * ⚠️ 阈值是**像素计数**、格子随档缩 ⇒ 必须过 [ScreenProfile.countThreshold]。
+ *   （profile 里的 `goldThreshold` 只有 2560 档写过 200，而代码一直以 100 为准——
+ *   本函数沿用 100 作标定档值，不再读那个键，免得两个真相。）
+ */
 internal fun ScanEngine.countStars(
     frame: Mat,
     panelKey: String = "artifact_backpack",
@@ -1339,6 +1422,7 @@ internal fun ScanEngine.countStars(
 ): Int {
     val band = profile.rawObject("panels.$panelKey")?.optJSONObject("starBand")
         ?: return 0
+    val threshold = profile.countThreshold(STAR_GOLD_THRESHOLD)
     val y0 = band.getJSONArray("y").getInt(0)
     val y1 = band.getJSONArray("y").getInt(1)
     val x0 = band.getInt("x0")
@@ -1355,7 +1439,7 @@ internal fun ScanEngine.countStars(
             right = profile.scale(baseX + cell, profile.scaleX) - origin.x,
             bottom = bottom - origin.y,
         )
-        if (VoteJudges.countMatches(frame, rect, VoteJudges.GOLD) > STAR_GOLD_THRESHOLD) count++
+        if (VoteJudges.countMatches(frame, rect, VoteJudges.GOLD) > threshold) count++
     }
     return count
 }

@@ -1030,6 +1030,9 @@ internal suspend fun ScanEngine.visitClick(
         Log.i(TAG, "visit cell($col,$row) idx=$index 已在解析阶段点过 ⇒ 跳过重复点击")
         true
     } else if (useTapForCell) actions.tap(cx, cy) else actions.click(cx, cy)
+    // ★ #317：记录本格点击坐标 —— parsePanel 指纹闸门「等满未变」时同坐标重击用（后台补偿）。
+    lastCellClickX = cx
+    lastCellClickY = cy
     Log.i(TAG, "visit cell($col,$row) idx=$index click=($cx,$cy) ok=$clickOk")
     // ⚠️ 收敛帧必须在**所有**退出路径上都是"点击后"的新帧。
     //   2026-09-12 踩过：把抓帧挪进 confirm 回调 ⇒ helper 走「未变兜底」退出时

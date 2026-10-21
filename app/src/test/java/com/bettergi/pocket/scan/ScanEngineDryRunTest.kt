@@ -1327,6 +1327,9 @@ class ScanEngineDryRunTest {
             "profiles.json" to 7,
             "profiles_2560x1440.json" to 6,
             "profiles_2244x1080.json" to 7,
+            // ★ 2026-10-19：1280x720 由 2560 换算 ⇒ 列数同 2560（同 16:9 布局，
+            //   6 列的理由也同：第 7 列同样压在详情面板左缘下 = 幻影格）。
+            "profiles_1280x720.json" to 6,
         )
         for ((t, wantCols) in expectedCols) {
             val grids = JSONObject(File(assetsDir(), t).readText()).getJSONObject("grids")

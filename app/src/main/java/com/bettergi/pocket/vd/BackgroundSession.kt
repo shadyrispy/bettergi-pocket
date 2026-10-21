@@ -21,9 +21,9 @@ import com.bettergi.pocket.shizuku.BgiRemoteManager
  * 一个实例对应一次后台会话；会话结束必须 stop（服务端 KeepAlive/Guard 有状态）。
  */
 class BackgroundSession(
-    private val width: Int = 2560,
-    private val height: Int = 1440,
-    private val dpi: Int = 240,
+    private val width: Int = WIDTH,
+    private val height: Int = HEIGHT,
+    private val dpi: Int = DPI,
 ) {
 
     companion object {
@@ -46,6 +46,23 @@ class BackgroundSession(
 
         private const val TAG = "BetterGI.VD"
         private const val GAME = "com.miHoYo.Yuanshen"
+
+        /**
+         * ★ 2026-10-19 定档：后台模式虚拟屏**统一 1280×720@160**（此前 2560×1440@240）。
+         *
+         * 为什么降档：
+         * - 华为 Kirin 970 上 2560×1440 的 VD 渲染把整机拖到 **25+ 分钟**才出首帧（实测）；
+         * - 1280×720 与 2560×1440 同为 16:9、比例恰 0.5 ⇒ 有 `profiles_1280x720.json` 可换算，
+         *   不需要 3200(20:9)→16:9 那种两轴不等比的致命换算；
+         * - 预览窗宽高比固定 16:9，在竖屏管理页里按宽度铺满即可（黑边来源见布局注释）。
+         *
+         * ⚠️ 改这两个数 = 换档：`profiles_1280x720.json` 的所有坐标都要跟着复核
+         *   （生成器 dsl/scripts/gen_profiles_1280x720.py，含实测回灌口）。
+         */
+        const val WIDTH = 1280
+        const val HEIGHT = 720
+        const val DPI = 160
+
         /** 顶层查询的 AIDL 失败重试（判不出时的保守口径由 probe 决定）。 */
         private const val TOP_QUERY_MAX_FAILS = 3
     }

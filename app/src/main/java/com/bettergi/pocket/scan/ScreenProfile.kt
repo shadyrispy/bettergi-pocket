@@ -111,6 +111,42 @@ class ScreenProfile(
     val scaleY: Double get() = frameHeight.toDouble() / baseHeight
 
     /**
+     * 像素**计数**阈值缩放（`countScale`，缺省 1.0）。
+     *
+     * 为什么需要它：判据里有一批「在这个 ROI 里数出多少个目标像素」的门限
+     * （`PANEL_LOCK_GOLD=40`、`ASTRAL_GOLD=400`、manage 图标的 150/100 …）。它们是**绝对像素数**，
+     * 而 ROI 本身随分辨率缩放 —— 线性缩小 k ⇒ **面积 k²** ⇒ 同一图案数出的像素数也 k²。
+     * 只改坐标不改这些门限，小档上判据会静默失效（"已锁"永远读成未锁），且不报错。
+     *
+     * 取值口径：= (本档线性比例)²，即相对**该门限的标定档**（本批常量几乎全在 3200/2560 量出，
+     * 两者面板层同为 1440 高）。1280×720 profile 写 0.25；既有三档无此键 ⇒ 1.0 ⇒ **逐位保持现行为**。
+     */
+    val countScale: Double
+        get() = root.optDouble("countScale", 1.0).takeIf { it > 0.0 } ?: 1.0
+
+    /** 标定档的计数门限 [base] → 本档等效门限（≥1，避免小档把门限压到 0 后"人人通过"）。 */
+    fun countThreshold(base: Int): Int =
+        if (countScale == 1.0) base else Math.round(base * countScale).toInt().coerceAtLeast(1)
+
+    /**
+     * 本档相对**判据标定档**的**线性**比例（`lengthScale`，缺省 1.0）。
+     *
+     * 与 [scaleX]/[scaleY] 的分工必须分清，混用就是静默错位：
+     * - [scaleX]/[scaleY] = 帧 ÷ **本档 profile 的 base**。专属档 base==帧 ⇒ 恒 1.0，
+     *   于是「按基准档 px 写死的判据常量」在专属档上**完全不缩放**（存量三档都这样）；
+     * - 本值 = 帧相对**常量标定档**（3200/2560，同为 1440 高）的比例。专为那批常量而设：
+     *   判据常量（窗口/带宽容差…）在源码里按 1440 高档的帧像素写死，小档必须按本值缩。
+     */
+    val lengthScale: Double
+        get() = root.optDouble("lengthScale", 1.0).takeIf { it > 0.0 } ?: 1.0
+
+    /**
+     * 判据常量（标定档帧 px）→ 本档帧坐标长度。**保留原有 scaleY 通路**，只多乘一层 [lengthScale]：
+     * 专属档（lengthScale=1）与回落到基准档的路径都逐位不变，只有新档生效。
+     */
+    fun length(base: Int): Int = scale(Math.round(base * lengthScale).toInt(), scaleY)
+
+    /**
      * 祝圣 yShift（帧像素，crafted 时作用于 level/lock/astral/sub1-4）。
      *
      * ⚠️ **作用范围就是这 4 类，一个都别多加**（用户 2026-09-16 定稿）：祝圣横幅只把**横幅以下**

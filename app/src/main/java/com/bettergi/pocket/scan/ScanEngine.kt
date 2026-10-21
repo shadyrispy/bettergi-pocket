@@ -108,7 +108,21 @@ class ScanEngine(
      * 对同包名的登录页无效（详见 `ScreenStateJudge` 顶部"为什么画面判据不够"）。
      */
     internal val sdkLoginOnTop: (() -> Boolean?)? = null,
-    /** 翻 N 页早停（调试翻页准确性用；默认不限制）。 */
+    /**
+     * ★ #317（2026-10-19）：**后台模式（VD）帧新鲜度补偿开关**。
+     *
+     * 只有后台模式置 true（由 ScriptRunner 按本轮装配写入，见 applyAssembly/ScanEngine 构造）。
+     * 前台投影是**常驻帧流**（游戏每渲染一帧就推一帧）⇒「点击已消化」≡「下一帧必到」，
+     * 帧指针天然同步；后台 VD 的 ImageReader 是**内容驱动**（只有合成出新内容才回调）
+     * ⇒ 点击注入与游戏渲染之间没有同步点，偶发抓到旧帧/过渡帧。
+     *
+     * 开启后两处闸门加固（均只在后台生效，前台逐位不变）：
+     * ① 指纹闸门「等满未变」不再直接按原样解析，而是**重发同坐标点击**（幂等）再等一轮；
+     * ② 指纹闸门放行条件从「指纹变了」收紧到「变了且下一拍仍稳定」（治半渲染过渡帧）。
+     */
+    internal val backgroundFrameCompensation: Boolean = false,
+    /**
+     * 翻 N 页早停（调试翻页准确性用；默认不限制）。 */
     internal val maxPages: Int = Int.MAX_VALUE,
     /** 单测注入真实时钟用：JVM 里 SystemClock 被 returnDefaultValues 恒返回 0（会挂死轮询）。 */
     internal val clock: () -> Long = { SystemClock.elapsedRealtime() },
@@ -759,6 +773,15 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
     /** 当前格的行/列（供跨页 identity 比对）。 */
     internal var curCellRow: Int = -1
     internal var curCellCol: Int = -1
+
+    /**
+     * ★ #317：最近一次格点击的**帧坐标**（visitClick 写入）。
+     * 供 [parsePanel] 的指纹闸门在「等满未变」时**同坐标重击**（幂等，见
+     * [backgroundFrameCompensation]）。-1 = 本格未点过（snap/rosterFind 等非 pagedGrid 路径）
+     * ⇒ 闸门不做重击。
+     */
+    internal var lastCellClickX: Int = -1
+    internal var lastCellClickY: Int = -1
     /**
      * ★★ 本页 **idx → identity** 表（定长语义，每页清空）★★
      * ⚠️ 2026-09-17 修 bug：此前用 `pageIdentities`（**可变长**收集数组）保存跨页比对用的身份串，
@@ -2164,6 +2187,28 @@ fun click(x: Int, y: Int, durationMs: Long = 50L): Boolean
         /** 位移搜索窗（条带位置 ± px）：相邻帧位移有限，无需全屏搜索（也降低孪生峰概率）。 */
         const val ANCHOR_SETTLE_WINDOW_PX = 64
         const val PANEL_FP_POLL_MS = 120L
+
+        /**
+         * ★ #316（2026-10-19）：祝圣横幅「双帧裁决」的复投等待（ms）。
+         *
+         * 首投紫横幅命中后，等这一拍再抓帧复投：真祝圣件横幅恒在（复投仍命中）；
+         * 上一格祝圣件的**残留横幅**在新面板渲染的这一拍内褪去（复投消失 ⇒ 判非祝圣）。
+         * 取 [PANEL_FP_POLL_MS] 同拍长——面板指纹闸门的实测值，即「新面板渲染完成」的
+         * 典型节奏；r4 全量实测该路径仅 2.4% 格子触发 ⇒ 总开销 ≈3s/轮（0.6%）。
+         */
+        const val ZHUSHENG_CONFIRM_POLL_MS = PANEL_FP_POLL_MS
+
+        /**
+         * ★ #317（2026-10-19）：后台模式指纹闸门「等满未变 ⇒ 重击一次」的重发次数上限。
+         *
+         * 只作用于 [ScanEngine.backgroundFrameCompensation]（后台 VD）。语义与既有的
+         * [CLICK_RETRY_MAX_ON_NOCHANGE]（BS 吞击窗口修法）同族：同坐标重发**幂等**，最坏
+         * 重读同一张卡、被 contentKey 去重吸收。取 1：r5 实测「等满未变」全轮仅 6 次
+         * （1017 格的 0.6%），重发一轮 ≈ +400ms/格；真冻结格（列表尾素材格）重发后仍不变，
+         * 照旧按原样解析 —— 保底不劣化。
+         */
+        const val BG_GATE_RECLICK_MAX = 1
+
 
         /**
          * 面板指纹闸门**总开关（true = 已接入；卡格指纹条件化后不会再白等）**。

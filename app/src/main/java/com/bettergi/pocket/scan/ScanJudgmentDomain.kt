@@ -19,6 +19,7 @@ import com.bettergi.pocket.scan.ScanEngine.Companion.LOCK_PRESS_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.PANEL_CHANGE_WAIT_MAX_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.REVISIT_BACKOFF_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SETTLE_LOCK_BUDGET_MS
+import com.bettergi.pocket.scan.ScanEngine.Companion.ZHUSHENG_CONFIRM_POLL_MS
 import com.bettergi.pocket.scan.ScanEngine.Companion.SIG_BLOCKS_FINE_X
 import com.bettergi.pocket.scan.ScanEngine.Companion.SIG_BLOCKS_FINE_Y
 import com.bettergi.pocket.scan.ScanEngine.Companion.SIG_BLOCKS_X
@@ -1471,9 +1472,40 @@ internal suspend fun ScanEngine.vote(
             // panel 类判据：详情面板固定位置，用原始 profile（不随网格相位偏移）
             "artifact.panel.zhusheng" -> {
                 val zr = VoteJudges.panelZhusheng(frame, profile)
+                // ★ 双帧裁决（2026-10-19 #316）：单帧紫横幅投票区分不了「真祝圣件」与
+                //   「上一格祝圣横幅未褪尽的过渡帧」——r4 全量实测两者命中分布完全相同
+                //   （真祝圣 23 格 hits=(6,7,5)/25，唯一误报格也是 (6,7,5)）⇒ 调 ratio 无解。
+                //   区别在**时间维**：真祝圣横幅恒在；残留横幅会随新面板渲染褪去。
+                //   ⇒ 首投命中后等一拍重抓复投，第二帧紫色消失 = 残留 ⇒ 判 false。
+                //   开销：仅 2.4% 格子触发（首投命中才复投）× ~122ms ≈ 全轮 3s（0.6%）。
+                //   实证链：误报格 L506 施加 yShift 后 level 读到「·暴击」、首条副词条丢失
+                //   ⇒ 身份键变化被计为漏件（1280bg 漏4 / 2560bg 漏4 同签名）。
+                val verdict = if (!zr.matched) {
+                    zr
+                } else {
+                    delay(ZHUSHENG_CONFIRM_POLL_MS)
+                    val f2 = runCatchingCancellable { settleFrame() }.getOrNull()
+                    if (f2 == null) {
+                        Log.w(TAG, "vote zhusheng: 复投票不可用 ⇒ 维持首投（保守：真祝圣件不受影响）")
+                        zr
+                    } else {
+                        try {
+                            val zr2 = VoteJudges.panelZhusheng(f2, profile)
+                            if (zr.matched && !zr2.matched) {
+                                Log.i(TAG, "vote zhusheng: 双帧裁决首投命中、复投消失 ⇒ 判残留横幅（非祝圣）hits ${zr.count}→${zr2.count}")
+                            }
+                            zr2
+                        } finally {
+                            f2.release()
+                        }
+                    }
+                }
                 // 诊断：命中数 + 三点采样（排查"祝圣件没被识别"用；GT 实测本账号 20 件 elixerCrafted）
-                Log.i(TAG, "vote zhusheng matched=${zr.matched} hits=${zr.count}（≥${VoteJudges.Thresholds.BANNER_POINTS_REQUIRED}/3 且紫占比>${VoteJudges.Thresholds.BANNER_PURPLE_RATIO}）col=$col row=$row")
-                sink.crafted = zr.matched
+                // ⚠️ 占比门槛打 zone 实际生效值（profile ratio，如 2560/1280=0.15、2244=0.6）——
+                //   原先打 Thresholds.BANNER_PURPLE_RATIO(0.6)，而判定走的是 zone ratio ⇒
+                //   历史日志里「紫占比>0.6」全是误导显示（判定本身一直正确）。
+                Log.i(TAG, "vote zhusheng matched=${verdict.matched} hits=${verdict.count}（≥${VoteJudges.Thresholds.BANNER_POINTS_REQUIRED}/3 且紫占比>${profile.zone("artifact.panel.zhusheng")?.optDouble("ratio", VoteJudges.Thresholds.BANNER_PURPLE_RATIO) ?: VoteJudges.Thresholds.BANNER_PURPLE_RATIO}）col=$col row=$row")
+                sink.crafted = verdict.matched
             }
             "artifact.panel.lock" -> {
                 // 双区判定：同一单件名可普通(锁徽 y)/祝圣(锁徽 y+shift)两种面板（2560 实测 744 vs 808），

@@ -411,6 +411,9 @@ class ScriptRunner(
                     profile = profile,
                     frameSource = activeFrameSource,
                     actions = timedActions, // 只读计时装饰器（委托 actions，行为不变）
+                    // ★ #317：后台（VD）帧新鲜度补偿开关 —— activeActions 非空即本轮是后台装配
+                    //   （见 applyAssembly，前台恒 null）。只作用于 parsePanel 指纹闸门两处加固。
+                    backgroundFrameCompensation = activeActions != null,
                     ocr = OcrGatewayImpl(),
                     names = names,
                     // #105：玩家自定义昵称（管理器页填，账号相关 ⇒ 每次起扫现读，不做进程内缓存）
